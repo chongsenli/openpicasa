@@ -1,12 +1,25 @@
-# picasa-rust
+# OpenPicasa
 
-用 Rust 1:1 复刻 Google Picasa 的桌面照片管理器。
+用 Rust 写的桌面照片管理器，**界面与交互对齐 Google Picasa 3.9**，但**数据格式完全自立**——不读、不写、不解析 `.picasa.ini`。
 
-- **基准版本**：Picasa 3.9（Windows 最终版）为功能与交互的 1:1 基准。
-- **当前阶段目标（M1）**：**在 Apple Silicon（M 系列）Mac 上安装一个能跑起来的 Picasa 界面复刻版，用于浏览照片。**
-- **M1 目标平台**：仅 macOS 14+ / arm64。Windows / Linux / Intel Mac 在 M3。
+一句话说明它与 Picasa 的关系：**像，但不通。**
+视觉布局、栅格密度、操作手感、快捷键向 3.9 靠拢；而照片库用什么格式记，是我们自己的事。
 
-> ### 📌 先读这条：M1 分期策略
+- **界面基准**：Picasa 3.9（Windows 最终版）——仅作视觉与交互参照，不追求数据互通。
+- **当前阶段目标（M1）**：**在 Apple Silicon（M 系列）Mac 上安装一个能跑起来的 OpenPicasa，用于浏览照片。**
+- **M1 目标平台**：仅 macOS 14+ / arm64。Windows / Linux / Intel Mac 在 M3 之后。
+
+> ### 📌 先读这条：产品定位与三层承诺
+>
+> | | 内容 |
+> | --- | --- |
+> | ✅ **承诺** | 界面布局、栅格密度、交互手感、快捷键与 Picasa 3.9 对齐 |
+> | ✅ **承诺** | **照片目录零写入**——不创建、不修改、不删除、不改权限、不改 mtime 任何文件 |
+> | ❌ **不承诺** | `.picasa.ini` 兼容、与原版数据互通、读取原版的编辑/星标/说明 |
+>
+> 第三行不是「暂时没做」，是**产品定义本身**。如果有人期待「装上就能看到我原来的星标」，那是对本项目的误解。
+
+> ### 📌 M1 分期策略
 >
 > **M1 = 界面复刻 + 浏览；M2 = 编辑内核；M3 = 长尾与跨平台。**
 >
@@ -51,7 +64,7 @@
 
 > ## 不装 rustup，本项目的**一切讨论都是纸上谈兵**。
 >
-> **这不是「无法编译验证」那么轻。** 本项目 M1 的**唯一交付物是一个能双击运行的 `Picasa.app`**。没有 `cargo`，就没有 `.app`；没有 `.app`，就没有任何可演示的东西。文档写得再完整、评审开得再多，**屏幕上一个像素都产不出来**。
+> **这不是「无法编译验证」那么轻。** 本项目 M1 的**唯一交付物是一个能双击运行的 `OpenPicasa.app`**。没有 `cargo`，就没有 `.app`；没有 `.app`，就没有任何可演示的东西。文档写得再完整、评审开得再多，**屏幕上一个像素都产不出来**。
 >
 > 当前状态（2026-10-27 实测）：`cargo` / `rustc` / `rustup` / `~/.cargo` **全部不存在**。
 >
@@ -153,10 +166,12 @@ rustup target add aarch64-apple-darwin
 
 > 这是**目录与 Cargo 配置的规划**，不是已生成的项目。实际代码在工具链就绪、方案评审通过后再落地。
 >
-> **M1 的一个重要决策：减少 crate 数量。** v1.x 规划了 9 个 crate，M1 只建 5 个——`picasa-edit`、`picasa-face`、`picasa-ipc`、`picasa-cli` 都不创建。**少一个 crate 就少一处可能出错的地方**，这是降低 M1 风险最直接的手段。
+> **M1 的一个重要决策：减少 crate 数量。** v1.x 规划了 9 个 crate，M1 只建 **4 个**。
+> v3.0 起 `.picasa.ini` 兼容层整体移除，`picasa-ini` crate **已删除**；`picasa-edit`、`picasa-face`、`picasa-ipc`、`picasa-cli` 在 M1 也不创建。
+> **少一个 crate 就少一处可能出错的地方**，这是降低 M1 风险最直接的手段。
 
 ```text
-picasa-rust/
+openpicasa/
 ├── Cargo.toml                 # workspace 根（virtual manifest）
 ├── Cargo.lock                 # 提交进仓库（应用型项目）
 ├── rust-toolchain.toml
@@ -173,16 +188,15 @@ picasa-rust/
 ├── packaging/                 # 🆕 macOS 打包
 │   ├── Info.plist             # 模板
 │   ├── bundle.sh              # cargo-bundle + PlistBuddy + codesign
-│   └── Picasa.iconset/        # 图标源（16..1024）
+│   └── OpenPicasa.iconset/        # 图标源（16..1024）
 ├── crates/
 │   ├── picasa-db/             # ✅ M1：SQLite 索引 + 缩略图 BLOB + 迁移（叶子 crate）
-│   ├── picasa-db/             # ✅ M1：SQLite 索引与缩略图
 │   ├── picasa-imaging/        # ✅ M1：解码 + Orientation + 缩略图（无效果算子）
 │   ├── picasa-core/           # ✅ M1：扫描/监视/库会话/选择集/搜索/任务队列
 │   ├── picasa-ui/             # ✅ M1：eframe 应用（五区面板 + 栅格 + 查看器）
 │   │   └── src/
 │   │       ├── theme.rs       # 配色常量
-│   │       ├── fonts.rs       # 内嵌 Noto SC 子集 + 回退链
+│   │       ├── fonts.rs       # 系统字体（eframe system_fonts）；Plan B 才是内嵌子集
 │   │       ├── grid/          # 虚拟布局 + sticky 头 + 纹理缓存
 │   │       ├── panels/        # toolbar / library_tree / tray / statusbar
 │   │       ├── viewer/        # 暗色全屏查看器
@@ -193,14 +207,14 @@ picasa-rust/
 │   └── picasa-cli/            # ⛔ M1 不创建（M2 调试期）
 ├── assets/
 │   ├── icons/                 # Lucide SVG（ISC）
-│   ├── fonts/                 # Noto Sans SC 3500 字子集（OFL-1.1）
-│   ├── Picasa.icns
+│   ├── fonts/                 # （空：M1 不内嵌字体；仅 Plan B 时放 1500 字子集）
+│   ├── OpenPicasa.icns
 │   ├── models/                # M2
 │   └── geonames/              # M2
 ├── tests/
 │   ├── golden/                # 黄金图片（Git LFS）
 │   └── perf/                  # 性能基准场景脚本
-└── xtask/                     # 打包 / 字体子集生成 / mem-report
+└── xtask/                     # 打包 / mem-report（字体子集生成仅 Plan B 需要）
 ```
 
 ### 根 `Cargo.toml` 关键片段（示例）
@@ -293,10 +307,10 @@ cargo run --release -p picasa-ui
 
 # 2) 构建 .app（M1 的交付物）
 ./packaging/bundle.sh
-# 产物：target/release/bundle/osx/Picasa.app
+# 产物：target/release/bundle/osx/OpenPicasa.app
 
 # 3) 验证签名
-codesign -dv --verbose=2 target/release/bundle/osx/Picasa.app
+codesign -dv --verbose=2 target/release/bundle/osx/OpenPicasa.app
 
 # 4) 质量门禁
 cargo fmt --all -- --check
@@ -310,7 +324,7 @@ cargo nextest run --workspace
 
 > 这一节的内容**必须随 `.app` 一起交付**（01 v3.0 F10-26 要求）。打包时把本节复制为 `Picasa-安装说明.txt` 放进 `.app` 同级目录或 `Contents/Resources/`。
 
-1. 把 `Picasa.app` 拖进「应用程序」文件夹。
+1. 把 `OpenPicasa.app` 拖进「应用程序」文件夹。
 2. **首次打开如果提示「无法打开，因为 Apple 无法验证此 App 是否包含恶意软件」**：
    - 到「应用程序」里**右键点击 Picasa → 打开**，在弹出的对话框里再点一次「打开」；
    - 或打开「系统设置 → 隐私与安全性」，在页面底部找到关于 Picasa 的提示，点「仍要打开」。
@@ -323,7 +337,7 @@ cargo nextest run --workspace
 仍然打不开时，可在「终端」执行：
 
 ```bash
-xattr -d com.apple.quarantine /Applications/Picasa.app
+xattr -d com.apple.quarantine /Applications/OpenPicasa.app
 ```
 
 > ⚠️ **不要**关闭系统完整性保护或全局关闭 Gatekeeper（`spctl --master-disable`）——那是安全风险，我们不建议也不支持。
@@ -337,10 +351,10 @@ macOS 会保护「图片」「桌面」「下载」「文稿」与外接盘。**
 
 ### 卸载
 
-把 `Picasa.app` 拖到废纸篓，然后删除数据目录：
+把 `OpenPicasa.app` 拖到废纸篓，然后删除数据目录：
 
 ```bash
-rm -rf ~/Library/Application\ Support/com.picasarust.app
+rm -rf ~/Library/Application\ Support/app.openpicasa
 ```
 
 （索引与缩略图缓存在那里。删了不影响你的照片原文件。）
