@@ -1,0 +1,35 @@
+# ---- Rust ----
+/target/
+**/*.rs.bk
+*.pdb
+
+# ---- macOS ----
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# ---- 打包产物 ----
+/dist/
+*.dmg
+*.app/
+*.icns
+
+# ---- 本地数据 / 缓存（绝不入库）----
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+/thumbs/
+
+# ---- 界面基准截图（版权原因不入公开仓库，见 docs/01 §11.5.6）----
+# 团队内部通过私有渠道共享；公开仓库只放自绘的基准骨架
+/docs/ui-baseline/*.png
+/docs/ui-baseline/*.jpg
+
+# ---- 临时文件 ----
+*.log
+*.tmp
+*.swp
+.tmp/
