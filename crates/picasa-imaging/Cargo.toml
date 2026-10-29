@@ -1,0 +1,19 @@
+[package]
+name = "picasa-imaging"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "OpenPicasa M1 · 解码 / EXIF Orientation / 缩略图（无任何效果算子）"
+
+# 依赖方向：不依赖 picasa-db（缓存与索引的协调放在 picasa-core，02 §6.2）
+[dependencies]
+image = { workspace = true }
+kamadak-exif = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

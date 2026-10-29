@@ -1,0 +1,77 @@
+# OpenPicasa · Cargo workspace (M1)
+#
+# M1 只建 4 个 crate（见 README「M1 的一个重要决策：减少 crate 数量」）。
+# picasa-edit / picasa-face / picasa-ipc / picasa-cli 在 M1 **不存在** —— 这是红线 R-2 的结构性保证。
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/picasa-db",
+    "crates/picasa-imaging",
+    "crates/picasa-core",
+    "crates/picasa-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+authors = ["OpenPicasa contributors"]
+repository = "https://github.com/chongsenli/openpicasa"
+
+[workspace.dependencies]
+# ---- 数据 / 图像 ----
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "gif",
+    "webp",
+    "tiff",
+    "bmp",
+] }
+kamadak-exif = "0.6"
+rusqlite = { version = "0.41", features = ["bundled"] }
+rayon = "1.12"
+notify = "8.2"
+walkdir = "2.5"
+
+# ---- 通用 ----
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# ---- GUI（M1 的核心）----
+egui = "0.37"
+eframe = { version = "0.37", default-features = false, features = [
+    "wgpu",
+    "persistence",
+    "default_fonts",
+    "system_fonts",
+] }
+egui_extras = "0.37"
+
+# ---- macOS 专有（M1 新增）----
+rfd = "0.17"
+
+# ---- M1 显式不引入 ----
+# rawler / rawloader      (LGPL-2.1, M2)
+# tract-onnx / ort        (M2)
+# little_exif / img-parts (M2，M1 不写元数据)
+# resvg / usvg            (MPL-2.0, M1 用 egui 矢量绘制，见 02 §8.3)
+
+# 注：virtual manifest 不能带 `[features]`（README 的骨架片段是示意）。
+# M1 也没有任何 feature——ini 相关能力已随 crate 删除，没有需要开关的东西。
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"   # 控制 .app 体积（M1-P11 ≤ 30MB）
+
+# 图像处理是计算密集型，debug 下也要跑得动
+[profile.dev.package."*"]
+opt-level = 2

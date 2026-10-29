@@ -1,0 +1,17 @@
+[package]
+name = "picasa-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "OpenPicasa M1 · 自有索引库（SQLite）：schema / 迁移 / 缩略图 BLOB"
+
+# 叶子 crate：不依赖任何其他本地 crate（02 §6.2 的硬规则）
+[dependencies]
+rusqlite = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OpenPicasa · Info.plist 模板（02 §7.2）
+
+  关键项的**为什么**（改之前先看这条）：
+  - CFBundleIdentifier 必须与 picasa_core::paths::BUNDLE_ID 一致（app.openpicasa）。
+    不一致的后果不是报错，而是「TCC 授权与偏好落在另一套容器里」——很难查的静默 bug。
+  - LSMinimumSystemVersion 14.0：M1 只承诺 macOS 14+ / Apple Silicon（01 §0.5）。
+  - NSHighResolutionCapable：Retina 下不设会变糊（F10-10）。
+  - 三个 UsageDescription：macOS 需要对「直接访问」这些目录给出用途说明；
+    通过 NSOpenPanel 选择的目录不弹，但用户如果把照片放在「桌面/文稿/图片」下，
+    系统仍可能要求说明。缺了会被系统**直接拒绝**而且不给理由。
+  - 不加 NSAppTransportSecurity / 网络权限：M1 运行期零联网（F10-07）。
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>OpenPicasa</string>
+    <key>CFBundleDisplayName</key>
+    <string>OpenPicasa</string>
+    <key>CFBundleExecutable</key>
+    <string>OpenPicasa</string>
+    <key>CFBundleIdentifier</key>
+    <string>app.openpicasa</string>
+    <key>CFBundleIconFile</key>
+    <string>OpenPicasa</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__BUILD__</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.photography</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>MIT OR Apache-2.0 · 本项目与原版 Picasa / Google 无关</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>OpenPicasa 需要读取你选择的照片文件夹来生成缩略图。我们只读，不会修改任何文件。</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>OpenPicasa 需要读取你选择的照片文件夹来生成缩略图。我们只读，不会修改任何文件。</string>
+    <key>NSPicturesFolderUsageDescription</key>
+    <string>OpenPicasa 需要读取你选择的照片文件夹来生成缩略图。我们只读，不会修改任何文件。</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>OpenPicasa 需要读取你选择的照片文件夹来生成缩略图。我们只读，不会修改任何文件。</string>
+</dict>
+</plist>

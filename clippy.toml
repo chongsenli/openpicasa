@@ -1,0 +1,17 @@
+# clippy 配置。目的：把「可能引入写文件 / 阻塞主线程 / 静默吞错」的模式禁掉，
+# 与 R-1（照片目录零写入）、R-3（装得上打得开）这些红线对齐。
+
+# 单函数体量上限：超过通常意味着该拆了（egui 绘制函数例外，见各处的 allow）
+too-many-lines-threshold = 200
+
+# 数字字面量下划线：`1_300_000_000` 比 `1300000000` 好读，不强制
+disallowed-methods = [
+    # 照片目录零写入：禁止在库里直接写/删文件，路径操作一律走 AppPaths 或 std::fs 的只读 API
+    { path = "std::fs::remove_dir_all", reason = "R-1：本仓库不允许递归删除任何目录" },
+    { path = "std::fs::remove_file", reason = "R-1：删文件只允许走 trash::move_to_trash（移到废纸篓）" },
+]
+
+disallowed-types = [
+    # 时间一律用 i64 纳秒/秒或 chrono，禁止用本地时区相关的隐式转换类型
+    { path = "std::time::SystemTime", reason = "跨平台序列化不稳定，改用 i64 时间戳" },
+]

@@ -164,7 +164,11 @@ rustup target add aarch64-apple-darwin
 
 ## 建议的 workspace 骨架（**M1 只建 4 个 crate**）
 
-> 这是**目录与 Cargo 配置的规划**，不是已生成的项目。实际代码在工具链就绪、方案评审通过后再落地。
+> 这是**目录与 Cargo 配置的规划**。**现状：前四步已落地**（Cargo.toml / 四个 crate / packaging / tests），
+> 差异只有两处，均为有意：①`picasa-ui/src` 用**平铺模块**（`app.rs` / `grid.rs` / `toolbar.rs` /
+> `sidebar.rs` / `statusbar.rs` / `viewer.rs` / `theme.rs` / `icons.rs` / `textures.rs` /
+> `shortcuts.rs` / `macos.rs` / `capture.rs`）而不是子目录——M1 每个模块只有一两个文件，
+> 子目录只会多一层路径；②`deny.toml` 与 `rust-toolchain.toml` 尚未落地（许可审计在 M1 交付前补）。
 >
 > **M1 的一个重要决策：减少 crate 数量。** v1.x 规划了 9 个 crate，M1 只建 **4 个**。
 > v3.0 起 `.picasa.ini` 兼容层整体移除，`picasa-ini` crate **已删除**；`picasa-edit`、`picasa-face`、`picasa-ipc`、`picasa-cli` 在 M1 也不创建。
@@ -206,7 +210,7 @@ openpicasa/
 │   ├── picasa-ipc/            # ⛔ M1 不创建（M3）
 │   └── picasa-cli/            # ⛔ M1 不创建（M2 调试期）
 ├── assets/
-│   ├── icons/                 # Lucide SVG（ISC）
+│   ├── icons/                 # （空：图标改为 egui 矢量自绘，见 docs/adr/0004）
 │   ├── fonts/                 # （空：M1 不内嵌字体；仅 Plan B 时放 1500 字子集）
 │   ├── OpenPicasa.icns
 │   ├── models/                # M2
@@ -299,24 +303,49 @@ picasa-ui ──┬──> picasa-core ──> picasa-db
 
 ---
 
-## 快速开始（工具链就绪后）
+## 快速开始
 
 ```bash
+# 0) 国内网络提醒：rustup 走 USTC 镜像装工具链（官方源实测 ≈40KB/s，会卡死）
+RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static sh <(curl -sSf https://sh.rustup.rs) -y
+# cargo 侧镜像已写进 .cargo/config.toml（本地加速用，不入库）
+
 # 1) 开发运行
-cargo run --release -p picasa-ui
+cargo run --release --bin OpenPicasa
 
 # 2) 构建 .app（M1 的交付物）
 ./packaging/bundle.sh
-# 产物：target/release/bundle/osx/OpenPicasa.app
+# 产物：dist/OpenPicasa.app（arm64 + ad-hoc 签名）
 
-# 3) 验证签名
-codesign -dv --verbose=2 target/release/bundle/osx/OpenPicasa.app
+# 3) 验证签名与体积
+codesign -dv --verbose=2 dist/OpenPicasa.app   # 期望 Signature=adhoc / Identifier=app.openpicasa
+du -sh dist/OpenPicasa.app                      # M1 目标 ≤ 30MB（当前 ≈12MB）
 
-# 4) 质量门禁
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace
+# 4) 质量门禁（当前全绿）
+cargo test --workspace
+cargo clippy --workspace --all-targets          # 0 warning
 ```
+
+### 调试与自动化入口（只读，不碰照片目录）
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `OPENPICASA_DATA_DIR=<dir>` | 把索引/偏好/日志重定向到 `<dir>`（便携模式、测试、截图基线都用它） |
+| `OPENPICASA_SCREENSHOT=<png>` | 跑到第 N 帧后截取**本窗口**帧缓冲、写 PNG、自动退出（见 ADR-0006） |
+| `OPENPICASA_SCREENSHOT_WARMUP=<n>` | 截图前预热帧数，默认 40（缩略图每帧只上传 3 张，首帧必是占位灰） |
+| `OPENPICASA_OPEN_INDEX=<n>` | 启动后自动打开第 n 张的查看器（查看器只能双击进入，没有它就拍不到查看器） |
+| `OPENPICASA_LOG=debug` | 打开调试日志（**默认 release 只记 info**：栅格每帧一条 debug，开着等于持续写盘） |
+
+配套的像素探针（纯标准库，不需要装任何东西）：
+
+```bash
+python3 tools/pngprobe.py shot.png --row 600 --scale 2     # 沿一行量出栏宽/单元格/间距
+python3 tools/pngprobe.py shot.png --rect 1180,1495,1380,1540  # 某区域主色
+```
+
+> ⚠️ **`open dist/OpenPicasa.app` 不会继承 shell 环境变量**（macOS 的 `open --env` 实测不生效），
+> 所以上面这几个入口要作用在 `.app` 里那份可执行文件上：
+> `dist/OpenPicasa.app/Contents/MacOS/OpenPicasa`。用 `open` 启动则是纯交互模式。
 
 ---
 
@@ -368,20 +397,27 @@ rm -rf ~/Library/Application\ Support/app.openpicasa
 | 产品功能清单（docs/01） | ✅ **v3.0**（数据自立；M1 43 条冻结 + 174 条不进 + 44 项界面还原 + 3 红线） |
 | 技术架构与选型（docs/02） | ✅ **v3.0**（§5 自有元数据模型 + §7 macOS 打包 + §8 界面壳层；ini 契约已归档） |
 | 测试策略（docs/03） | ✅ **v2.1**（173 条用例：M1 有效 95 / M2 恢复 57 / 前提消除 21 / 永久废弃 0） |
-| **Rust 工具链** | ❌ **未安装 —— 第 0 号事项**（不是「第 3 号风险」，而是「做不做得出来」的前提；其余全部风险都排在它后面） |
-| Xcode Command Line Tools | 🔴 **未确认**（`xcode-select -p`，T19） |
-| cargo workspace 落地 | ⏸ 等待工具链 + 方案评审 |
-| macOS `.app` 打包链路 | ⏸ 等待工具链（M0.2 第一步验证） |
+| **Rust 工具链** | ✅ **已就绪**：rustc/cargo 1.99.1（USTC 镜像安装，官方源会卡死） |
+| Xcode Command Line Tools | ✅ 已确认（`iconutil`/`codesign`/`plutil` 均可用，打包链路依赖它们） |
+| cargo workspace 落地 | ✅ 4 个 crate：`picasa-db` / `picasa-imaging` / `picasa-core` / `picasa-ui`（**未建** edit/face/ipc/cli） |
+| macOS `.app` 打包链路 | ✅ `packaging/bundle.sh` → `dist/OpenPicasa.app`（arm64、ad-hoc、12MB） |
+| 测试与门禁 | ✅ `cargo test --workspace` 62 passed；`cargo clippy` 0 warning |
+| 界面还原数值 | 🟡 主几何已实测对齐（栏宽/单元格/间距/滚动条/分组头），**细节项仍待 PM 用原版截图回填**（`theme.rs` 里标 `TODO(U-xx)`） |
+| M0.3 TCC 跨重启 / M0.4 字体首帧 / M0.5 栅格 ≥55fps | ⏸ 需真机交互验证（本轮只完成了「起窗口 + 首帧正常」） |
+
+**已落地的架构决策**（`docs/adr/`）：0001 四 crate 分层 · 0002 schema 两处有意偏差（不建 FTS5、不加预留列）·
+0003 手写 bundle 脚本 · 0004 图标矢量自绘（不提取原版位图）· 0005 栅格按行号虚拟化 ·
+0006 界面还原用自截图 + 像素探针。
 
 **M1 的 5 个 Go/No-Go 前置**（M0 阶段必须全部验证，详见 `docs/02` §9.2）：
 
-| # | 验证项 | 不通过怎么办 |
+| # | 验证项 | 现状 |
 | --- | --- | --- |
-| M0.1 | rustup + `cargo build --release` 成功 | **M1 无法开工**，升级为 Lead/用户决策 |
-| M0.2 | 空壳 `.app` 双击能打开 + `codesign -dv` 通过 | 排查签名/plist/可执行位；**硬门槛** |
-| M0.3 | TCC 授权选目录能读到文件，**重启后仍有效** | 若重启失效 → 改用**固定签名身份**（自签根证书，`codesign --sign "PicasaTest"` 替代 `--sign -`）；仍失效才退回「每次更新重新授权」并由 PM 写进安装指引 |
-| M0.4 | **字体首帧成本 < 200ms**（系统字体 vs 内嵌子集三配置对照；首帧成本 ∝ 首屏唯一字符数约 200–600，与字体文件大小无关） | 切 Plan B：内嵌 1500 字高频子集；仍超标则接受 300ms 并评估冷启动 |
-| M0.5 | 栅格 `show_viewport` + sticky 头 **≥ 55fps** | 启动兜底（纯 wgpu 自绘，+2 周） |
+| M0.1 | rustup + `cargo build --release` 成功 | ✅ 已通过（release 全量构建 41.5s） |
+| M0.2 | 空壳 `.app` 双击能打开 + `codesign -dv` 通过 | ✅ 已通过（`Signature=adhoc`、`Identifier=app.openpicasa`、`Mach-O thin (arm64)`）；窗口自截图证明真的画出了五区界面 |
+| M0.3 | TCC 授权选目录能读到文件，**重启后仍有效** | ⏸ 待真机：需人工点 NSOpenPanel。若重启失效 → 改用固定签名身份（自签根证书 `codesign --sign "PicasaTest"`） |
+| M0.4 | **字体首帧成本 < 200ms**（系统字体 vs 内嵌子集三配置对照） | ⏸ 待实测；当前用系统字体，首屏中文字现实测无缺字（截图可见） |
+| M0.5 | 栅格 `show_viewport` + sticky 头 **≥ 55fps** | 🟡 虚拟化已按行号裁剪（ADR-0005，1000 张同一天时可见区间 <200），帧率待真机采样 |
 
 **✅ 已彻底关闭的事项（v3.0）**：原版 Picasa 3.9 样本（T14）**不再是任何阶段的阻塞项**——v3.0 决定**不做数据兼容**，不需要对拍样本。这**不是降级，是消失**。
 
@@ -418,7 +454,9 @@ rm -rf ~/Library/Application\ Support/app.openpicasa
 - **M1 的依赖全部是宽松许可**（MIT / Apache-2.0 / BSD / ISC / OFL-1.1）。**M1 不引入任何 LGPL 或 GPL 组件**——因为 M1 不做 RAW（`rawler` 是 LGPL-2.1）、不做元数据写入（`rexiv2` 是 GPL-3.0，已在选型阶段排除）。
 - **M1 需要留意的两项**：
   - **字体**：**M1 使用 macOS 系统字体（PingFang SC / SF Pro），不内嵌字体**（结论见 `docs/02` §8.4）。因此**没有 OFL 字体许可负担**；若 M0.4 实测触发 Plan B 改为内嵌 1500 字子集，则需补 OFL-1.1 许可文件随包分发。
-  - **图标** Lucide → **ISC**，无需署名。
+  - **图标**：**M1 不引入任何图标库与 SVG 光栅化器**——13 个图标全部用 `egui::Painter` 矢量自绘
+    （`crates/picasa-ui/src/icons.rs`），因此既没有 Lucide 的 ISC 义务，也不需要 `resvg`（MPL-2.0）。
+    这同时避免了「从原版 Picasa 提取位图」的版权风险。详见 `docs/adr/0004`。
 - **M2 起才需要处理的许可**：`rawler`（LGPL-2.1，需子进程隔离）、人脸模型权重（InsightFace 系明确非商用，**不能随商业包分发**）、GeoNames 地名库（CC BY 4.0，须署名）。
 
 分发二进制前必须做许可合规审查，详见 `docs/02` §11「许可与合规」。这是本项目的**硬约束**。

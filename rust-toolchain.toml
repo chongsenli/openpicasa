@@ -1,0 +1,9 @@
+# 用 stable 渠道而不是写死版本号。
+#
+# 写死 `1.99.1` 会让每个新机器在首次构建时去下载那个具体版本（国内网络下 ≈40KB/s，
+# 实测能卡 18 分钟）。写 `stable` 则「已装了什么就用什么」，没有额外下载。
+# 真正约束下限的是各 crate 的 `rust-version = "1.95"`（edition 2024 的最低要求）。
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

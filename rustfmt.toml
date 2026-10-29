@@ -1,0 +1,6 @@
+# 只保留能稳定生效的选项：unstable_features 在 stable 上会被忽略并告警，
+# 因此 max_width / use_small_heuristics 这类稳定项之外的东西一律不写。
+edition = "2024"
+max_width = 100
+use_field_init_shorthand = true
+use_try_shorthand = true

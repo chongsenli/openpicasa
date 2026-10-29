@@ -1,0 +1,32 @@
+[package]
+name = "picasa-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "OpenPicasa M1 · eframe 应用（五区面板 + 虚拟栅格 + 暗色查看器）"
+
+# 唯一依赖 eframe 的 crate（02 §6.2）
+[lib]
+name = "picasa_ui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "OpenPicasa"
+path = "src/main.rs"
+
+[dependencies]
+picasa-core = { path = "../picasa-core" }
+picasa-db = { path = "../picasa-db" }
+picasa-imaging = { path = "../picasa-imaging" }
+
+egui = { workspace = true }
+eframe = { workspace = true }
+rfd = { workspace = true }
+image = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

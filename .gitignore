@@ -23,10 +23,16 @@ Icon?
 *.sqlite-shm
 /thumbs/
 
-# ---- 界面基准截图（版权原因不入公开仓库，见 docs/01 §11.5.6）----
-# 团队内部通过私有渠道共享；公开仓库只放自绘的基准骨架
+# ---- 界面基准截图 ----
+# 注意：`docs/ui-baseline/*.png` 是**我们自己渲染出来的**截图（不是原版 Picasa 素材），
+# 可以随时用 tools/ 里的方法重新生成（见 docs/ui-baseline/README.md）。
+# 仍然不默认入库，避免每次改主题都产生几十 MB 的二进制 diff；
+# 需要对外展示时用 `git add -f` 单独提交。
 /docs/ui-baseline/*.png
 /docs/ui-baseline/*.jpg
+
+# ---- 本地 cargo 镜像配置（每个开发者环境不同，不入库）----
+/.cargo/
 
 # ---- 临时文件 ----
 *.log

@@ -1,0 +1,156 @@
+//! 缩略图：等比缩放 → 白底合成 → JPEG 编码。
+//!
+//! ## 三条硬规则（对齐 01 U-25 / U-24）
+//!
+//! 1. **等比缩放，不裁切不拉伸**：长边贴合目标，短边留白。
+//! 2. **半透明 PNG 合到白底**：Picasa 的栅格是白底，透明图直接编码 JPEG 会变黑。
+//! 3. **缩略图里不含文件名、不含星标**——那些是 UI 层画的，不是烘焙进图片的。
+
+use crate::{Result, THUMB_T0, decode, orient};
+use image::{RgbaImage, codecs::jpeg::JpegEncoder, imageops};
+use std::path::Path;
+
+/// 缩放后的内存位图（还带着 alpha，编码前才合白底）。
+pub struct ThumbImage {
+    pub img: RgbaImage,
+}
+
+impl ThumbImage {
+    pub fn size(&self) -> (u32, u32) {
+        (self.img.width(), self.img.height())
+    }
+}
+
+/// 等比缩放到「长边 ≤ max_edge」。已经更小的图**不放大**（避免糊）。
+pub fn resize_to_fit(img: &RgbaImage, max_edge: u32) -> RgbaImage {
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return img.clone();
+    }
+    if w <= max_edge && h <= max_edge {
+        return img.clone();
+    }
+    let scale = max_edge as f32 / w.max(h) as f32;
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    // Triangle 比 Lanczos3 快 3-4 倍，缩略图尺寸下肉眼无差；成本花在解码上更值。
+    imageops::resize(img, nw, nh, imageops::FilterType::Triangle)
+}
+
+/// 把 alpha 合到白底，输出 RGB8（JPEG 没有 alpha 通道）。
+pub fn flatten_on_white(img: &RgbaImage) -> image::RgbImage {
+    let mut out = image::RgbImage::new(img.width(), img.height());
+    for (x, y, px) in img.enumerate_pixels() {
+        let a = px[3] as u32;
+        if a == 255 {
+            out.put_pixel(x, y, image::Rgb([px[0], px[1], px[2]]));
+        } else {
+            let blend = |c: u8| -> u8 { (((c as u32) * a + 255 * (255 - a)) / 255) as u8 };
+            out.put_pixel(x, y, image::Rgb([blend(px[0]), blend(px[1]), blend(px[2])]));
+        }
+    }
+    out
+}
+
+/// JPEG 编码（质量 82：缩略图看的是密度与速度，不是无损）。
+pub fn encode_jpeg(img: &RgbaImage, quality: u8) -> Result<Vec<u8>> {
+    let rgb = flatten_on_white(img);
+    let mut buf = Vec::with_capacity(32 * 1024);
+    let mut enc = JpegEncoder::new_with_quality(&mut buf, quality);
+    enc.encode(
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(buf)
+}
+
+/// 从文件直接产出 T0 缩略图字节（扫描/补图的主路径）。
+///
+/// 走「解码 → 摆正 → 缩放 → 合白底 → 编码」五步，**中间不落盘**。
+pub fn thumb_from_file(path: &Path, max_edge: u32) -> Result<(Vec<u8>, u32, u32)> {
+    let img = decode::decode_oriented(path)?;
+    let small = resize_to_fit(&img, max_edge);
+    let (w, h) = (small.width(), small.height());
+    let bytes = encode_jpeg(&small, 82)?;
+    Ok((bytes, w, h))
+}
+
+/// T0 档的便捷入口。
+pub fn thumb_t0(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
+    thumb_from_file(path, THUMB_T0)
+}
+
+/// 只按 Orientation 算「摆正后的尺寸」，不解全图（用于占位框的行高预估）。
+pub fn oriented_size(w: u32, h: u32, orientation: u32) -> (u32, u32) {
+    if orient::orientation_swaps_axes(orientation) {
+        (h, w)
+    } else {
+        (w, h)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    fn solid(w: u32, h: u32, px: [u8; 4]) -> RgbaImage {
+        RgbaImage::from_pixel(w, h, Rgba(px))
+    }
+
+    #[test]
+    fn resize_keeps_aspect_ratio() {
+        let img = solid(4000, 3000, [10, 20, 30, 255]);
+        let out = resize_to_fit(&img, 512);
+        assert_eq!(out.width(), 512);
+        assert_eq!(out.height(), 384); // 4000:3000 = 4:3
+    }
+
+    #[test]
+    fn resize_never_upscales() {
+        let img = solid(100, 80, [1, 2, 3, 255]);
+        let out = resize_to_fit(&img, 512);
+        assert_eq!((out.width(), out.height()), (100, 80));
+    }
+
+    #[test]
+    fn portrait_scales_by_long_edge() {
+        let img = solid(300, 900, [0, 0, 0, 255]);
+        let out = resize_to_fit(&img, 512);
+        assert_eq!((out.width(), out.height()), (171, 512));
+    }
+
+    #[test]
+    fn transparent_becomes_white_not_black() {
+        let img = solid(4, 4, [0, 0, 0, 0]); // 全透明
+        let rgb = flatten_on_white(&img);
+        assert_eq!(rgb.get_pixel(0, 0).0, [255, 255, 255]);
+    }
+
+    #[test]
+    fn opaque_pixels_pass_through() {
+        let img = solid(2, 2, [12, 34, 56, 255]);
+        let rgb = flatten_on_white(&img);
+        assert_eq!(rgb.get_pixel(1, 1).0, [12, 34, 56]);
+    }
+
+    #[test]
+    fn encodes_valid_jpeg() {
+        let img = solid(64, 48, [200, 100, 50, 255]);
+        let bytes = encode_jpeg(&img, 82).unwrap();
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "JPEG magic");
+        // 能被解回来，且尺寸一致
+        let back = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!((back.width(), back.height()), (64, 48));
+    }
+
+    #[test]
+    fn oriented_size_swaps_for_rotations() {
+        assert_eq!(oriented_size(4000, 3000, 1), (4000, 3000));
+        assert_eq!(oriented_size(4000, 3000, 6), (3000, 4000));
+        assert_eq!(oriented_size(4000, 3000, 8), (3000, 4000));
+        assert_eq!(oriented_size(4000, 3000, 3), (4000, 3000));
+    }
+}

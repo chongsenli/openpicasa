@@ -1,0 +1,24 @@
+[package]
+name = "picasa-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "OpenPicasa M1 · 扫描 / 监视 / 库会话 / 选择集 / 搜索 / 缩略图队列"
+
+[dependencies]
+picasa-db = { path = "../picasa-db" }
+picasa-imaging = { path = "../picasa-imaging" }
+
+rayon = { workspace = true }
+notify = { workspace = true }
+walkdir = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+image = { workspace = true }
