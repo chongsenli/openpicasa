@@ -7,7 +7,9 @@
 
 - **界面基准**：Picasa 3.9（Windows 最终版）——仅作视觉与交互参照，不追求数据互通。
 - **当前阶段目标（M1）**：**在 Apple Silicon（M 系列）Mac 上安装一个能跑起来的 OpenPicasa，用于浏览照片。**
-- **M1 目标平台**：仅 macOS 14+ / arm64。Windows / Linux / Intel Mac 在 M3 之后。
+- **M1 目标平台**：仅 macOS 14+ / arm64。Windows / Intel Mac 在 M3 之后。
+  **Linux x86_64 已提前打通**（0.1.0 起可直接构建并产出 .deb，见「快速开始」），
+  但只在 Ubuntu 26.10 上验证过，不作为 M1 的交付承诺。
 
 > ### 📌 先读这条：产品定位与三层承诺
 >
@@ -155,7 +157,7 @@ profile    = "default"
 | **M1 唯一目标**：Apple Silicon Mac | **`aarch64-apple-darwin`** | ✅ **只装这个** |
 | macOS Intel / Universal | `x86_64-apple-darwin` or `lipo` | ⏸ M3 |
 | Windows | `x86_64-pc-windows-msvc` | ⏸ M3 |
-| Linux | `x86_64-unknown-linux-gnu` | ⏸ M3 |
+| Linux | `x86_64-unknown-linux-gnu` | ✅ 可构建（0.1.0 起产出 .deb，见「快速开始」） |
 
 ```bash
 # M1 只需要这一条
@@ -340,6 +342,32 @@ du -sh dist/OpenPicasa.app                      # M1 目标 ≤ 30MB（当前 �
 cargo test --workspace
 cargo clippy --workspace --all-targets          # 0 warning
 ```
+
+### 在 Linux 上构建（x86_64）
+
+M1 的交付物是 macOS 的 `.app`，但代码本身在 Linux 上也能编通（2026-10 起已验证）。
+
+```bash
+# 依赖：构建期一个都不需要装。wayland / xkbcommon / vulkan 这些 GUI 库
+# 全是运行时 dlopen 的，所以不需要 pkg-config，也不需要任何 -dev 包。
+cargo build --release --bin OpenPicasa     # → target/release/OpenPicasa
+./run.sh                                    # 直接启动
+
+# 打成 .deb
+./packaging/make_deb.sh                     # → dist/openpicasa_<version>-1_amd64.deb
+sudo apt install ./dist/openpicasa_0.1.0-1_amd64.deb
+```
+
+三个平台差异要知道：
+
+- **glibc 下限跟着构建机走**。二进制在当前机器的 glibc（2.44）上链接，control 里写的是
+  `Depends: libc6 (>= 2.44)`，**只能装 Ubuntu 26.10+**。要给老发行版用得换更旧的构建环境
+  （容器）或 musl 目标——改 control 里的版本号是没用的，符号就是不够。
+- **数据目录仍按 macOS 惯例**落在 `~/Library/Application Support/app.openpicasa/`，
+  XDG 化排在 M3。属于已知差异，不影响功能。
+- **别把 `TMPDIR` 留在 `/tmp`**：部分发行版把 `/tmp` 挂成 10MB tmpfs，
+  `libsqlite3-sys` 编译 `sqlite3.c` 的中间文件会 ENOSPC（debug profile 带 `-g` 时尤其容易）。
+  `packaging/make_deb.sh` 自己的临时目录也因此放在输出目录旁边而不是 `/tmp`。
 
 ### 调试与自动化入口（只读，不碰照片目录）
 
