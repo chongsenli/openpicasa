@@ -51,8 +51,22 @@ eframe = { version = "0.37", default-features = false, features = [
     "persistence",
     "default_fonts",
     "system_fonts",
+    # ---- Linux 后端（M1 只跑过 macOS，这里补齐；macOS 下这几个 feature 是空操作）----
+    "x11",
+    "wayland",
+    "clipboard",
+    "links",
 ] }
 egui_extras = "0.37"
+
+# ---- Linux 后端 shim ----
+# eframe 的 wayland feature 走的是 egui-winit/wayland → winit/wayland，**不带 dlopen**，
+# 于是 wayland-sys 的 build.rs 会用 pkg-config 去 probe libwayland-client 并静态链接。
+# 在没装 pkg-config / 没有 libwayland-client.so 开发软链的机器上会直接构建失败。
+# winit 的 default 里含 wayland-dlopen + wayland-csd-adwaita：
+# 前者改为运行时 dlopen（不需要开发包），后者提供 Wayland 下的窗口边框。
+# 这里只是为了让 cargo 把 winit 的 default feature 打开（feature 统一），代码里不直接用 winit。
+winit = { version = "0.30", default-features = true }
 
 # ---- macOS 专有（M1 新增）----
 rfd = "0.17"

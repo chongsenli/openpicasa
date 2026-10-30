@@ -23,6 +23,8 @@ picasa-imaging = { path = "../picasa-imaging" }
 egui = { workspace = true }
 eframe = { workspace = true }
 rfd = { workspace = true }
+# 见根 Cargo.toml 的说明：只为打开 winit 的 default feature（wayland-dlopen 等），代码中不使用。
+winit = { workspace = true }
 image = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
