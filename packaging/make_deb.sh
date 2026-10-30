@@ -9,8 +9,9 @@
 #
 # 说明：
 # - 这是 packaging/bundle.sh（macOS 的 .app）在 Linux 侧的对称物。
-# - 图标直接复用 packaging/make_icon.py 的绘制逻辑，但跳过它最后的 iconutil
-#   （macOS 专有），改为输出 hicolor 主题需要的多尺寸 PNG。
+# - 图标优先用 packaging/logo.png（正式品牌图）经 make_icons.py 生成 hicolor
+#   多尺寸 PNG；没有 logo.png 时退回 make_icon.py 的自绘图（跳过其末尾的
+#   iconutil —— macOS 专有）。
 # - 不依赖 cargo-deb / debhelper，只用 dpkg-deb + python3。
 set -euo pipefail
 
@@ -45,8 +46,16 @@ mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/share/applications" "$doc"
 # ---- 1. 二进制 ----
 install -m 755 "$bin" "$root/usr/bin/openpicasa"
 
-# ---- 2. 图标（复用 make_icon.py 的 render/write_png，跳过 iconutil）----
-python3 - "$repo" "$root" <<'PY'
+# ---- 2. 图标 ----
+logo="$repo/packaging/logo.png"
+if [[ -f "$logo" ]]; then
+    # 正式品牌图：白底圆徽标 → 圆形透明遮罩 + 面积平均下采样
+    python3 "$repo/packaging/make_icons.py" --logo "$logo" \
+        --hicolor "$root/usr/share/icons/hicolor"
+else
+    # 兜底：make_icon.py 的 procedural 自绘图（仓库没放 logo.png 时）
+    echo "未找到 packaging/logo.png，退回自绘图标" >&2
+    python3 - "$repo" "$root" <<'PY'
 import importlib.util, os, sys
 repo, root = sys.argv[1], sys.argv[2]
 spec = importlib.util.spec_from_file_location("make_icon", os.path.join(repo, "packaging", "make_icon.py"))
@@ -57,6 +66,7 @@ for s in (16, 24, 32, 48, 64, 128, 256, 512):
     os.makedirs(d, exist_ok=True)
     mi.write_png(os.path.join(d, "openpicasa.png"), s, s, mi.render(s))
 PY
+fi
 chmod 644 "$root"/usr/share/icons/hicolor/*/apps/openpicasa.png
 
 # ---- 3. desktop 入口 ----

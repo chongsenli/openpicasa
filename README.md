@@ -209,12 +209,15 @@ openpicasa/
 ├── packaging/                 # 手写打包（ADR-0003，不用 cargo-bundle）
 │   ├── Info.plist             # 模板
 │   ├── bundle.sh              # cargo build → 组 .app → icns → plutil → codesign
-│   └── make_icon.py           # 纯标准库自绘图标 → iconutil
+│   ├── logo.png               # 品牌图标源图（1024×1024 白底圆徽标）
+│   ├── make_icons.py          # logo.png → 裁圆/透明/多尺寸 PNG（纯标准库）
+│   └── make_icon.py           # .iconset + icns（无 logo.png 时回退自绘）→ iconutil
 ├── crates/
 │   ├── picasa-db/             # ✅ M1：SQLite 索引 + 缩略图 BLOB + 迁移（叶子 crate）
 │   ├── picasa-imaging/        # ✅ M1：解码 + Orientation + 缩略图（无效果算子）
 │   ├── picasa-core/           # ✅ M1：扫描/监视/库会话/选择集/搜索/任务队列
 │   ├── picasa-ui/             # ✅ M1：eframe 应用（五区面板 + 栅格 + 查看器）
+│   │   ├── assets/logo-256.png  # 窗口图标（make_icons.py 从 packaging/logo.png 生成）
 │   │   └── src/
 │   │       ├── theme.rs       # 配色常量
 │   │       ├── fonts.rs       # 系统字体（eframe system_fonts）；Plan B 才是内嵌子集

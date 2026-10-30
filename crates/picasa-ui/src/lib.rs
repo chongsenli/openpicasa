@@ -49,7 +49,8 @@ pub fn run() -> eframe::Result {
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([900.0, 600.0])
             .with_title("OpenPicasa")
-            .with_app_id("app.openpicasa"),
+            .with_app_id("app.openpicasa")
+            .with_icon(window_icon()),
         // 02 §5.2.2 方案 ①：把 eframe 的 UI 状态指到 Preferences 侧，
         // 不和索引库混在同一个目录语义里。
         persistence_path: Some(paths.ui_state_file()),
@@ -61,6 +62,26 @@ pub fn run() -> eframe::Result {
         native_options,
         Box::new(move |cc| Ok(Box::new(OpenPicasaApp::new(cc, paths)))),
     )
+}
+
+/// 窗口图标。图来自 `packaging/logo.png`，由 `packaging/make_icons.py --single`
+/// 生成后提交在 `assets/logo-256.png`（已裁圆、透明底、256×256）。
+///
+/// 注意分工：GNOME/Wayland 下停靠栏与概览里的图标走 `.desktop` + app_id
+/// （见 `packaging/make_deb.sh`），**不看**这个；这里管的是 X11/XWayland
+/// 与独立窗口管理器的窗口/任务栏图标。
+fn window_icon() -> egui::IconData {
+    const PNG: &[u8] = include_bytes!("../assets/logo-256.png");
+    // 编译期就固定的资源，解码失败说明资产文件坏了，panic 比静默无图标好排查
+    let img = image::load_from_memory(PNG)
+        .expect("内置图标 assets/logo-256.png 解码失败")
+        .to_rgba8();
+    let (width, height) = img.dimensions();
+    egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    }
 }
 
 fn init_tracing(paths: &picasa_core::AppPaths) {

@@ -1,8 +1,8 @@
 # 用 Python 标准库生成 OpenPicasa 的应用图标（不引入 Pillow）。
 #
-# 设计说明：
-#   - **不参考原版 Picasa 图标**（Google 的版权资产，02 §8.3 的法律底线）。
-#   - 这是自绘图形：深色圆角底 + 白色「照片」（山 + 太阳）符号，语义清楚、缩小到 16px 仍可辨。
+# 图标源：优先 packaging/logo.png（正式品牌图，与 Linux 侧共用同一份），
+# 由 make_icons.py 裁圆 + 下采样；仓库里没有 logo.png 时才回退下面的自绘图
+# （深色圆角底 + 白色「照片」符号，不参考原版 Picasa 图标，02 §8.3 的版权底线）。
 #
 # 用法：python3 packaging/make_icon.py <输出目录>
 # 产出：<输出目录>/OpenPicasa.iconset/ + <输出目录>/OpenPicasa.icns（调用 iconutil）
@@ -137,25 +137,33 @@ def main():
     iconset = os.path.join(out_dir, "OpenPicasa.iconset")
     os.makedirs(iconset, exist_ok=True)
 
-    # iconutil 要求的命名规则
-    specs = [
-        (16, "icon_16x16.png"),
-        (32, "icon_16x16@2x.png"),
-        (32, "icon_32x32.png"),
-        (64, "icon_32x32@2x.png"),
-        (128, "icon_128x128.png"),
-        (256, "icon_128x128@2x.png"),
-        (256, "icon_256x256.png"),
-        (512, "icon_256x256@2x.png"),
-        (512, "icon_512x512.png"),
-        (1024, "icon_512x512@2x.png"),
-    ]
-    cache = {}
-    for size, name in specs:
-        if size not in cache:
-            print(f"  渲染 {size}×{size} …", flush=True)
-            cache[size] = render(size)
-        write_png(os.path.join(iconset, name), size, size, cache[size])
+    # 优先用正式品牌图 packaging/logo.png（与 Linux 侧同一份源）；
+    # 仓库里没有它时才退回下面的 procedural 自绘。
+    logo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+    if os.path.exists(logo):
+        import make_icons  # 同目录，脚本运行时 sys.path[0] 就是 packaging/
+        make_icons.write_iconset(make_icons.Logo(logo), iconset)
+    else:
+        print("未找到 packaging/logo.png，回退自绘图标", file=sys.stderr)
+        # iconutil 要求的命名规则
+        specs = [
+            (16, "icon_16x16.png"),
+            (32, "icon_16x16@2x.png"),
+            (32, "icon_32x32.png"),
+            (64, "icon_32x32@2x.png"),
+            (128, "icon_128x128.png"),
+            (256, "icon_128x128@2x.png"),
+            (256, "icon_256x256.png"),
+            (512, "icon_256x256@2x.png"),
+            (512, "icon_512x512.png"),
+            (1024, "icon_512x512@2x.png"),
+        ]
+        cache = {}
+        for size, name in specs:
+            if size not in cache:
+                print(f"  渲染 {size}×{size} …", flush=True)
+                cache[size] = render(size)
+            write_png(os.path.join(iconset, name), size, size, cache[size])
 
     icns = os.path.join(out_dir, "OpenPicasa.icns")
     subprocess.run(["iconutil", "-c", "icns", iconset, "-o", icns], check=True)
