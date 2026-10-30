@@ -89,3 +89,18 @@ pub enum ThumbState {
 
 /// 便捷常量：`upsert` 时表示「缓存键未变」。
 pub const UPSERT_UNCHANGED: i64 = -1;
+
+/// 一个目录的缩略图状态计数（M2 索引进度面板用）。
+///
+/// ⚠️ 这四个数**只来自 SQL 聚合**，不由 UI 侧累加——「四处一致」的前提是同一处算。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ThumbStats {
+    /// 目录内照片总数（= 界面上的「已发现」）
+    pub total: u64,
+    /// 已就绪（`thumb_state = 1`，= 界面上的「已完成」）
+    pub ready: u64,
+    /// 失败条目数（`thumb_state ∈ {2,3}`）
+    pub failed: u64,
+    /// 待生成（`thumb_state = 0`）
+    pub pending: u64,
+}

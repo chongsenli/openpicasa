@@ -13,6 +13,7 @@
 //!    **只能由用户的显式动作触发**，且目标是系统回收站而不是原地 unlink。
 
 pub mod filters;
+pub mod index;
 pub mod library;
 pub mod paths;
 pub mod prefs;
@@ -21,10 +22,13 @@ pub mod thumbs;
 pub mod trash;
 pub mod watcher;
 
+pub use index::{FailureItem, IndexBoard, IndexSnapshot, IndexState, TaskSnapshot};
 pub use library::{Library, View};
 pub use paths::AppPaths;
 pub use prefs::Preferences;
-pub use scanner::{CoreEvent, ScanHandle, spawn_scan};
+pub use scanner::{
+    CoreEvent, IndexService, ScanHandle, spawn_scan, spawn_scan_with_board,
+};
 pub use thumbs::{THUMB_WORKERS, ThumbJob, ThumbService};
 
 /// 核心层错误。

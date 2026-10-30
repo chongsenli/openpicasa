@@ -12,10 +12,11 @@ use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2,
     vec2,
 };
-use picasa_core::{Library, ThumbService, View};
+use picasa_core::{IndexSnapshot, Library, ThumbService, View};
 use picasa_db::{Db, PhotoRow};
 
 use crate::icons::{self, Icon};
+use crate::index_progress;
 use crate::textures::{TexState, TextureCache};
 use crate::theme::{Metrics, Theme};
 
@@ -42,6 +43,8 @@ pub struct SidebarCtx<'a> {
     pub favorites_collapsed: bool,
     pub folders_collapsed: bool,
     pub has_focus: bool,
+    /// 索引进度快照：左栏的**状态点**与计数必须与面板/弹框同源（`04` §3.2）
+    pub snapshot: &'a IndexSnapshot,
 }
 
 pub fn show(ui: &mut Ui, lib: &Library, ctx: &mut SidebarCtx<'_>) -> Vec<SidebarAction> {
@@ -307,9 +310,19 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
                     },
                 );
                 // U-15：计数右对齐、灰色；为 0 不显示
+                //
+                // M2：关注文件夹多一个**状态点**（`04` §3.2 第三行）。有任务时把计数
+                // 左移 8px 给点让位——数字本身不变，仍然是「已发现」口径，
+                // 这样左栏与面板同一行数字一致。
+                let task = ctx.snapshot.task_by_path(&row.path);
+                let count_right = if task.is_some() {
+                    rect.right() - 16.0
+                } else {
+                    rect.right() - 8.0
+                };
                 if row.count > 0 {
                     painter.text(
-                        pos2(rect.right() - 8.0, rect.center().y),
+                        pos2(count_right, rect.center().y),
                         Align2::RIGHT_CENTER,
                         row.count.to_string(),
                         FontId::new(10.5, egui::FontFamily::Proportional),
@@ -319,6 +332,21 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
                             t.text_secondary
                         },
                     );
+                }
+                if let Some(task) = task {
+                    index_progress::draw_state_dot(
+                        &painter,
+                        pos2(rect.right() - 7.0, rect.center().y),
+                        task.state,
+                        &t,
+                    );
+                    resp.clone().on_hover_text(format!(
+                        "{}：{} · 已完成 {} / 已发现 {}",
+                        task.state.label(),
+                        task.name,
+                        task.completed,
+                        task.discovered
+                    ));
                 }
 
                 if resp.clicked()

@@ -94,6 +94,7 @@ impl ThumbService {
                     tracing::debug!(path = %job.path.display(), error = %e, "图片任务失败");
                     let _ = tx.send(CoreEvent::ThumbFailed {
                         photo_id: job.photo_id,
+                        reason: e.to_string(),
                     });
                 }
             }

@@ -2319,6 +2319,7 @@ dependencies = [
 name = "picasa-ui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "eframe",
  "egui",
  "image",

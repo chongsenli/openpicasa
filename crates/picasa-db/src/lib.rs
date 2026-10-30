@@ -18,7 +18,7 @@ mod types;
 
 pub use schema::{MIGRATIONS, SCHEMA_VERSION};
 pub use types::{
-    FolderRow, PhotoInput, PhotoRow, ScanApply, ThumbBuf, ThumbState, UPSERT_UNCHANGED,
+    FolderRow, PhotoInput, PhotoRow, ScanApply, ThumbBuf, ThumbState, ThumbStats, UPSERT_UNCHANGED,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -524,6 +524,160 @@ impl Db {
         Ok(())
     }
 
+    /// 一个「关注文件夹」下的所有子目录 id（含它自己）。
+    ///
+    /// 用 `substr(path, 1, n) = 'root/'` 而不是 `LIKE`：路径里合法地可以出现 `%` 和 `_`，
+    /// 用 `LIKE` 就必须转义，转错一次就会把别的目录算进来。
+    pub fn subtree_folder_ids(&self, folder_id: i64) -> Result<Vec<i64>> {
+        let path: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT path FROM folders WHERE id = ?1",
+                params![folder_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(path) = path else {
+            return Ok(Vec::new());
+        };
+        let cut = path.chars().count() as i64 + 1;
+        let prefix = format!("{path}/");
+        let mut st = self.conn.prepare(
+            "SELECT id FROM folders
+             WHERE path = ?1 OR substr(path, 1, ?2) = ?3
+             ORDER BY path",
+        )?;
+        let rows = st.query_map(params![path, cut, prefix], |r| r.get::<_, i64>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 整棵子树（关注文件夹含子目录）的缩略图状态计数。
+    ///
+    /// **任务口径必须按子树算**：用户关注 `2020` 时，`2020/01`、`2020/02` 里的照片
+    /// 都属于这个任务；只数根目录自己的照片会让进度永远显示 0。
+    pub fn subtree_thumb_stats(&self, folder_id: i64) -> Result<ThumbStats> {
+        let path: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT path FROM folders WHERE id = ?1",
+                params![folder_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(path) = path else {
+            return Ok(ThumbStats::default());
+        };
+        let cut = path.chars().count() as i64 + 1;
+        let prefix = format!("{path}/");
+        let mut st = self.conn.prepare(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN p.thumb_state = 1 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN p.thumb_state IN (2, 3) THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN p.thumb_state = 0 THEN 1 ELSE 0 END), 0)
+             FROM photos p JOIN folders f ON f.id = p.folder_id
+             WHERE f.path = ?1 OR substr(f.path, 1, ?2) = ?3",
+        )?;
+        let row = st.query_row(params![path, cut, prefix], |r| {
+            Ok(ThumbStats {
+                total: r.get::<_, i64>(0)? as u64,
+                ready: r.get::<_, i64>(1)? as u64,
+                failed: r.get::<_, i64>(2)? as u64,
+                pending: r.get::<_, i64>(3)? as u64,
+            })
+        })?;
+        Ok(row)
+    }
+
+    /// 一个关注文件夹（含子目录）里所有待生成的缩略图。
+    pub fn subtree_pending_thumbs(&self, folder_id: i64, limit: usize) -> Result<Vec<PhotoRow>> {
+        let ids = self.subtree_folder_ids(folder_id)?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.photos_pending_thumbs(Some(&ids), limit)
+    }
+
+    /// 把一个关注文件夹（含子目录）的失败项重置为待生成，返回重置条数。
+    pub fn reset_failed_thumbs_subtree(&self, folder_id: i64) -> Result<u64> {
+        let ids = self.subtree_folder_ids(folder_id)?;
+        let mut total = 0u64;
+        for id in ids {
+            total += self.reset_failed_thumbs(id)?;
+        }
+        Ok(total)
+    }
+
+    /// 一个目录的缩略图状态计数（M2 索引进度：已完成 / 已发现 / 失败）。
+    pub fn folder_thumb_stats(&self, folder_id: i64) -> Result<ThumbStats> {
+        let mut st = self.conn.prepare(
+            "SELECT COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN thumb_state = 1 THEN 1 ELSE 0 END), 0) AS ready,
+                    COALESCE(SUM(CASE WHEN thumb_state IN (2, 3) THEN 1 ELSE 0 END), 0) AS failed,
+                    COALESCE(SUM(CASE WHEN thumb_state = 0 THEN 1 ELSE 0 END), 0) AS pending
+             FROM photos WHERE folder_id = ?1",
+        )?;
+        let row = st.query_row(params![folder_id], |r| {
+            Ok(ThumbStats {
+                total: r.get::<_, i64>(0)? as u64,
+                ready: r.get::<_, i64>(1)? as u64,
+                failed: r.get::<_, i64>(2)? as u64,
+                pending: r.get::<_, i64>(3)? as u64,
+            })
+        })?;
+        Ok(row)
+    }
+
+    /// 整个库的缩略图状态计数（「所有照片」视图的双数计数用）。
+    pub fn library_thumb_stats(&self) -> Result<ThumbStats> {
+        let mut st = self.conn.prepare(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN thumb_state = 1 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN thumb_state IN (2, 3) THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN thumb_state = 0 THEN 1 ELSE 0 END), 0)
+             FROM photos",
+        )?;
+        let row = st.query_row([], |r| {
+            Ok(ThumbStats {
+                total: r.get::<_, i64>(0)? as u64,
+                ready: r.get::<_, i64>(1)? as u64,
+                failed: r.get::<_, i64>(2)? as u64,
+                pending: r.get::<_, i64>(3)? as u64,
+            })
+        })?;
+        Ok(row)
+    }
+
+    /// 失败项明细（面板展开用）。**只读查询，不重试、不改状态。**
+    pub fn failed_photos(&self, folder_id: Option<i64>) -> Result<Vec<PhotoRow>> {
+        let mut sql = String::from(
+            "SELECT p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
+                    p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
+                    p.thumb_state, p.decoder_ver
+             FROM photos p JOIN folders f ON f.id = p.folder_id
+             WHERE p.thumb_state IN (2, 3)",
+        );
+        if let Some(id) = folder_id {
+            sql.push_str(&format!(" AND p.folder_id = {id}"));
+        }
+        sql.push_str(" ORDER BY p.name_key ASC");
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], map_photo)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 把失败项重置为「待生成」，返回重置条数。
+    ///
+    /// **只动失败项**（`thumb_state ∈ {2,3}`）：已完成的有效缩略图不重建，
+    /// 所以重试不会让「已完成」计数回退（`04` §2.4 第 1 条）。
+    pub fn reset_failed_thumbs(&self, folder_id: i64) -> Result<u64> {
+        let n = self.conn.execute(
+            "UPDATE photos SET thumb_state = 0
+             WHERE folder_id = ?1 AND thumb_state IN (2, 3)",
+            params![folder_id],
+        )?;
+        Ok(n as u64)
+    }
+
     /// 待生成的缩略图（`None` 表示全库）。给扫描后的补图队列用。
     pub fn photos_pending_thumbs(
         &self,
@@ -808,5 +962,75 @@ mod tests {
         assert_eq!(asc[0].name, "a.jpg");
         let by_taken = db.photos(Some(&[fid]), SortSpec::default(), 10).unwrap();
         assert_eq!(by_taken[0].name, "b.jpg");
+    }
+
+    #[test]
+    fn thumb_stats_count_each_state() {
+        let (db, fid) = db_with_folder();
+        db.apply_scan(
+            fid,
+            "/tmp/a",
+            &[
+                mk("ok.jpg", 1, 1, None),
+                mk("failed.jpg", 2, 2, None),
+                mk("pending.jpg", 3, 3, None),
+                mk("pending2.jpg", 4, 4, None),
+            ],
+            0,
+        )
+        .unwrap();
+        let all = db.photos(Some(&[fid]), SortSpec::default(), 10).unwrap();
+        let by_name = |n: &str| all.iter().find(|p| p.name == n).unwrap().id;
+        db.put_thumb(
+            by_name("ok.jpg"),
+            0,
+            &ThumbBuf {
+                w: 1,
+                h: 1,
+                format: 0,
+                data: vec![1],
+            },
+        )
+        .unwrap();
+        db.set_thumb_state(by_name("failed.jpg"), ThumbState::Failed)
+            .unwrap();
+
+        let s = db.folder_thumb_stats(fid).unwrap();
+        assert_eq!((s.total, s.ready, s.failed, s.pending), (4, 1, 1, 2));
+        assert_eq!(db.library_thumb_stats().unwrap(), s);
+        assert_eq!(db.failed_photos(Some(fid)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reset_only_touches_failed_items() {
+        let (db, fid) = db_with_folder();
+        db.apply_scan(
+            fid,
+            "/tmp/a",
+            &[mk("ok.jpg", 1, 1, None), mk("bad.jpg", 2, 2, None)],
+            0,
+        )
+        .unwrap();
+        let all = db.photos(Some(&[fid]), SortSpec::default(), 10).unwrap();
+        let ok_id = all.iter().find(|p| p.name == "ok.jpg").unwrap().id;
+        let bad_id = all.iter().find(|p| p.name == "bad.jpg").unwrap().id;
+        db.put_thumb(
+            ok_id,
+            0,
+            &ThumbBuf {
+                w: 1,
+                h: 1,
+                format: 0,
+                data: vec![9],
+            },
+        )
+        .unwrap();
+        db.set_thumb_state(bad_id, ThumbState::Corrupt).unwrap();
+
+        assert_eq!(db.reset_failed_thumbs(fid).unwrap(), 1);
+        let s = db.folder_thumb_stats(fid).unwrap();
+        assert_eq!((s.ready, s.failed, s.pending), (1, 0, 1), "已完成不回退");
+        // 已就绪的缩略图内容仍在（没有因为重试被删）
+        assert!(db.get_thumb(ok_id, 0).unwrap().is_some());
     }
 }

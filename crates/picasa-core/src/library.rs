@@ -349,6 +349,20 @@ impl Library {
         walk(&self.roots, path)
     }
 
+    /// 文件夹 id → 规范化路径。状态栏双数计数与栅格占位判断都要用它把
+    /// 「视图口径的 folder id」翻译成「任务口径的路径」。
+    pub fn folder_path(&self, id: i64) -> Option<String> {
+        self.node_by_id(id).map(|n| n.path.clone())
+    }
+
+    /// 当前视图里是否有正在索引的关注文件夹（栅格据此决定占位格要不要请求解码）。
+    pub fn is_folder_in_view(&self, folder_id: i64) -> bool {
+        match self.view_folder_ids() {
+            None => true,
+            Some(ids) => ids.contains(&folder_id),
+        }
+    }
+
     // -------------------------------------------------------------- 照片列表
 
     /// 重新计算当前视图的照片列表（视图 + 搜索 + 排序）。
@@ -625,9 +639,11 @@ impl Library {
     pub fn apply_event(&mut self, ev: CoreEvent) -> bool {
         match ev {
             CoreEvent::ScanStarted { roots } => {
+                // 进度文案一律由进度弹框/面板负责（`04` §0.1：本轮只做"如实呈现"）。
+                // 这里不再冒一个底部 toast，否则会出现"两个地方在说同一件事、数字还不一样"。
+                tracing::debug!(roots, "索引入队");
                 self.scanning = true;
                 self.scan_progress = Some((0, 0));
-                self.toast = Some((format!("开始扫描 {roots} 个位置…"), 3.0));
                 false
             }
             CoreEvent::FolderScanned {
@@ -637,16 +653,7 @@ impl Library {
                 ..
             } => {
                 self.scanning = true;
-                let msg = match (added, removed) {
-                    (0, 0) => None,
-                    (a, 0) => Some(format!("已添加 {a} 张")),
-                    (0, r) => Some(format!("已移除 {r} 张")),
-                    (a, r) => Some(format!("已添加 {a} 张、移除 {r} 张")),
-                };
-                if let Some(m) = msg {
-                    let _ = path;
-                    self.toast = Some((m, 2.5));
-                }
+                tracing::debug!(path = %path, added, removed, "目录已落库");
                 let _ = self.reload_tree();
                 true
             }
@@ -660,7 +667,6 @@ impl Library {
                 self.scan_summary = Some(format!(
                     "索引完成：{photos} 张 / {dirs} 个目录 / {secs:.1}s"
                 ));
-                self.toast = Some((format!("索引完成：{photos} 张"), 4.0));
                 let _ = self.reload_tree();
                 true
             }

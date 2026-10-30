@@ -39,6 +39,8 @@ pub enum Icon {
     Trash,
     /// 信息面板
     Info,
+    /// 索引进度（时钟：后台正在建立索引）
+    Index,
     /// 关闭
     Close,
 }
@@ -148,6 +150,13 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
             painter.circle_stroke(rect.center(), rect.width() * 0.4, s);
             painter.line_segment([ip(0.5, 0.42), ip(0.5, 0.75)], s);
             painter.circle_filled(ip(0.5, 0.25), stroke * 0.9, color);
+        }
+        Icon::Index => {
+            // 时钟：圆环 + 时针/分针（"后台正在建索引"，不是"照片"也不是"设置"）
+            let c = rect.center();
+            painter.circle_stroke(c, rect.width() * 0.4, s);
+            painter.line_segment([c, pos2(c.x, c.y - rect.height() * 0.24)], s);
+            painter.line_segment([c, pos2(c.x + rect.width() * 0.18, c.y + rect.height() * 0.08)], s);
         }
         Icon::Close => {
             painter.line_segment([ip(0.15, 0.15), ip(0.85, 0.85)], s);

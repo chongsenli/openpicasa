@@ -56,6 +56,20 @@ pub struct Theme {
     pub viewer_bg: Color32,
     pub viewer_chrome: Color32,
     pub viewer_text: Color32,
+
+    // ---- 索引进度（M2，`docs/04`）----
+    /// 进度条与"进行中"指示（沿用选中蓝，不另造一个蓝）
+    pub progress: Color32,
+    /// 警示（部分失败 / 失败角标），暖色
+    pub warn: Color32,
+    /// 不可访问 / 硬错误
+    pub danger: Color32,
+    /// 已完成状态点
+    pub ok: Color32,
+    /// 浮层底色（比工具栏更亮，形成"压在内容上"的层级）
+    pub overlay_bg: Color32,
+    /// 占位格底色（灰底 +「待生成」，`04` §3.2.1）
+    pub placeholder_bg: Color32,
 }
 
 impl Theme {
@@ -89,6 +103,13 @@ impl Theme {
             viewer_bg: Color32::from_rgb(0x1A, 0x1A, 0x1A),
             viewer_chrome: Color32::from_rgb(0x2B, 0x2B, 0x2B),
             viewer_text: Color32::from_rgb(0xE8, 0xE8, 0xE8),
+
+            progress: Color32::from_rgb(0x4A, 0x90, 0xD9),
+            warn: Color32::from_rgb(0xC8, 0x86, 0x1E),
+            danger: Color32::from_rgb(0xC0, 0x39, 0x2B),
+            ok: Color32::from_rgb(0x3E, 0x8E, 0x3E),
+            overlay_bg: Color32::from_rgb(0xFB, 0xFB, 0xFB),
+            placeholder_bg: Color32::from_rgb(0xE4, 0xE4, 0xE4),
         }
     }
 }

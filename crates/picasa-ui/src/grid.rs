@@ -28,10 +28,11 @@ use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Rect, Response, ScrollArea, Sense, Stroke,
     StrokeKind, Ui, Vec2, pos2, vec2,
 };
-use picasa_core::{ThumbService, Tier, library};
+use picasa_core::{IndexSnapshot, ThumbService, Tier, library};
 use picasa_db::{Db, PhotoRow};
 
 use crate::icons::{self, Icon};
+use crate::index_progress;
 use crate::textures::{TexState, TextureCache};
 use crate::theme::{Metrics, Theme};
 
@@ -337,6 +338,7 @@ pub fn show(
     service: &ThumbService,
     cache: &mut TextureCache,
     theme: &Theme,
+    snapshot: &IndexSnapshot,
 ) -> GridOutput {
     let mut out = GridOutput {
         clicked: None,
@@ -358,6 +360,19 @@ pub fn show(
     let ctx = ui.ctx().clone();
     let content_w = (ui.available_width() - Metrics::SCROLLBAR).max(120.0);
     let layout = GridLayout::build(photos, content_w, tier, has_headers);
+    // 正在索引的文件夹（含子目录）：这些目录里 `thumb_state == 0` 的格子只画占位，
+    // **不要**再向 ThumbService 要一次缩略图（会和索引线程抢同一张图的解码）。
+    let indexing_folders: std::collections::HashSet<i64> = {
+        let mut set = std::collections::HashSet::new();
+        for t in snapshot.tasks.iter().filter(|t| t.state.is_running()) {
+            if let Ok(Some(id)) = db.folder_id(&t.path)
+                && let Ok(ids) = db.subtree_folder_ids(id)
+            {
+                set.extend(ids);
+            }
+        }
+        set
+    };
     out.total_h = layout.total_h;
     // 布局体检：栅格列数/单元格尺寸是「界面还原」最容易出错的地方，
     // 出问题时（比如列数恒为 1）靠肉眼从截图反推很不可靠，这里直接给出数值。
@@ -422,47 +437,83 @@ pub fn show(
             let is_sel = selection.contains(&row.id);
             let is_current = current_index == Some(index);
 
-            // ---- 单元格背景 / 描边（U-24：1px 浅灰框，不是投影）----
+            // ---- 单元格背景（U-24：1px 浅灰框，不是投影）----
             painter.rect_filled(rect, 1.0, Color32::WHITE);
 
-            // ---- 缩略图 ----
-            let state = cache.get(&ctx, db, service, row, &mut budget);
-            match state {
-                TexState::Ready(tex_id, tex_size) => {
-                    let fitted = fit_rect(rect, tex_size);
-                    painter.image(
-                        tex_id,
-                        fitted,
-                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
-                }
-                TexState::Pending => {
-                    painter.rect_filled(rect.shrink(1.0), 1.0, Color32::from_rgb(0xE4, 0xE4, 0xE4));
-                    draw_spinner(&painter, rect, theme);
-                }
-                TexState::Failed => {
-                    painter.rect_filled(rect.shrink(1.0), 1.0, Color32::from_rgb(0xDE, 0xDE, 0xDE));
-                    draw_broken(&painter, rect, theme);
+            // ---- 缩略图 / 占位格（`04` §3.2.1，P-06）----
+            //
+            // 未就绪就画**灰底「待生成」**，不隐藏、不放低清预览：
+            // 隐藏会让栅格在索引过程中不断重排，用户正看的那张图会随缩略图完成而位移。
+            let failed = row.thumb_state == 2 || row.thumb_state == 3;
+            let placeholder =
+                failed || (row.thumb_state == 0 && indexing_folders.contains(&row.folder_id));
+            if placeholder {
+                index_progress::draw_placeholder(&painter, rect, theme, failed);
+            } else {
+                match cache.get(&ctx, db, service, row, &mut budget) {
+                    TexState::Ready(tex_id, tex_size) => {
+                        let fitted = fit_rect(rect, tex_size);
+                        painter.image(
+                            tex_id,
+                            fitted,
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                    TexState::Pending => {
+                        index_progress::draw_placeholder(&painter, rect, theme, false);
+                    }
+                    TexState::Failed => {
+                        index_progress::draw_placeholder(&painter, rect, theme, true);
+                    }
                 }
             }
 
-            // ---- 描边：选中 > 当前 > 悬停 > 常态 ----
-            let response = interact_cell(ui, rect, row.id, &painter, theme);
-            let hovered = response.hovered();
-            let stroke = if is_sel {
-                Stroke::new(2.0, theme.selected)
-            } else if is_current {
-                Stroke::new(1.0, theme.selected)
-            } else if hovered {
-                Stroke::new(1.0, theme.selected.gamma_multiply(0.6))
+            if placeholder {
+                // 占位格：**不可点开、不参与选中**、右键不弹依赖缩略图的菜单。
+                // 只留一个普通描边，让"这是图、但还没做好"一眼可辨。
+                painter.rect_stroke(
+                    rect,
+                    1.0,
+                    Stroke::new(1.0, theme.cell_border),
+                    StrokeKind::Inside,
+                );
             } else {
-                Stroke::new(1.0, theme.cell_border)
-            };
-            painter.rect_stroke(rect, 1.0, stroke, StrokeKind::Inside);
+                // ---- 描边：选中 > 当前 > 悬停 > 常态 ----
+                let response = interact_cell(ui, rect, row.id, &painter, theme);
+                let hovered = response.hovered();
+                let stroke = if is_sel {
+                    Stroke::new(2.0, theme.selected)
+                } else if is_current {
+                    Stroke::new(1.0, theme.selected)
+                } else if hovered {
+                    Stroke::new(1.0, theme.selected.gamma_multiply(0.6))
+                } else {
+                    Stroke::new(1.0, theme.cell_border)
+                };
+                painter.rect_stroke(rect, 1.0, stroke, StrokeKind::Inside);
 
-            if hovered {
-                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                if hovered {
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                }
+
+                // ---- 交互 ----
+                if response.double_clicked() {
+                    out.opened = Some(index);
+                } else if response.clicked() {
+                    let mods = ui.input(|i| i.modifiers);
+                    out.clicked = Some(ClickInfo {
+                        index,
+                        additive: mods.command || mods.ctrl,
+                        range: mods.shift,
+                    });
+                }
+                if response.secondary_clicked() {
+                    out.context = Some((
+                        index,
+                        response.interact_pointer_pos().unwrap_or(rect.center()),
+                    ));
+                }
             }
 
             // ---- 文件名（U-26：大档才显示，单行省略）----
@@ -478,24 +529,6 @@ pub fn show(
                     font,
                     theme.text_secondary,
                 );
-            }
-
-            // ---- 交互 ----
-            if response.double_clicked() {
-                out.opened = Some(index);
-            } else if response.clicked() {
-                let mods = ui.input(|i| i.modifiers);
-                out.clicked = Some(ClickInfo {
-                    index,
-                    additive: mods.command || mods.ctrl,
-                    range: mods.shift,
-                });
-            }
-            if response.secondary_clicked() {
-                out.context = Some((
-                    index,
-                    response.interact_pointer_pos().unwrap_or(rect.center()),
-                ));
             }
         }
 
@@ -583,19 +616,6 @@ fn draw_empty_state(ui: &mut Ui, full: Rect, theme: &Theme, cache: &mut TextureC
         FontId::new(12.0, egui::FontFamily::Proportional),
         theme.text_secondary.gamma_multiply(0.85),
     );
-}
-
-fn draw_spinner(painter: &egui::Painter, rect: Rect, theme: &Theme) {
-    let c = rect.center();
-    let r = rect.width() * 0.12;
-    painter.circle_stroke(c, r, Stroke::new(1.5, theme.text_disabled));
-}
-
-fn draw_broken(painter: &egui::Painter, rect: Rect, theme: &Theme) {
-    let r = rect.shrink(rect.width() * 0.28);
-    let s = Stroke::new(1.2, theme.text_disabled);
-    painter.line_segment([r.left_top(), r.right_bottom()], s);
-    painter.line_segment([r.right_top(), r.left_bottom()], s);
 }
 
 /// 等比放进正方形（U-25：长边贴合，短边留白，不裁切不拉伸）。

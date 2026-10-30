@@ -6,13 +6,17 @@
 //! 这里负责：**面板嵌套顺序**、**事件泵**、**动作分发**、**偏好落盘**。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, vec2};
-use picasa_core::{AppPaths, CoreEvent, Library, ScanHandle, ThumbService, Tier, watcher};
+use picasa_core::{
+    AppPaths, CoreEvent, IndexBoard, IndexService, Library, ThumbService, Tier, watcher,
+};
 use picasa_db::{PhotoRow, SortKey};
 
 use crate::grid;
+use crate::index_progress::{IndexProgressUi, ProgressAction};
 use crate::shortcuts::{self, KeyAction};
 use crate::sidebar::{self, SidebarAction, SidebarCtx};
 use crate::statusbar;
@@ -31,7 +35,12 @@ pub struct OpenPicasaApp {
     service: ThumbService,
     rx: Receiver<CoreEvent>,
     tx: Sender<CoreEvent>,
-    scan: Option<ScanHandle>,
+    /// 索引服务（M2 A 线）：关注文件夹 → 任务队列 → 扫描/缩略图
+    index: IndexService,
+    /// 索引进度板：**四处展示的唯一数据源**
+    board: Arc<IndexBoard>,
+    /// 进度弹框/面板的界面状态（含"本会话关闭过哪个批次"）
+    progress: IndexProgressUi,
     watch: Option<watcher::WatchHandle>,
 
     viewer: Option<Viewer>,
@@ -87,6 +96,9 @@ impl OpenPicasaApp {
             None
         };
 
+        let board = Arc::new(IndexBoard::new());
+        let index = IndexService::new(lib.db.clone(), board.clone(), tx.clone());
+
         let mut app = Self {
             lib,
             paths,
@@ -95,7 +107,9 @@ impl OpenPicasaApp {
             service,
             rx,
             tx,
-            scan: None,
+            index,
+            board,
+            progress: IndexProgressUi::new(),
             watch: None,
             viewer: None,
             search_buf,
@@ -117,24 +131,21 @@ impl OpenPicasaApp {
             frames: 0,
         };
         app.refresh_tray_rows();
-        app.start_scan();
+        app.start_index();
         app
     }
 
-    /// 启动一次全库扫描 + 文件监视。重复调用会先取消上一次。
-    fn start_scan(&mut self) {
+    /// 启动时的索引：把每个关注文件夹作为一个任务入队（**同一批次**）。
+    ///
+    /// 这同时兑现 `04` §1.2.1 的「应用重启后发现上次未完成的任务 → 新批次、必弹」：
+    /// 上次没做完的缩略图（`thumb_state = 0`）在这里自然被补齐。
+    /// 如果一切都已就绪，整批会在 1.5 s 内结束 —— 于是弹框根本不出现（P-05）。
+    fn start_index(&mut self) {
         let roots = self.lib.scan_roots();
         if roots.is_empty() {
             return;
         }
-        if let Some(prev) = self.scan.take() {
-            prev.stop();
-        }
-        self.scan = Some(picasa_core::spawn_scan(
-            self.lib.db.clone(),
-            roots.clone(),
-            self.tx.clone(),
-        ));
+        self.index.enqueue_scan(&roots);
         self.watch = watcher::spawn_watch(roots, self.tx.clone());
     }
 
@@ -151,8 +162,9 @@ impl OpenPicasaApp {
                 CoreEvent::ThumbReady { photo_id, jpeg, .. } => {
                     self.cache.insert_jpeg(photo_id, jpeg);
                 }
-                CoreEvent::ThumbFailed { photo_id } => {
+                CoreEvent::ThumbFailed { photo_id, reason } => {
                     self.cache.mark_failed(photo_id);
+                    tracing::debug!(photo_id, reason = %reason, "缩略图失败（计入失败项）");
                 }
                 CoreEvent::FullImageReady {
                     photo_id,
@@ -337,6 +349,8 @@ impl OpenPicasaApp {
     fn draw_library(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let theme = self.theme;
+        // 本帧的进度切片：状态栏/左栏/栅格**读同一份**（`04` §3.2 的四处一致）
+        let snap = self.progress.snapshot().clone();
 
         // ① 顶部工具栏
         egui::Panel::top("toolbar-panel")
@@ -399,7 +413,10 @@ impl OpenPicasaApp {
             .exact_size(Metrics::STATUS_H)
             .frame(egui::Frame::new().fill(theme.chrome_bg))
             .show(ui, |ui| {
-                statusbar::show(ui, &self.lib, &theme);
+                let out = statusbar::show(ui, &self.lib, &theme, &snap);
+                if out.index_clicked {
+                    self.progress.open_panel();
+                }
             });
 
         // ② 左栏（含底部托盘）
@@ -421,6 +438,7 @@ impl OpenPicasaApp {
                     favorites_collapsed: self.favorites_collapsed,
                     folders_collapsed: self.folders_collapsed,
                     has_focus: ctx.memory(|m| m.focused()).is_none(),
+                    snapshot: &snap,
                 };
                 let actions = sidebar::show(ui, &self.lib, &mut sctx);
                 drop(db);
@@ -455,6 +473,7 @@ impl OpenPicasaApp {
                     &self.service,
                     &mut self.cache,
                     &theme,
+                    &snap,
                 );
                 drop(db);
 
@@ -614,6 +633,8 @@ impl OpenPicasaApp {
                             }
                             if ui.button("从图库移除（不删文件）").clicked() {
                                 self.lib.remove_root(std::path::Path::new(&path));
+                                // 任务跟着关注文件夹一起撤掉，否则面板会留一行"幽灵任务"
+                                self.board.forget(&path);
                                 if let Err(e) = self.lib.reload_tree() {
                                     tracing::warn!(error = %e, "刷新目录树失败");
                                 }
@@ -724,7 +745,55 @@ impl OpenPicasaApp {
                 });
         }
 
+        // ---- M2 索引进度：右下角弹框 + 进度面板（都是浮层，不参与布局、不抢焦点）----
+        let mut action = self.progress.show_toast(&ctx, &self.theme);
+        if action.is_none() {
+            action = self.progress.show_panel(&ctx, &self.theme);
+        }
+        match action {
+            Some(ProgressAction::AddFolder) => self.add_folder(),
+            Some(ProgressAction::Retry(path)) => self.retry_folder(&path),
+            Some(ProgressAction::RetryAll) => self.retry_all(),
+            Some(ProgressAction::ClosePanel) | None => {}
+        }
+
         let _ = theme;
+    }
+
+    /// 重试一个关注文件夹的失败项：库里只把失败项重置为待生成，然后入队新批次。
+    fn retry_folder(&mut self, path: &str) {
+        let folder_id = match self.lib.db() {
+            Ok(db) => db.folder_id(path).ok().flatten(),
+            Err(_) => None,
+        };
+        let Some(id) = folder_id else {
+            self.lib.toast = Some(("目录尚未入库，无法重试".into(), 3.0));
+            return;
+        };
+        let reset = match self.lib.db() {
+            Ok(db) => db.reset_failed_thumbs_subtree(id).unwrap_or(0),
+            Err(_) => 0,
+        };
+        if reset == 0 {
+            self.lib.toast = Some(("没有可重试的失败项".into(), 3.0));
+            return;
+        }
+        self.index.enqueue_retry(id, std::path::Path::new(path));
+        tracing::info!(path, reset, "重试失败项");
+    }
+
+    fn retry_all(&mut self) {
+        let paths: Vec<String> = self
+            .progress
+            .snapshot()
+            .tasks
+            .iter()
+            .filter(|t| t.failed > 0)
+            .map(|t| t.path.clone())
+            .collect();
+        for p in paths {
+            self.retry_folder(&p);
+        }
     }
 
     fn pick_sort(&mut self, key: SortKey) {
@@ -752,7 +821,9 @@ impl OpenPicasaApp {
             tracing::warn!(error = %e, "刷新目录树失败");
             self.lib.toast = Some(("无法读取该目录".into(), 4.0));
         }
-        self.start_scan();
+        // 新关注文件夹 = **新批次**，且只索引它（不重扫已有文件夹）：
+        // 重扫全部会让已完成的任务重新排队，进度条凭空回到 0（`04` §1.2.1）。
+        self.index.enqueue_scan(&[dir]);
     }
 
     fn maybe_autosave(&mut self, ctx: &egui::Context) {
@@ -764,8 +835,9 @@ impl OpenPicasaApp {
         if self.lib.prefs_dirty() {
             self.lib.save_prefs();
         }
-        // 让后台事件（缩略图补图）能及时上屏
-        if self.lib.scanning || !self.cache.is_empty() {
+        // 让后台事件（缩略图补图）能及时上屏；索引进行中按 100 ms 唤醒，
+        // 数字刷新仍在 `IndexProgressUi` 里被压到 4 Hz（`04` §3.4）
+        if self.board.running() || !self.cache.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
@@ -778,6 +850,8 @@ impl eframe::App for OpenPicasaApp {
 
         self.pump_events(&ctx);
         self.handle_keys(&ctx);
+        // 索引进度：按 250 ms 节流取快照（不在 UI 线程做任何索引工作）
+        self.progress.tick(&ctx, &self.board);
 
         // 调试入口：等照片装载好再进查看器（首帧时 photos 还是空的）
         // 45 帧 ≈ 0.7s：扫描是逐目录入库的，太早会拿到半截列表（实测拿到过 3/9）。
@@ -818,9 +892,7 @@ impl eframe::App for OpenPicasaApp {
     }
 
     fn on_exit(&mut self) {
-        if let Some(scan) = self.scan.take() {
-            scan.stop();
-        }
+        self.index.stop();
         self.lib.save_prefs();
         tracing::info!("退出：偏好已保存");
     }
