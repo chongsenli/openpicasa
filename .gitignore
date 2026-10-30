@@ -24,10 +24,11 @@ Icon?
 /thumbs/
 
 # ---- 界面基准截图 ----
-# 注意：`docs/ui-baseline/*.png` 是**我们自己渲染出来的**截图（不是原版 Picasa 素材），
-# 可以随时用 tools/ 里的方法重新生成（见 docs/ui-baseline/README.md）。
-# 仍然不默认入库，避免每次改主题都产生几十 MB 的二进制 diff；
-# 需要对外展示时用 `git add -f` 单独提交。
+# `docs/ui-baseline/*.png` 是**我们自己渲染出来的**截图（不是原版 Picasa 素材），
+# 现有三张已用 `git add -f` 入库（合计约 1.2MB），便于在 GitHub 上直接看当前实现。
+# 规则仍然保留：**新增/替换的截图默认不入库**，避免每次调主题都产生二进制 diff；
+# 需要更新基线时显式 `git add -f docs/ui-baseline/<file>.png`
+# （已跟踪的文件不受本规则影响，但显式 add 能让意图清楚）。详见该目录 README。
 /docs/ui-baseline/*.png
 /docs/ui-baseline/*.jpg
 

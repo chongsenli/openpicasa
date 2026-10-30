@@ -39,7 +39,22 @@
 >
 > **v3.0 的额外收益**：不再需要为「字节级 ini 往返保真」写任何代码。02 §0.1.4 有完整的「风险下降」说明（可直接对外汇报）。
 
-> 文档状态：本仓库当前处于**方案设计阶段**，尚未产出可编译代码（**且本机没有 Rust 工具链**）。请先读「前置条件」，再读 `docs/` 下的设计文档。
+> 文档状态：三份设计文档已冻结（01 v3.0 / 02 v3.0 / 03 v2.1），**M1 代码已落地并可打包**（见下节）。
+> 「还差什么」放在文末的进度表里，不在这里重复。
+
+---
+
+## 当前界面（M1 实机渲染，1280×820）
+
+下面两张不是设计稿，是**本程序自己窗口帧缓冲的导出**（`crates/picasa-ui/src/capture.rs`），
+所以有排版问题就会直接暴露出来，不能靠「示意图」蒙混。
+
+<img src="docs/ui-baseline/m1-library-1280x820.png" width="720" alt="图库视图：顶部工具栏 + 左栏收藏/文件夹树/托盘 + 日期分组 6 列栅格 + 底部状态栏">
+
+<img src="docs/ui-baseline/m1-viewer-1280x820.png" width="720" alt="查看器：暗底、等比缩放、EXIF 面板、上下自动隐藏信息条">
+
+更多基线（含空库首屏）与**实测几何数值表**见 [`docs/ui-baseline/`](docs/ui-baseline/README.md)。
+注意其中区分：**本程序自渲染的截图入库**，**原版 Picasa 的对照截图永远不入库**（版权，走内部渠道，见 03 §5A）。
 
 ---
 
@@ -168,7 +183,7 @@ rustup target add aarch64-apple-darwin
 > 差异只有两处，均为有意：①`picasa-ui/src` 用**平铺模块**（`app.rs` / `grid.rs` / `toolbar.rs` /
 > `sidebar.rs` / `statusbar.rs` / `viewer.rs` / `theme.rs` / `icons.rs` / `textures.rs` /
 > `shortcuts.rs` / `macos.rs` / `capture.rs`）而不是子目录——M1 每个模块只有一两个文件，
-> 子目录只会多一层路径；②`deny.toml` 与 `rust-toolchain.toml` 尚未落地（许可审计在 M1 交付前补）。
+> 子目录只会多一层路径；②`deny.toml` 尚未落地（许可审计在 M1 交付前补，`cargo-deny` 未安装）。
 >
 > **M1 的一个重要决策：减少 crate 数量。** v1.x 规划了 9 个 crate，M1 只建 **4 个**。
 > v3.0 起 `.picasa.ini` 兼容层整体移除，`picasa-ini` crate **已删除**；`picasa-edit`、`picasa-face`、`picasa-ipc`、`picasa-cli` 在 M1 也不创建。
@@ -187,12 +202,12 @@ openpicasa/
 │   ├── 01-产品功能清单.md      # v3.0
 │   ├── 02-技术架构与选型.md     # v3.0
 │   ├── 03-测试策略与验收计划.md  # v2.1
-│   ├── adr/                   # 架构决策记录（0001-0009）
-│   └── ui-baseline/           # 界面还原基准截图（01 §11.5.6 要求）
-├── packaging/                 # 🆕 macOS 打包
+│   ├── adr/                   # 架构决策记录（已写 0001-0006）
+│   └── ui-baseline/           # 界面还原基准截图（3 张自渲染图已入库，见其 README）
+├── packaging/                 # 手写打包（ADR-0003，不用 cargo-bundle）
 │   ├── Info.plist             # 模板
-│   ├── bundle.sh              # cargo-bundle + PlistBuddy + codesign
-│   └── OpenPicasa.iconset/        # 图标源（16..1024）
+│   ├── bundle.sh              # cargo build → 组 .app → icns → plutil → codesign
+│   └── make_icon.py           # 纯标准库自绘图标 → iconutil
 ├── crates/
 │   ├── picasa-db/             # ✅ M1：SQLite 索引 + 缩略图 BLOB + 迁移（叶子 crate）
 │   ├── picasa-imaging/        # ✅ M1：解码 + Orientation + 缩略图（无效果算子）
