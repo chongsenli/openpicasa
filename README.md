@@ -521,7 +521,7 @@ rm -rf ~/Library/Application\ Support/app.openpicasa
 | 测试与门禁 | ✅ `cargo test --workspace` **87 passed**（core 39 + 零写入 2 / db 7 / imaging 19 / ui 20）；`cargo clippy --workspace --all-targets` 0 warning |
 | **M2 A 线：索引底座** | ✅ **已落地**：`IndexService`（单 worker 队列 + 心跳线程）替代一次性扫描线程；多关注文件夹 = 多任务串行；缩略图 rayon 并行 + 每 64 张探测失联；子树口径统计 |
 | **M2 A 线：进度可见性** | ✅ **已落地**：右下角弹框 / 进度面板 / 状态栏入口 / 左栏状态点 / 栅格占位，**五处同源**（`IndexBoard` → `IndexSnapshot`）；七态状态机含系统暂停态；批次模型（冻结分母 + 上包络 + 「第 N 批」标注）；阈值 1.5/3/1 s 为命名常量 |
-| M2 A 线：界面基线截图 | ⏸ 待真机：本沙箱**无 GPU 设备节点**（`/dev/dri` 不存在），wgpu 退化到 llvmpipe + EGL 无 screen，自截图流程拿不到帧；功能正确性由 87 条测试与运行日志证明，**像素级基线需在有 GPU 的机器上补** |
+| M2 A 线：界面基线截图 | ⏸ 待补：运行环境（沙箱）拿不到 `/dev/dri`（机器有 i915 GPU，`renderD128` 在），软件光栅下帧送不进 `wl_surface`，**窗口都不显示**，自截图更不可能；功能正确性由 87 条测试与运行日志证明，**像素级基线需在有 `/dev/dri` 的环境补**（详见 `docs/ui-baseline/README.md`） |
 | M2 B 线：编辑内核 + 组织 + 输出 | ⬜ 未开始（见 `docs/01` §11 的 F 域） |
 | 界面还原数值 | 🟡 主几何已实测对齐（栏宽/单元格/间距/滚动条/分组头），**细节项仍待 PM 用原版截图回填**（`theme.rs` 里标 `TODO(U-xx)`） |
 | M0.3 TCC 跨重启 / M0.4 字体首帧 / M0.5 栅格 ≥55fps | ⏸ 需真机交互验证（本轮只完成了「起窗口 + 首帧正常」） |

@@ -4,8 +4,9 @@
 把「界面还原」从主观判断变成可比对的证据（03 §5A）。
 
 > **M2 的基线待补（见文末「M2 索引进度界面：为什么没有截图」）**——
-> 本轮的开发环境**没有 GPU 设备节点**，`ViewportCommand::Screenshot` 的回调拿不到帧，
-> 自截图流程跑不出 PNG。代码行为由 87 条测试 + 运行日志证明，**不靠截图**。
+> 本轮用来跑截图的环境（沙箱）**拿不到 `/dev/dri` 节点**（机器本身有 i915 GPU），
+> 软件光栅下帧连 `wl_surface` 都送不进去，`ViewportCommand::Screenshot` 的回调自然不触发。
+> 代码行为由 87 条测试 + 运行日志证明，**不靠截图**。
 
 > **为什么这三张能入库**：03 §5A 的「仓库只提交派生数据、不提交原版截图原图」约束，
 > 针对的是**原版 Picasa 3.9 的截图**（他人版权，只能进内部制品库）。
@@ -89,10 +90,14 @@ git commit -m "docs(ui-baseline): 重新生成图库基线"
 
 | 项 | 实测 |
 | --- | --- |
-| 设备 | Google Pixelbook Go（Atlas），**无独立/集成 GPU 设备节点**：`/dev/dri` 不存在 |
+| 设备 | Google Pixelbook Go（Atlas）。**机器本身有 GPU**：`/sys/class/drm/` 下有 `card1` + `renderD128`，驱动 `i915`（PCI `8086:591C`），`card1-eDP-1` 为 connected |
+| 真正的缺件 | **运行环境（沙箱）没有把 `/dev/dri` 映射进来**——节点不存在，于是 Mesa 找不到 DRM 设备 |
 | 图形栈 | Wayland 会话；Mesa 26.2.4 + llvmpipe（纯 CPU 软件光栅） |
-| 后端选择 | EGL 直接失败：`ZINK: failed to choose pdev` / `egl: failed to create dri2 screen` |
-| 退让后 | `WGPU_BACKEND=vulkan` 能起窗口，wgpu 明确告警 `Software rasterizer detected ... name: "llvmpipe"` |
+| 后端选择 | EGL 直接失败：`ZINK: failed to choose pdev` / `egl: failed to create dri2 screen` / `Failed to query drm device` |
+| 退让后 | `WGPU_BACKEND=vulkan` 能建窗口对象，wgpu 明确告警 `Software rasterizer detected ... name: "llvmpipe"` |
+
+> ⚠️ **这里曾经写错过一次，改正如下**：最初记成「这台机器没有 GPU」，那是**把沙箱的缺件当成了机器的缺件**。
+> 实际是 i915 在、`renderD128` 在，只是沙箱不给 `/dev/dri` 节点。**在桌面终端里直接跑（不经沙箱）是有 GPU 的。**
 
 **应用本身是能跑的**：`openpicasa.log` 里索引全流程走通，栅格布局也正常。
 
@@ -103,13 +108,27 @@ INFO  picasa_core::scanner:  索引队列排空 photos=300 dirs=4
 DEBUG picasa_core::library:  目录已落库 path=.../2011-05-01 added=0 removed=0   (×3 子目录)
 ```
 
-### 卡点
+### 卡点（现象 → 根因）
 
-`ViewportCommand::Screenshot` 的回调**始终不触发**，日志里没有「已保存窗口截图」，PNG 不生成。
-已排除的原因：不是温度不够（`WARMUP` 从 200 降到 **2** 也一样不出发）、不是超时太短
-（240 s 同样）、不是前端会话问题（窗口确实起来了、索引确实跑完了）。
+**窗口在沙箱里根本不显示**，不只是截不到图。用 `WAYLAND_DEBUG=1` 抓协议，20 秒内只有初始提交，**没有任何 `wl_surface.attach`**：
 
-因此判定为**软件光栅下的帧缓冲回读不可用**，与代码无关。
+```text
+-> xdg_wm_base#14.get_xdg_surface(new id xdg_surface#29, wl_surface#28)
+-> xdg_toplevel#30.set_title("OpenPicasa")            # 窗口对象建好了
+<- xdg_toplevel#30.configure(0, 0, array[0])          # 合成器也回话 222
+<- xdg_surface#29.configure(222)
+-> wl_surface#28.commit()                             # 只有这次空提交
+（之后 20 秒：无 attach、无 damage、无 buffer）
+```
+
+`ViewportCommand::Screenshot` 的回调始终不触发，也是同一个根因——**从来没渲染出过一帧**。
+
+已排除：不是预热帧数不够（`WARMUP` 从 200 降到 **2**）、不是超时太短（240 s）、
+不是没连上合成器（协议全对）、不是崩溃（进程活到 timeout）。
+
+**根因**：没有 `/dev/dri` → 软件光栅拿不到可导出的 DMA-BUF → 帧送不进 `wl_surface` →
+合成器按规矩不映射窗口。所以「看不到窗口」与「截不到图」是同一件事，**都只在这个沙箱里发生**。
+
 
 ### 真机上怎么补（在有能力时照做）
 
