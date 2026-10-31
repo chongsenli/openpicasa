@@ -15,6 +15,7 @@
 pub mod filters;
 pub mod index;
 pub mod library;
+pub mod migrate;
 pub mod paths;
 pub mod prefs;
 pub mod scanner;
@@ -26,9 +27,7 @@ pub use index::{FailureItem, IndexBoard, IndexSnapshot, IndexState, TaskSnapshot
 pub use library::{Library, View};
 pub use paths::AppPaths;
 pub use prefs::Preferences;
-pub use scanner::{
-    CoreEvent, IndexService, ScanHandle, spawn_scan, spawn_scan_with_board,
-};
+pub use scanner::{CoreEvent, IndexService, ScanHandle, spawn_scan, spawn_scan_with_board};
 pub use thumbs::{THUMB_WORKERS, ThumbJob, ThumbService};
 
 /// 核心层错误。

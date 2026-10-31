@@ -90,6 +90,131 @@ pub enum ThumbState {
 /// 便捷常量：`upsert` 时表示「缓存键未变」。
 pub const UPSERT_UNCHANGED: i64 = -1;
 
+// ---------------------------------------------------------------- M2.1 新增
+
+/// 关注根目录（`roots` 表的一行）。
+///
+/// 迁入之后它是**唯一真相源**：`Preferences.roots` 降级为只读兼容字段，
+/// 任何「再加一个根目录」的路径都必须走这里（`docs/05` §5 第 1 条）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootRow {
+    pub id: i64,
+    pub path: String,
+    pub path_key: String,
+    /// 0=active / 1=closed。**关闭只改状态，不删数据。**
+    pub state: i64,
+    pub added_at: i64,
+    pub closed_at: Option<i64>,
+    /// 该卷是否不区分大小写（探测一次后固化）。排除判定的 `match_key` 依赖它。
+    pub case_insensitive: bool,
+}
+
+impl RootRow {
+    pub fn is_active(&self) -> bool {
+        self.state == 0
+    }
+}
+
+/// 迁入 roots 时由上层（core）递进来的一条种子。
+///
+/// `added_at` 用偏好文件的 mtime——真实的「加入时间」在 M2 里没记录，**不编造**。
+/// `case_insensitive` 由 core 的可移植探测给出；`None` 表示没探测成功，落库取默认 1。
+#[derive(Clone, Debug)]
+pub struct RootSeed {
+    pub path: String,
+    pub path_key: String,
+    pub added_at: i64,
+    pub case_insensitive: Option<bool>,
+}
+
+/// 排除项（`exclusions` 表的一行）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExclusionRow {
+    pub id: i64,
+    pub root_id: i64,
+    /// 原样保留供展示（NFC 归一后）
+    pub relative_path: String,
+    /// 比较键：NFC + （该卷不区分大小写时小写）
+    pub match_key: String,
+    pub created_at: i64,
+    /// 路径已不存在，供诊断页清理
+    pub stale: bool,
+}
+
+/// 文件夹树的一行（`folders` 层级字段全量）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderTreeRow {
+    pub id: i64,
+    pub path: String,
+    pub name: Option<String>,
+    pub parent_id: Option<i64>,
+    pub root_id: Option<i64>,
+    /// 本目录**直接**包含的照片数（物理事实，不受关闭状态影响 —— P-07）
+    pub direct_count: i64,
+    pub has_children: bool,
+    /// 0 空闲 / 1 索引中 / 2 失败 / 3 部分失败
+    pub index_status: i64,
+    pub is_online: bool,
+}
+
+/// 尺寸回填进度（诊断页与「正在回填」提示用）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DimsStats {
+    /// 全部照片
+    pub total: u64,
+    /// 已完成（`dims_status = 1`）
+    pub done: u64,
+    /// 待回填（`dims_status = 0`）
+    pub pending: u64,
+    /// 读取失败（`dims_status = 2`）
+    pub failed: u64,
+}
+
+/// 迁移框架跑完一次升级后的现场（给上层写日志与用户提示用）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UpgradeReport {
+    /// 升级前的 schema 版本（0 = 新库）
+    pub from: i64,
+    /// 升级后的 schema 版本
+    pub to: i64,
+    /// 备份文件。`None` = 没有做备份（新库或已是最新）
+    pub backup: Option<std::path::PathBuf>,
+    /// 迁移失败后是否已用备份恢复
+    pub restored_from_backup: bool,
+    /// 迁移失败的现场（`Some` 表示这次没升上去，应用以旧 schema 数据继续运行）
+    pub error: Option<String>,
+}
+
+/// `apply_v2_data` 的结果计数（写进日志，便于对账）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct V2DataReport {
+    /// 是否真的执行了（false = 之前跑过，幂等跳过）
+    pub applied: bool,
+    /// 写入/复用的根目录条数
+    pub roots: usize,
+    /// 补出来的中间层目录（原先库里没有这些行）
+    pub folders_created: usize,
+    /// 回写层级字段的目录数
+    pub folders_linked: usize,
+    /// 尺寸状态被初始化的照片数
+    pub photos_stamped: u64,
+}
+
+/// 一条索引任务记录（历史，不参与实时进度）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskRow {
+    pub task_id: i64,
+    pub root_id: Option<i64>,
+    pub scope_path: String,
+    /// `schema::TaskKind` 的整数编码
+    pub kind: i64,
+    /// `schema::TaskStatus` 的整数编码（与 04 §3.1 七态同号）
+    pub status: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub error_code: Option<String>,
+}
+
 /// 一个目录的缩略图状态计数（M2 索引进度面板用）。
 ///
 /// ⚠️ 这四个数**只来自 SQL 聚合**，不由 UI 侧累加——「四处一致」的前提是同一处算。

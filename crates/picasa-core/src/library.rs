@@ -129,6 +129,11 @@ pub struct Library {
     pub roots: Vec<FolderNode>,
     /// 扁平化后的可见行（每帧重建代价极低，直接算）
     pub visible_folders: Vec<FolderRowView>,
+    /// 当前 active 的根目录（**来自 DB `roots` 表**，不再读偏好）。
+    ///
+    /// 保留成缓存是为了 `reload_tree` / `scan_roots` 不必每次查库；
+    /// 写入点只有 `refresh_roots()` 一个，避免两处各改一半。
+    root_paths: Vec<String>,
 
     // ---- 状态文案（状态栏/工具栏用）----
     pub total_in_db: u64,
@@ -169,6 +174,12 @@ impl Library {
             }
         };
         let prefs = Preferences::load(&paths);
+        // M2.1 数据步骤：把 prefs.roots 迁进 `roots` 表 + 推导文件夹层级（幂等）。
+        // 放在 `reload_tree` 之前——树只认 DB，迁移没跑完树会是空的。
+        if let Err(e) = crate::migrate::ensure_v2_data(&db, &prefs, &paths) {
+            tracing::warn!(error = %e, "v2 数据步骤失败，本次以偏好里的根目录兜底");
+        }
+        let root_paths = crate::migrate::active_root_paths(&db);
         let mut lib = Self {
             paths,
             db: Arc::new(Mutex::new(db)),
@@ -188,6 +199,7 @@ impl Library {
             search: String::new(),
             roots: Vec::new(),
             visible_folders: Vec::new(),
+            root_paths,
             total_in_db: 0,
             scanning: false,
             scan_progress: None,
@@ -212,8 +224,12 @@ impl Library {
 
     // ------------------------------------------------------------------ 树
 
-    /// 重建左栏树（从 DB 的 folders 表 + 偏好里的 roots）。
+    /// 重建左栏树（从 DB 的 folders 表 + `roots` 表）。
+    ///
+    /// ⚠️ 根目录来自 **DB**，不是偏好文件（M2.1 起 `Preferences.roots` 只读兼容）。
+    /// 表还没建好（老库迁移失败、降级运行）时退回偏好，避免树整个空掉。
     pub fn reload_tree(&mut self) -> Result<()> {
+        self.refresh_roots();
         let folders = self.db()?.all_folders()?;
         self.total_in_db = folders.iter().map(|f| f.photo_count as u64).sum();
         self.path_to_id = folders.iter().map(|f| (f.path.clone(), f.id)).collect();
@@ -228,14 +244,14 @@ impl Library {
                 e.2 = f.photo_count;
             }
         }
-        for root in &self.prefs.roots {
+        for root in &self.root_paths {
             if !entries.iter().any(|e| &e.0 == root) {
                 entries.push((root.clone(), None, 0));
             }
         }
 
         // 2) 只保留 roots 之下的路径（roots 为空 → 树为空，走空态引导）
-        entries.retain(|(p, _, _)| is_under_any_root(p, &self.prefs.roots));
+        entries.retain(|(p, _, _)| is_under_any_root(p, &self.root_paths));
         // 字典序保证「父目录一定在子目录之前」，配合栈就能建树
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -583,22 +599,68 @@ impl Library {
 
     // ------------------------------------------------------------------ 根目录
 
+    /// 从 DB 刷新「当前关注根目录」缓存。**唯一的写入点**。
+    fn refresh_roots(&mut self) {
+        let pairs: Vec<(i64, String)> = match self.db() {
+            Ok(db) => match db.roots(false) {
+                Ok(rows) => rows.into_iter().map(|r| (r.id, r.path)).collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "读 roots 失败");
+                    Vec::new()
+                }
+            },
+            Err(_) => Vec::new(),
+        };
+        self.root_paths = if pairs.is_empty() && !self.prefs.roots.is_empty() {
+            // 降级兜底：`roots` 表不可用（迁移失败 / 老库）时退回偏好。
+            // 这段代码存在的唯一理由就是「别让用户看到一个空图库」。
+            self.prefs.roots.clone()
+        } else {
+            pairs.into_iter().map(|(_, p)| p).collect()
+        };
+    }
+
+    /// 当前关注根目录（绝对路径）。UI 的「添加文件夹」从中挑起点。
+    pub fn root_paths(&self) -> Vec<PathBuf> {
+        self.root_paths.iter().map(PathBuf::from).collect()
+    }
+
     pub fn add_root(&mut self, root: &Path) {
-        self.prefs.add_root(root);
-        self.dirty_prefs = true;
+        // 走 DB：`roots` 表是唯一真相源；偏好里的 roots 不再写入。
+        let canonical = paths::canonical_string(root);
+        let ci = crate::migrate::probe_case_insensitive(root);
+        let now = chrono::Utc::now().timestamp();
+        if let Ok(db) = self.db() {
+            match db.upsert_root(&canonical, now, ci) {
+                Ok(_) => {
+                    tracing::info!(root = %canonical, case_insensitive = ci, "关注根目录已入库")
+                }
+                Err(e) => tracing::warn!(error = %e, "写入 roots 失败"),
+            }
+        }
+        if !self.root_paths.contains(&canonical) {
+            self.root_paths.push(canonical);
+        }
+        self.refresh_roots();
     }
 
     pub fn remove_root(&mut self, root: &Path) {
         let s = paths::canonical_string(root);
-        self.prefs.remove_root(root);
-        // 索引也一起清掉：用户说「从图库移除」，就该真的不在了。
-        // **注意：只删自己的索引，不动磁盘文件。**
+        // 关闭根目录：**只改状态，不删数据**（P-07 / `docs/05` §1.3.2）。
+        if let Ok(db) = self.db()
+            && let Ok(Some(row)) = db.root_by_path(&s)
+        {
+            let _ = db.set_root_closed(row.id, true);
+        }
+        // 「从图库移除」的既有语义（F2-08）：索引也一起清掉。
+        // ⚠️ 只删自己的索引，不动磁盘文件；「关闭但保留索引」是 E 导航的独立动作。
         if let Ok(db) = self.db()
             && let Ok(Some(id)) = db.folder_id(&s)
         {
             let _ = db.delete_folder(id);
         }
-        self.dirty_prefs = true;
+        self.root_paths.retain(|p| p != &s);
+        self.refresh_roots();
     }
 
     // ------------------------------------------------------------------ 动作
@@ -891,6 +953,6 @@ fn same_day(a: i64, b: i64) -> bool {
 impl Library {
     /// 当前视图的根目录列表（用于「添加文件夹」后启动扫描）。
     pub fn scan_roots(&self) -> Vec<PathBuf> {
-        self.prefs.root_paths()
+        self.root_paths()
     }
 }

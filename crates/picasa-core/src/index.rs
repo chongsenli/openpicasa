@@ -82,6 +82,22 @@ impl IndexState {
             Self::Waiting | Self::Scanning | Self::Thumbnailing | Self::Paused
         )
     }
+
+    /// 七态的**整数编码**。落库口径：`index_tasks.status`（`picasa-db::TaskStatus`）。
+    ///
+    /// 两边必须同号，否则诊断页会把「暂停」显示成「已完成」这种荒谬的东西。
+    /// `index::tests::codes_match_db_status` 守着这条契约，改一处漏另一处会红。
+    pub fn code(self) -> i64 {
+        match self {
+            Self::Waiting => 0,
+            Self::Scanning => 1,
+            Self::Thumbnailing => 2,
+            Self::Completed => 3,
+            Self::PartialFailed => 4,
+            Self::Paused => 5,
+            Self::Unreachable => 6,
+        }
+    }
 }
 
 /// 一条失败记录。**按条目计，不按尝试次数计**（`04` §2.4 第 3 条）。
@@ -886,5 +902,29 @@ mod tests {
             labels,
             ["等待", "扫描中", "生成缩略图中", "已完成", "部分失败", "暂停", "不可访问"]
         );
+    }
+
+    #[test]
+    fn codes_match_db_status() {
+        // 落库编码的契约：`index_tasks.status` 与七态一一对应（M2.1 §1.3.5）。
+        use picasa_db::TaskStatus;
+        for state in [
+            IndexState::Waiting,
+            IndexState::Scanning,
+            IndexState::Thumbnailing,
+            IndexState::Completed,
+            IndexState::PartialFailed,
+            IndexState::Paused,
+            IndexState::Unreachable,
+        ] {
+            let back = TaskStatus::from_code(state.code())
+                .unwrap_or_else(|| panic!("{:?} 的编码 {} 在 DB 侧没有对应值", state, state.code()));
+            assert_eq!(back.code(), state.code());
+        }
+        // 七态 + 0..6 是双射，没有空洞
+        for code in 0..7 {
+            assert!(TaskStatus::from_code(code).is_some(), "编码 {code} 不该是空洞");
+        }
+        assert!(TaskStatus::from_code(7).is_none());
     }
 }

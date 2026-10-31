@@ -541,6 +541,15 @@ fn walk_and_store(
             photos_in_folder: items.len() as u32,
         });
     }
+
+    // 层级与直接计数跟上（M2.1）：新扫出来的子目录要挂上父链，`direct_count` 要跟着变。
+    // 做法是「读一遍 folders 再回写」——几千行是毫秒级，比增量维护计数少一整类 bug。
+    if let Ok(guard) = inner.db.lock() {
+        match guard.refresh_hierarchy() {
+            Ok((created, linked)) => tracing::debug!(created, linked, "文件夹层级已刷新"),
+            Err(e) => tracing::warn!(error = %e, "刷新文件夹层级失败"),
+        }
+    }
     Ok(Some(root_id))
 }
 

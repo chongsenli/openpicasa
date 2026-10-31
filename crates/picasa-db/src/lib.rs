@@ -13,12 +13,19 @@
 //! `~/Library/Application Support/app.openpicasa/library.sqlite`（由 `picasa-core::paths` 决定，
 //! 本 crate 只接受一个路径参数，**不自己拼路径**——这样「谁能写哪儿」只有一处定义）。
 
+mod dims;
+mod pathutil;
+mod roots;
 mod schema;
+mod tasks;
 mod types;
+mod upgrade;
 
-pub use schema::{MIGRATIONS, SCHEMA_VERSION};
+pub use schema::{DATA_V2_ROOTS_FOLDERS, MIGRATIONS, SCHEMA_VERSION, TaskKind, TaskStatus};
 pub use types::{
-    FolderRow, PhotoInput, PhotoRow, ScanApply, ThumbBuf, ThumbState, ThumbStats, UPSERT_UNCHANGED,
+    DimsStats, ExclusionRow, FolderRow, FolderTreeRow, PhotoInput, PhotoRow, RootRow, RootSeed,
+    ScanApply, TaskRow, ThumbBuf, ThumbState, ThumbStats, UPSERT_UNCHANGED, UpgradeReport,
+    V2DataReport,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -44,29 +51,59 @@ pub type Result<T> = std::result::Result<T, DbError>;
 pub struct Db {
     conn: Connection,
     path: Option<PathBuf>,
+    /// 本次打开时的升级现场（新库 / 已最新时为 `None`）。
+    upgrade: Option<UpgradeReport>,
 }
 
 impl Db {
     /// 打开（或创建）索引库并跑迁移。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::open_with_report(path)?.0)
+    }
+
+    /// 同 [`Db::open`]，但把升级现场交回给调用方（日志 / 「正在升级资料库」/ 降级提示）。
+    ///
+    /// 流程（`docs/05` §1.4）：
+    /// 1. **先备份**：`VACUUM INTO <support>/Backups/openpicasa-v1-<utc>.db`；
+    /// 2. 单事务跑 DDL；
+    /// 3. 失败 → 回滚 + 备份覆盖 → **以 M2 数据继续运行**（不拒绝启动）；
+    /// 4. 成功 → 打开长连接，`migrate()` 变成空操作。
+    pub fn open_with_report(path: impl AsRef<Path>) -> Result<(Self, UpgradeReport)> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let report = upgrade::upgrade_file(&path)?;
         let conn = Connection::open(&path)?;
         Self::tune(&conn)?;
-        let db = Self {
+        let mut db = Self {
             conn,
             path: Some(path),
+            upgrade: None,
         };
-        db.migrate()?;
-        Ok(db)
+        if report.error.is_none() {
+            db.migrate()?;
+        } else {
+            // 迁移失败时不重试：重试只会再失败一次，还会把「已恢复的旧库」再动一遍。
+            tracing::warn!(
+                error = report.error.as_deref().unwrap_or_default(),
+                "本次以旧 schema 数据继续运行，新增能力不可用"
+            );
+        }
+        let mut report = report;
+        report.to = db.schema_version()?;
+        db.upgrade = Some(report.clone());
+        Ok((db, report))
     }
 
     /// 纯内存库（测试用）。
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let db = Self { conn, path: None };
+        let db = Self {
+            conn,
+            path: None,
+            upgrade: None,
+        };
         db.migrate()?;
         Ok(db)
     }
@@ -90,6 +127,9 @@ impl Db {
     }
 
     /// 顺序跑迁移；已应用的跳过。**框架比表重要**（02 §5.5）。
+    ///
+    /// 迁移在一个事务里跑完：中途失败整体回滚，不会留下「建了一半的表」。
+    /// 幂等由 `schema_migrations` 保证，SQL 里不写 `IF NOT EXISTS` 兜底。
     pub fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -104,18 +144,10 @@ impl Db {
                 supported: SCHEMA_VERSION,
             });
         }
-        for m in MIGRATIONS.iter() {
-            if m.version <= current {
-                continue;
-            }
-            tracing::info!(version = m.version, name = m.name, "applying migration");
-            self.conn.execute_batch(m.sql)?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at)
-                 VALUES (?1, strftime('%s','now'))",
-                params![m.version],
-            )?;
+        if current >= SCHEMA_VERSION {
+            return Ok(());
         }
+        upgrade::apply_pending(&self.conn, current)?;
         Ok(())
     }
 
@@ -268,9 +300,14 @@ impl Db {
                     if *size == it.size_bytes && *mtime == it.mtime_ns && *ver == decoder_ver =>
                 {
                     // 缓存键相同：只更新可能变化的 EXIF 摘要字段，不改 thumb_state
+                    // dims_status 跟着宽高一起刷新：扫描器给了宽高就算「已完成」，
+                    // 没给就回到「待回填」（下一轮回填会再试）
                     self.conn.execute(
                         "UPDATE photos SET width = ?2, height = ?3, orientation = ?4,
-                                           taken_at = ?5, taken_at_src = ?6
+                                           taken_at = ?5, taken_at_src = ?6,
+                                           dims_status = CASE
+                                               WHEN ?2 IS NOT NULL AND ?3 IS NOT NULL THEN 1
+                                               ELSE 0 END
                          WHERE id = ?1",
                         params![
                             id,
@@ -288,7 +325,10 @@ impl Db {
                     self.conn.execute(
                         "UPDATE photos SET size_bytes = ?2, mtime_ns = ?3, width = ?4,
                                            height = ?5, orientation = ?6, taken_at = ?7,
-                                           taken_at_src = ?8, decoder_ver = ?9, thumb_state = 0
+                                           taken_at_src = ?8, decoder_ver = ?9, thumb_state = 0,
+                                           dims_status = CASE
+                                               WHEN ?4 IS NOT NULL AND ?5 IS NOT NULL THEN 1
+                                               ELSE 0 END
                          WHERE id = ?1",
                         params![
                             id,
@@ -310,8 +350,10 @@ impl Db {
                     self.conn.execute(
                         "INSERT INTO photos
                            (folder_id, name, name_key, size_bytes, mtime_ns, width, height,
-                            orientation, taken_at, taken_at_src, thumb_state, decoder_ver)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0,?11)",
+                            orientation, taken_at, taken_at_src, thumb_state, decoder_ver,
+                            dims_status)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0,?11,
+                                 CASE WHEN ?6 IS NOT NULL AND ?7 IS NOT NULL THEN 1 ELSE 0 END)",
                         params![
                             folder_id,
                             it.name,
@@ -344,7 +386,9 @@ impl Db {
         }
 
         self.conn.execute(
-            "UPDATE folders SET last_scan_at = strftime('%s','now'), is_online = 1 WHERE id = ?1",
+            "UPDATE folders SET last_scan_at = strftime('%s','now'), is_online = 1,
+                                direct_count = (SELECT COUNT(*) FROM photos WHERE folder_id = ?1)
+             WHERE id = ?1",
             params![folder_id],
         )?;
         Ok(())
@@ -709,7 +753,7 @@ impl Db {
     }
 }
 
-fn map_photo(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
+pub(crate) fn map_photo(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
     Ok(PhotoRow {
         id: r.get(0)?,
         folder_id: r.get(1)?,

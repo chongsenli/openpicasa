@@ -806,7 +806,6 @@ impl OpenPicasaApp {
     fn add_folder(&mut self) {
         let start = self
             .lib
-            .prefs
             .root_paths()
             .first()
             .map(|p| p.parent().unwrap_or(p).to_path_buf())

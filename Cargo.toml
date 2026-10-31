@@ -43,6 +43,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Unicode NFC 归一：迁移时统一目录名编码（HFS+ 的 NFD ↔ APFS 的 NFC）。
+# `picasa-core::paths::nfc` 是 M1 的手写近似版，只覆盖少量拉丁组合，迁移这种
+# 「一次性改写全库」的场合必须用完整实现（`docs/05` §1.4.2）。
+unicode-normalization = "0.1"
 
 # ---- GUI（M1 的核心）----
 egui = "0.37"

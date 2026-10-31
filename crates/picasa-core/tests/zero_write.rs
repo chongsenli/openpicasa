@@ -143,10 +143,14 @@ fn scanning_and_thumbnailing_never_writes_into_photo_directory() {
     let db_len = std::fs::metadata(paths.db_file()).unwrap().len();
     assert!(db_len > 0, "索引库不应为空");
 
-    let prefs = std::fs::read_to_string(paths.preferences_file()).unwrap();
+    // 关注根目录真的落库了（M2.1 起 `roots` 表是唯一真相源，偏好里不再写 roots）
+    let roots = {
+        let db = lib.db().unwrap();
+        db.roots(false).unwrap()
+    };
     assert!(
-        prefs.contains("photos"),
-        "偏好应记住加入的根目录（否则「零写入」是因为根本没工作）"
+        roots.iter().any(|r| r.path.contains("photos")),
+        "关注文件夹必须写进 roots 表（否则「零写入」是因为根本没工作）"
     );
 
     // 缩略图确实生成了（否则栅格永远是空框）

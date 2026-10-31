@@ -13,7 +13,14 @@ const PREFS_VERSION: u32 = 1;
 #[serde(default)]
 pub struct Preferences {
     pub version: u32,
-    /// 已加入图库的根目录（绝对路径，NFC）。
+    /// ⚠️ **M2.1 起废弃（只读兼容）**：关注根目录的唯一真相源已迁到索引库的 `roots` 表。
+    ///
+    /// 这个字段现在只在两处出现：
+    /// 1. 迁移时当种子读一次（`crate::migrate::seed_roots`）；
+    /// 2. `roots` 表不可用（老库降级运行）时兜底，别让用户看到空图库。
+    ///
+    /// **不要再写它**。同时写 DB 与 JSON 就是双真相源，`docs/04` §3.2 按 P0 处理。
+    /// 保留 3 个版本用于回读，M4 之后删除。
     pub roots: Vec<String>,
     /// 上次打开的视图（`folder:<path>` 或 `all` / `recent`）。
     pub last_view: Option<String>,
@@ -105,6 +112,7 @@ impl Preferences {
         self.roots.retain(|r| r != &s);
     }
 
+    /// ⚠️ 仅供**迁移种子**与降级兜底使用；UI 请走 `Library::root_paths()`。
     pub fn root_paths(&self) -> Vec<PathBuf> {
         self.roots.iter().map(PathBuf::from).collect()
     }
