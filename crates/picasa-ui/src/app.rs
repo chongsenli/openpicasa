@@ -11,7 +11,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, vec2};
 use picasa_core::{
-    AppPaths, CoreEvent, IndexBoard, IndexService, Library, ThumbService, Tier, watcher,
+    AppPaths, CoreEvent, DimsService, IndexBoard, IndexService, Library, ThumbService, Tier,
+    watcher,
 };
 use picasa_db::{PhotoRow, SortKey};
 
@@ -37,6 +38,8 @@ pub struct OpenPicasaApp {
     tx: Sender<CoreEvent>,
     /// 索引服务（M2 A 线）：关注文件夹 → 任务队列 → 扫描/缩略图
     index: IndexService,
+    /// 宽高回填服务（M2.1 B）：可见优先、给索引让路
+    dims: DimsService,
     /// 索引进度板：**四处展示的唯一数据源**
     board: Arc<IndexBoard>,
     /// 进度弹框/面板的界面状态（含"本会话关闭过哪个批次"）
@@ -98,6 +101,8 @@ impl OpenPicasaApp {
 
         let board = Arc::new(IndexBoard::new());
         let index = IndexService::new(lib.db.clone(), board.clone(), tx.clone());
+        // 回填和索引共用一把 DB 锁与同一块进度板：它自己会看板子决定要不要让路
+        let dims = DimsService::new(lib.db.clone(), board.clone());
 
         let mut app = Self {
             lib,
@@ -108,6 +113,7 @@ impl OpenPicasaApp {
             rx,
             tx,
             index,
+            dims,
             board,
             progress: IndexProgressUi::new(),
             watch: None,
@@ -482,6 +488,11 @@ impl OpenPicasaApp {
                 if out.scroll_y > 0.5 {
                     self.lib.mark_prefs_dirty();
                 }
+
+                // 视口里宽高还空着的照片：立刻插进回填队列（M2.1 B）。
+                // 放在 `drop(db)` 之后——`request_visible` 只是往 channel 里塞 id，
+                // 不需要也不该在持有 DB 锁的时候做。
+                self.dims.request_visible(&out.need_dims);
 
                 if let Some(click) = out.clicked {
                     self.lib

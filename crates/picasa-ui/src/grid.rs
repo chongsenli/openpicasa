@@ -315,6 +315,12 @@ pub struct ClickInfo {
     pub range: bool,
 }
 
+/// 一帧最多上报多少条待回填 id。
+///
+/// 正常视口只有几十个格子，这个上限只是防「窗口被拉得特别高 + 小档位」时的意外：
+/// 上万条 id 穿一次 channel 是几百 KB，而回填线程一次也只做一张，报了也没用。
+const NEED_DIMS_MAX: usize = 256;
+
 pub struct GridOutput {
     pub clicked: Option<ClickInfo>,
     pub opened: Option<usize>,
@@ -322,6 +328,12 @@ pub struct GridOutput {
     pub scroll_y: f32,
     pub total_h: f32,
     pub visible: usize,
+    /// 视口里**宽高还空着**的照片 id（M2.1 B：可见区域按需回填）。
+    ///
+    /// 只看内存里的 `PhotoRow`，**不查库、不加锁**：栅格是每帧跑的，
+    /// 为这件事去摸一次 DB 锁，会和索引线程的写事务顶牛。
+    /// 去重与「已经试过的别再试」都在 `DimsService` 里做，这里只管如实上报。
+    pub need_dims: Vec<i64>,
 }
 
 /// 画整个栅格。
@@ -347,6 +359,7 @@ pub fn show(
         scroll_y: 0.0,
         total_h: 0.0,
         visible: 0,
+        need_dims: Vec::new(),
     };
 
     let full = ui.available_rect_before_wrap();
@@ -436,6 +449,13 @@ pub fn show(
             }
             let is_sel = selection.contains(&row.id);
             let is_current = current_index == Some(index);
+
+            // ---- 宽高空着的，报给回填服务（M2.1 B「可见区域按需回填」）----
+            // 放在占位分支**之前**：占位格是「缩略图还没好」，与「宽高还不知道」
+            // 是两件事——一张图可能缩略图早就有了、宽高却因为当年盘没插而一直缺着。
+            if (row.width.is_none() || row.height.is_none()) && out.need_dims.len() < NEED_DIMS_MAX {
+                out.need_dims.push(row.id);
+            }
 
             // ---- 单元格背景（U-24：1px 浅灰框，不是投影）----
             painter.rect_filled(rect, 1.0, Color32::WHITE);

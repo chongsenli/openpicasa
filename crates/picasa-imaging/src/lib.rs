@@ -7,11 +7,13 @@
 //! 也没有任何可以「顺手加个滤镜」的地方。
 
 mod decode;
+mod dims;
 mod exif;
 mod orient;
 mod thumb;
 
 pub use decode::{decode, decode_oriented, probe_dimensions};
+pub use dims::{Dims, DimsError, probe_dims};
 pub use exif::{ExifSummary, probe};
 pub use orient::{apply_orientation, orientation_swaps_axes};
 pub use thumb::{

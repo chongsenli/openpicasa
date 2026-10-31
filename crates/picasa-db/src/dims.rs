@@ -112,4 +112,63 @@ impl Db {
             None => Ok(None),
         }
     }
+
+    /// 按 id 批量取行（`docs/05` §2.1「可见区域按需回填」的数据入口）。
+    ///
+    /// 栅格只把**视口里**那几个 id 递下来，一次几十个；不按目录取，
+    /// 因为视口可能横跨多个分组，而按目录取会把整屏外的几百张也带出来。
+    ///
+    /// 分块是因为 SQLite 的变量个数上限随编译选项而变（旧版 999、新版 32766），
+    /// 500 在所有版本上都安全。
+    pub fn photos_by_ids(&self, ids: &[i64]) -> Result<Vec<PhotoRow>> {
+        const CHUNK: usize = 500;
+        let mut out = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(CHUNK) {
+            let list = chunk
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
+                        p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
+                        p.thumb_state, p.decoder_ver
+                 FROM photos p JOIN folders f ON f.id = p.folder_id
+                 WHERE p.id IN ({list})"
+            );
+            let mut st = self.conn.prepare(&sql)?;
+            let rows = st.query_map([], crate::map_photo)?;
+            out.extend(rows.collect::<std::result::Result<Vec<_>, _>>()?);
+        }
+        Ok(out)
+    }
+
+    /// 还有多少张待回填。
+    ///
+    /// 走 `idx_photos_dims_pending` 部分索引，只数索引里那些行，不做全表聚合——
+    /// 回填线程每批都要问一次，用 [`Db::dims_stats`] 那种四路 `SUM` 会在 5 万行上
+    /// 每 150 ms 扫一遍全表。
+    pub fn pending_dims_count(&self) -> Result<u64> {
+        let n: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM photos WHERE dims_status = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok(n.max(0) as u64)
+    }
+
+    /// 把「读取失败」改回「待回填」。返回改动行数。
+    ///
+    /// 对应 `Db::reset_failed_thumbs` 的同款语义：失败是**可撤销**的结论，
+    /// 用户换了文件、装了新解码器、或从诊断页点「重试」时要用。
+    pub fn reset_failed_dims(&self) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE photos SET dims_status = 0 WHERE dims_status = 2",
+            [],
+        )?;
+        Ok(n)
+    }
 }
