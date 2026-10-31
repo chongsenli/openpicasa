@@ -54,6 +54,8 @@ pub struct Viewer {
     pub pan: Vec2,
     pub tex: Option<TextureHandle>,
     pub tex_size: Vec2,
+    /// 逐级加载的**第一级**：栅格 T0 缩略图，先顶上，等大图到了再换。
+    pub preview: Option<(egui::TextureId, Vec2)>,
     /// 已加载大图的照片 id（`None` = 还在等）
     pub loaded_id: Option<i64>,
     pub requested_id: Option<i64>,
@@ -75,6 +77,7 @@ impl Viewer {
             pan: Vec2::ZERO,
             tex: None,
             tex_size: Vec2::ZERO,
+            preview: None,
             loaded_id: None,
             requested_id: None,
             bg: Bg::Black,
@@ -93,6 +96,7 @@ impl Viewer {
         self.pan = Vec2::ZERO;
         self.tex = None;
         self.tex_size = Vec2::ZERO;
+        self.preview = None;
         self.loaded_id = None;
         self.requested_id = None;
         self.dims = None;
@@ -201,13 +205,36 @@ pub fn show(
     }
     let img_rect = Rect::from_center_size(center, size);
 
-    // ---- 图（还没加载好时画个提示，不画白帧）----
+    // ---- 图：**逐级加载** ----
+    //
+    // ① 大图（2560）就绪 → 画它；
+    // ② 大图还在解码、但栅格 T0 缩略图在缓存里 → 先画缩略图当预览（立刻有画面，不是白框）；
+    // ③ 两者都没有 → 才显示「正在解码…」。
+    //
+    // 为什么值得单列一级：24MP 的 JPEG 全解码在弱机上要 200~400ms，这段时间里
+    // 用户看到的是纯黑 + 一行字。而缩略图早就有了，先顶上能把「打开大图」的感知延迟压到接近 0。
     if let Some(tex) = viewer.tex.as_ref() {
         painter.image(
             tex.id(),
             img_rect,
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
+        );
+    } else if let Some((tex_id, psize)) = viewer.preview {
+        // 预览按自身比例贴合（缩略图与大图比例一致，但用自身尺寸更稳）
+        let prect = fit_rect(img_rect, psize);
+        painter.image(
+            tex_id,
+            prect,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        painter.text(
+            pos2(rect.center().x, rect.bottom() - 52.0),
+            Align2::CENTER_CENTER,
+            "正在载入原图…",
+            FontId::new(11.5, egui::FontFamily::Proportional),
+            Color32::from_white_alpha(140),
         );
     } else {
         painter.text(
@@ -365,6 +392,16 @@ pub fn show(
     }
 
     action
+}
+
+/// 等比放进 `outer`（长边贴合，短边留白，不裁切不拉伸）。
+fn fit_rect(outer: Rect, tex: Vec2) -> Rect {
+    if tex.x <= 0.0 || tex.y <= 0.0 {
+        return outer;
+    }
+    let scale = (outer.width() / tex.x).min(outer.height() / tex.y);
+    let size = vec2(tex.x * scale, tex.y * scale);
+    Rect::from_center_size(outer.center(), size)
 }
 
 fn draw_big_chevron(painter: &egui::Painter, center: egui::Pos2, right: bool, alpha: u8) {

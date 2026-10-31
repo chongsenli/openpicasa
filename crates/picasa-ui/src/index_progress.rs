@@ -125,6 +125,8 @@ pub struct IndexProgressUi {
     panel_open: bool,
     /// 面板里展开失败明细的文件夹路径
     failures_open: Option<String>,
+    /// 是否展开「已完成」的任务（F 加固：默认收起，只留一行可展开的汇总）
+    show_completed: bool,
 
     /// 调试/验收用：本会话出现过的批次数（不做历史任务列表，只用于判定"第 N 批"）
     batches: u64,
@@ -150,6 +152,7 @@ impl IndexProgressUi {
             hide_at: None,
             panel_open: false,
             failures_open: None,
+            show_completed: false,
             batches: 0,
         }
     }
@@ -446,6 +449,27 @@ impl IndexProgressUi {
                 });
                 progress_bar(ui, snap.percent.map(|p| p as f32 / 100.0), theme, now);
                 ui.add_space(4.0);
+
+                // 已完成项自动收起（F 加固）：面板的本分是「正在发生什么」，
+                // 跑完的文件夹不该继续占着位置把进行中的挤下去。默认收起，一行可展开。
+                let completed_count = snap
+                    .tasks
+                    .iter()
+                    .filter(|t| t.state.is_terminal() && t.failed == 0)
+                    .count();
+                if completed_count > 0 {
+                    let label = if self.show_completed {
+                        format!("已完成 {completed_count} 项（点击收起）")
+                    } else {
+                        format!("已完成 {completed_count} 项（点击展开）")
+                    };
+                    if ui
+                        .add(egui::Button::new(RichText::new(label).size(10.5)).frame(false))
+                        .clicked()
+                    {
+                        self.show_completed = !self.show_completed;
+                    }
+                }
                 ui.separator();
 
                 egui::ScrollArea::vertical()
@@ -453,6 +477,10 @@ impl IndexProgressUi {
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         for t in &snap.tasks {
+                            // 已完成的（无失败的）默认不画，见上面的展开开关
+                            if t.state.is_terminal() && t.failed == 0 && !self.show_completed {
+                                continue;
+                            }
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 ui.label(

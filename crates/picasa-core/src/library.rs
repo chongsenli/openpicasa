@@ -9,7 +9,7 @@ use crate::{
     prefs::Preferences,
     scanner::CoreEvent,
 };
-use picasa_db::{Db, PhotoRow, SortKey, SortSpec};
+use picasa_db::{Db, ExclusionRow, PhotoRow, SortKey, SortSpec};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -744,6 +744,128 @@ impl Library {
         }
         self.root_paths.retain(|p| p != &s);
         self.refresh_roots();
+    }
+
+    /// 关闭根目录（E 导航）：只把 `roots.state` 置 closed，**索引与缩略图全留着**。
+    ///
+    /// 与 [`remove_root`](Self::remove_root) 的区别是这条：`remove_root` 是「从图库移除」，
+    /// 连索引一起删；这里是「先不在左栏显示」。下次重新添加同一路径时
+    /// `Db::upsert_root` 会把 `state` 置回 active 并复用 `root_id`，排除记录也原样沿用
+    /// ——这就是 `docs/05` §1.3.2 说的「再次添加秒开」。
+    pub fn close_root(&mut self, root: &Path) {
+        let s = paths::canonical_string(root);
+        {
+            if let Ok(db) = self.db()
+                && let Ok(Some(row)) = db.root_by_path(&s)
+            {
+                let _ = db.set_root_closed(row.id, true);
+            }
+        }
+        self.refresh_roots();
+        let _ = self.reload_tree();
+        let _ = self.reload_photos();
+    }
+
+    /// 已关闭的根目录（诊断页「已关闭的根目录」区用）。
+    pub fn closed_roots(&self) -> Vec<String> {
+        let Ok(db) = self.db() else {
+            return Vec::new();
+        };
+        db.roots(true)
+            .map(|rows| {
+                rows.into_iter()
+                    .filter(|r| r.state != 0)
+                    .map(|r| r.path)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 关闭某个**子文件夹**（E 导航）：写一条排除规则，并把它连同子树的索引删掉。
+    ///
+    /// 返回 `Ok(false)` 表示它是根目录本身或找不到所属根——根本身不能排除
+    /// （要停掉整个根，用 `close_root`）。返回 `Ok(true)` 表示已排除。
+    ///
+    /// ⚠️ 排除规则**不只在树里隐藏**：`scanner::walk_and_store` 会读同一张 `exclusions`
+    /// 表并在遍历时整棵剪掉，否则下一次扫描又会把它加回来。
+    pub fn exclude_folder(&mut self, path: &Path) -> Result<bool> {
+        let s = paths::canonical_string(path);
+        let (root_id, root_path) = {
+            let db = self.db()?;
+            let root = db
+                .roots(false)?
+                .into_iter()
+                .filter(|r| r.path != s && s.starts_with(&format!("{}/", r.path)))
+                .max_by_key(|r| r.path.len());
+            match root {
+                Some(r) => (r.id, r.path),
+                None => return Ok(false),
+            }
+        };
+        let rel = s
+            .strip_prefix(&root_path)
+            .unwrap_or("")
+            .trim_start_matches('/')
+            .to_string();
+        if rel.is_empty() {
+            return Ok(false);
+        }
+        {
+            let db = self.db()?;
+            db.add_exclusion(root_id, &rel)?;
+            // 立刻从索引里拿掉，别等下一次扫描：用户点了「关闭」，照片就该马上消失。
+            if let Ok(Some(id)) = db.folder_id(&s)
+                && let Ok(ids) = db.subtree_folder_ids(id)
+            {
+                for fid in ids {
+                    let _ = db.delete_folder(fid);
+                }
+            }
+        }
+        self.reload_tree()?;
+        self.reload_photos()?;
+        Ok(true)
+    }
+
+    /// 全部排除项（附所属根目录路径），诊断页用。**包含已关闭根目录**的排除项。
+    pub fn all_exclusions(&self) -> Vec<(String, ExclusionRow)> {
+        let Ok(db) = self.db() else {
+            return Vec::new();
+        };
+        let roots = db.roots(true).unwrap_or_default();
+        let mut out = Vec::new();
+        for r in roots {
+            if let Ok(list) = db.exclusions(r.id) {
+                for e in list {
+                    out.push((r.path.clone(), e));
+                }
+            }
+        }
+        out
+    }
+
+    /// 恢复一条排除项：删掉记录，返回它所属的根目录路径（调用方据此触发重扫把它加回来）。
+    pub fn restore_exclusion(&mut self, exclusion_id: i64) -> Result<Option<String>> {
+        let (found, root_path) = {
+            let db = self.db()?;
+            let mut found = None;
+            let mut root_path = None;
+            for r in db.roots(true)? {
+                if let Ok(list) = db.exclusions(r.id)
+                    && list.iter().any(|e| e.id == exclusion_id)
+                {
+                    found = Some(exclusion_id);
+                    root_path = Some(r.path);
+                    break;
+                }
+            }
+            (found, root_path)
+        };
+        if found.is_some() {
+            let db = self.db()?;
+            db.remove_exclusion(exclusion_id)?;
+        }
+        Ok(root_path)
     }
 
     // ------------------------------------------------------------------ 动作

@@ -237,3 +237,20 @@ pub struct ThumbStats {
     /// 待生成（`thumb_state = 0`）
     pub pending: u64,
 }
+
+/// 索引库的「缓存占用」统计（F 加固的诊断页用）。
+///
+/// 用途只有一个：让用户知道「这东西占了我多少空间」，并能一键清掉重来。
+/// `db_bytes` 是**主库文件大小**（不含 WAL），`thumb_bytes` 是缩略图 BLOB 的净和——
+/// 两者不等是正常的：表、索引、未 VACUUM 的空闲页都算在文件里。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CacheStats {
+    /// 主库文件字节数（`-wal` 未计）
+    pub db_bytes: u64,
+    /// 照片行数
+    pub photo_count: u64,
+    /// 缩略图条数（`thumbs` 行数）
+    pub thumb_count: u64,
+    /// 缩略图 BLOB 总字节数
+    pub thumb_bytes: u64,
+}

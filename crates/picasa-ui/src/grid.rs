@@ -486,6 +486,8 @@ pub struct GridOutput {
     pub scroll_y: f32,
     pub total_h: f32,
     pub visible: usize,
+    /// 视口顶部第一张可见照片的索引（用于「重载后锚定」——记住用户在看哪一张）。
+    pub top_index: usize,
     /// 视口里**宽高还空着**的照片 id（M2.1 B：可见区域按需回填）。
     ///
     /// 只看内存里的 `PhotoRow`，**不查库、不加锁**：栅格是每帧跑的，
@@ -504,6 +506,8 @@ pub fn show(
     tier: Tier,
     has_headers: bool,
     restore_scroll: Option<f32>,
+    // 「重载后锚定」的目标照片 id（D 流式展示）。`None` = 不用锚定。
+    anchor_id: Option<i64>,
     db: &Db,
     service: &ThumbService,
     cache: &mut TextureCache,
@@ -518,6 +522,7 @@ pub fn show(
         scroll_y: 0.0,
         total_h: 0.0,
         visible: 0,
+        top_index: 0,
         need_dims: Vec::new(),
     };
 
@@ -560,10 +565,21 @@ pub fn show(
         "栅格布局"
     );
 
+    // 滚动位置：显式 `restore_scroll` 优先（切视图/搜索要回顶）；
+    // 否则若给了锚点 id，就把它滚到视口顶部——这就是「重载后用户还在看同一张」。
+    // 注意 O(n) 的 position 只在锚定这一帧跑一次，滚动时 `anchor_id` 恒为 None，不产生每帧开销。
+    let anchor_off = anchor_id.and_then(|id| {
+        let idx = photos.iter().position(|p| p.id == id)?;
+        layout
+            .thumb_rect(idx)
+            .map(|r| (r.top() - Metrics::GRID_PAD).max(0.0))
+    });
+    let scroll_off = restore_scroll.or(anchor_off);
+
     let mut area = ScrollArea::vertical()
         .id_salt("grid-scroll")
         .auto_shrink([false, false]);
-    if let Some(off) = restore_scroll {
+    if let Some(off) = scroll_off {
         area = area.vertical_scroll_offset(off);
     }
 
@@ -576,6 +592,7 @@ pub fn show(
         let painter = ui.painter_at(clip);
         let (first, last) = layout.visible_index_range(viewport);
         out.visible = last.saturating_sub(first);
+        out.top_index = first.min(photos.len());
 
         // ---- 普通分组头：画在各自的位置上（吸顶头是「滚出去之后」的替身，两者互斥）----
         if layout.has_headers {

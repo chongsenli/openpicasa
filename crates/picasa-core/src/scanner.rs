@@ -19,7 +19,7 @@
 //! 才进入生成阶段。于是「生成阶段又发现新文件」这唯一的漂移源被整块排除，
 //! 新文件进入下一批（`04` §3.3 / P-04）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -98,6 +98,12 @@ struct Inner {
     /// 本轮发现过的图片总数（只用于 `ScanFinished` 的汇总文案；
     /// 进度数字一律看 `IndexBoard`，那里才是唯一数据源）
     found: AtomicU64,
+    /// 已在队列里（尚未由 worker 取走）的文件夹路径。
+    ///
+    /// 「右键刷新」用它做**合并去重**：同一个文件夹连点五次刷新，只入队一次。
+    /// worker 取走任务时移出——所以它表达的是「排队中」，不含「正在跑」
+    /// （后者看 `IndexBoard` 的 `running()` 状态）。
+    queued: Mutex<HashSet<String>>,
 }
 
 /// 索引服务句柄（队列 + worker + 休眠探测）。
@@ -120,6 +126,7 @@ impl IndexService {
             started: Mutex::new(None),
             dirs: AtomicU64::new(0),
             found: AtomicU64::new(0),
+            queued: Mutex::new(HashSet::new()),
         });
 
         let w = inner.clone();
@@ -152,6 +159,9 @@ impl IndexService {
     /// 关注文件夹入队（**新批次**）。返回批次号。
     pub fn enqueue_scan(&self, roots: &[PathBuf]) -> u64 {
         let keys: Vec<String> = roots.iter().map(|p| paths::canonical_string(p)).collect();
+        if let Ok(mut q) = self.inner.queued.lock() {
+            q.extend(keys.iter().cloned());
+        }
         self.reset_counters_if_idle();
         let batch = self.inner.board.begin_batch(&keys);
         self.inner.pending.fetch_add(roots.len() as u64, Ordering::Relaxed);
@@ -168,11 +178,45 @@ impl IndexService {
         batch
     }
 
+    /// 右键「刷新此文件夹」：重新扫一个目录（**合并去重**）。
+    ///
+    /// 返回 `false` 表示这次刷新被**合并**了——该文件夹要么还在队列里，
+    /// 要么正在被索引。连点五次刷新只会真的跑一次，这是 E 导航的要求。
+    ///
+    /// 与 `enqueue_scan` 的区别是单个目录、且带去重；批次语义相同。
+    pub fn enqueue_refresh(&self, path: &Path) -> bool {
+        let key = paths::canonical_string(path);
+        // ① 已在队列（尚未取走）→ 合并
+        {
+            let Ok(mut q) = self.inner.queued.lock() else {
+                return false;
+            };
+            if !q.insert(key.clone()) {
+                return false;
+            }
+        }
+        // ② 正在索引同一目录 → 合并（回滚刚才的插入，避免「排队集合」留脏）
+        let snap = self.inner.board.snapshot();
+        if let Some(t) = snap.task_by_path(&key)
+            && t.state.is_running()
+        {
+            if let Ok(mut q) = self.inner.queued.lock() {
+                q.remove(&key);
+            }
+            return false;
+        }
+        self.enqueue_scan(&[path.to_path_buf()]);
+        true
+    }
+
     /// 重试某个关注文件夹的失败项（**新批次**，只处理失败项）。
     ///
     /// 调用前 UI 必须已经把失败项在库里重置为「待生成」（`Db::reset_failed_thumbs`）。
     pub fn enqueue_retry(&self, folder_id: i64, path: &Path) -> u64 {
         let key = paths::canonical_string(path);
+        if let Ok(mut q) = self.inner.queued.lock() {
+            q.insert(key.clone());
+        }
         let (discovered, completed, failed) = {
             let Ok(db) = self.inner.db.lock() else {
                 return 0;
@@ -284,6 +328,12 @@ fn worker_loop(rx: Receiver<Job>, inner: Arc<Inner>) {
         }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(job) => {
+                // 已取走 → 移出「排队中」集合，「去重」从此改由 `IndexBoard` 的
+                // running 状态接管（否则一个长任务期间永远无法再刷新它）。
+                let key = paths::canonical_string(&job.path);
+                if let Ok(mut q) = inner.queued.lock() {
+                    q.remove(&key);
+                }
                 run_job(&inner, job);
                 if inner.pending.fetch_sub(1, Ordering::Relaxed) <= 1 {
                     let photos = inner.found.load(Ordering::Relaxed);
@@ -391,6 +441,13 @@ fn walk_and_store(
     let mut denied = 0u64;
     let mut last_report = Instant::now();
 
+    // ---- 排除规则（E 导航「关闭此子文件夹」）：进来前一次性载入，遍历时纯内存判定 ----
+    //
+    // 为什么在扫描侧做、而不是只在树里隐藏：只在树里隐藏的话，下一次任何扫描
+    // 都会把被排除的目录原样加回来，用户会看到「关了又自己出现」——这是最招骂的一类 bug。
+    // 排除集按「最近的关注根目录」取，`relative_path` 相对那个根算，与 `Db::add_exclusion` 同口径。
+    let exclusion = load_exclusion_set(inner, root);
+
     let mut walker = walkdir::WalkDir::new(root)
         .max_depth(filters::DEFAULT_MAX_DEPTH)
         .follow_links(false)
@@ -420,6 +477,14 @@ fn walk_and_store(
                 // 否则 `.staging` 这类以点开头的目录会被整棵剪掉，扫出 0 张照片。
                 let name = entry.file_name().to_string_lossy();
                 if filters::should_skip_dir(&name) {
+                    walker.skip_current_dir();
+                    continue;
+                }
+                // 被用户「关闭」的子目录：整棵剪掉，连照片都不记
+                // （`walkdir::DirEntry::path` 本身就返回 `&Path`，不需要 to_path_buf 也不需要再取地址）
+                if let Some(ex) = &exclusion
+                    && ex.hits(entry.path())
+                {
                     walker.skip_current_dir();
                     continue;
                 }
@@ -642,6 +707,55 @@ fn lock_db(db: &Arc<Mutex<Db>>) -> Option<std::sync::MutexGuard<'_, Db>> {
 
 fn db_folder_id(db: &Arc<Mutex<Db>>, path: &str) -> Option<i64> {
     lock_db(db)?.folder_id(path).ok().flatten()
+}
+
+/// 扫描时用的排除集：一组「相对最近关注根目录」的比较键。
+///
+/// 存在意义：用户「关闭某个子文件夹」后，**任何一次重扫都不能把它加回来**。
+/// 只在左栏树里隐藏是假修复——下一次扫描照旧入库，用户看到「关了又自己出现」。
+struct ExclusionSet {
+    root: String,
+    case_insensitive: bool,
+    keys: HashSet<String>,
+}
+
+impl ExclusionSet {
+    fn hits(&self, path: &Path) -> bool {
+        let Ok(rel) = path.strip_prefix(&self.root) else {
+            return false;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if rel.is_empty() {
+            return false; // 根目录本身永不被排除
+        }
+        let key = if self.case_insensitive {
+            paths::compare_key(&rel)
+        } else {
+            paths::nfc(&rel)
+        };
+        self.keys.contains(&key)
+    }
+}
+
+/// 取 `path` 所属的**最近**关注根目录的排除集（没有排除项就返回 `None`，省掉每次判定）。
+fn load_exclusion_set(inner: &Arc<Inner>, path: &Path) -> Option<ExclusionSet> {
+    let target = paths::canonical_string(path);
+    let db = lock_db(&inner.db)?;
+    let root = db
+        .roots(false)
+        .ok()?
+        .into_iter()
+        .filter(|r| target == r.path || target.starts_with(&format!("{}/", r.path)))
+        .max_by_key(|r| r.path.len())?;
+    let keys = db.exclusion_keys(root.id).ok()?;
+    if keys.is_empty() {
+        return None;
+    }
+    Some(ExclusionSet {
+        root: root.path,
+        case_insensitive: root.case_insensitive,
+        keys,
+    })
 }
 
 /// 休眠/挂起探测（`04` §3.1.1，P-03 裁决：`暂停` 只由系统事件触发）。

@@ -21,7 +21,7 @@ use crate::index_progress::{IndexProgressUi, ProgressAction};
 use crate::shortcuts::{self, KeyAction};
 use crate::sidebar::{self, SidebarAction, SidebarCtx};
 use crate::statusbar;
-use crate::textures::TextureCache;
+use crate::textures::{TexState, TextureCache};
 use crate::theme::{Metrics, Theme};
 use crate::toolbar::{self, ToolbarAction};
 use crate::viewer::{self, Viewer, ViewerAction};
@@ -59,9 +59,21 @@ pub struct OpenPicasaApp {
     folders_collapsed: bool,
     folder_ctx: Option<(String, Pos2)>,
     confirm_trash: Option<usize>,
+    /// 诊断页（F 加固）是否打开
+    diagnostics_open: bool,
+    /// 诊断页数据（打开或动作后重取，不每帧算 `SUM(LENGTH(BLOB))`）
+    diag_data: crate::diagnostics::DiagData,
+    /// 数据需要重取
+    diag_dirty: bool,
+    /// 「全量重建」是否已进入二次确认
+    confirm_rebuild: bool,
 
     /// 需要恢复的滚动位置（只在必要时设置一次，否则会锁死滚动）
     restore_scroll: Option<f32>,
+    /// 上一帧视口顶部的照片 id（D 流式展示的「锚点」）。
+    anchor_id: Option<i64>,
+    /// 下一次重载后要滚回哪张（重载会重建列表，用户不该被弹回顶部）
+    pending_anchor: Option<i64>,
     tray_rows: Vec<PhotoRow>,
     tray_rows_dirty: bool,
 
@@ -129,7 +141,13 @@ impl OpenPicasaApp {
             folders_collapsed: false,
             folder_ctx: None,
             confirm_trash: None,
+            diagnostics_open: false,
+            diag_data: crate::diagnostics::DiagData::default(),
+            diag_dirty: false,
+            confirm_rebuild: false,
             restore_scroll,
+            anchor_id: None,
+            pending_anchor: None,
             tray_rows: Vec::new(),
             tray_rows_dirty: true,
             last_autosave: 0.0,
@@ -219,7 +237,12 @@ impl OpenPicasaApp {
             }
         }
         if need_reload {
-            // 视图变了（新目录入库/外部变更）：**保持当前位置**，不强制跳回顶部
+            // 视图变了（扫描流式入库 / 外部变更）：**锚定用户当前看的那张**，不跳回顶部。
+            //
+            // 只记 id 不记像素：扫描会把新照片插到列表任意位置，旧的像素 offset 指向的
+            // 已经不是原来那张了。等重载完、布局重建好，再由 `grid::show` 把这个 id
+            // 换算成新的 y，滚回它——这才是「同一张照片还在原地」。
+            self.pending_anchor = self.anchor_id;
             if let Err(e) = self.lib.reload_photos() {
                 tracing::warn!(error = %e, "刷新照片列表失败");
             }
@@ -426,6 +449,10 @@ impl OpenPicasaApp {
                 if out.index_clicked {
                     self.progress.open_panel();
                 }
+                if out.diag_clicked {
+                    self.diagnostics_open = !self.diagnostics_open;
+                    self.diag_dirty = true;
+                }
             });
 
         // ② 左栏（含底部托盘）
@@ -470,6 +497,7 @@ impl OpenPicasaApp {
             .show(ui, |ui| {
                 let db_arc = self.lib.db.clone();
                 let db = db_arc.lock().expect("db 锁");
+                let anchor = self.pending_anchor.take();
                 let out = grid::show(
                     ui,
                     &self.lib.photos,
@@ -478,6 +506,7 @@ impl OpenPicasaApp {
                     self.lib.tier,
                     matches!(self.lib.sort.key, SortKey::TakenAt),
                     self.restore_scroll,
+                    anchor,
                     &db,
                     &self.service,
                     &mut self.cache,
@@ -488,6 +517,8 @@ impl OpenPicasaApp {
                 drop(db);
 
                 self.restore_scroll = None;
+                // 记住这一帧视口顶部在看哪张：下次重载（扫描出新照片、切排序）时用它锚回来。
+                self.anchor_id = self.lib.photos.get(out.top_index).map(|p| p.id);
                 self.lib.prefs.grid_scroll = out.scroll_y;
                 if out.scroll_y > 0.5 {
                     self.lib.mark_prefs_dirty();
@@ -553,11 +584,117 @@ impl OpenPicasaApp {
         }
     }
 
+    // -------------------------------------------------------------- 诊断页（F）
+
+    /// 一次性取好诊断页要的全部数据。**不每帧取**：`SUM(LENGTH(data))` 会扫一遍缩略图表。
+    fn gather_diag_data(&mut self) {
+        let mut data = crate::diagnostics::DiagData::default();
+        {
+            if let Ok(db) = self.lib.db() {
+                if let Ok(s) = db.cache_stats() {
+                    data.stats = s;
+                }
+                if let Ok(tasks) = db.recent_tasks(50) {
+                    for t in tasks {
+                        if let Ok(list) = db.task_failures(t.task_id) {
+                            for (path, code, _attempts) in list {
+                                data.failures.push(crate::diagnostics::DiagFailure {
+                                    scope: t.scope_path.clone(),
+                                    path,
+                                    code,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        data.exclusions = self.lib.all_exclusions();
+        data.closed_roots = self.lib.closed_roots();
+        self.diag_data = data;
+        self.diag_dirty = false;
+    }
+
+    fn apply_diag_action(&mut self, action: crate::diagnostics::DiagAction, _ctx: &egui::Context) {
+        use crate::diagnostics::DiagAction;
+        match action {
+            DiagAction::ClearThumbs => {
+                let outcome = self.lib.db().map(|db| db.clear_all_thumbs());
+                match outcome {
+                    Ok(Ok(n)) => {
+                        // 内存里的纹理也要丢：否则界面还显示旧缩略图，用户以为没清掉。
+                        self.cache.clear();
+                        self.lib.toast = Some((format!("已清空 {n} 条缩略图，可再点 VACUUM"), 3.0));
+                    }
+                    _ => self.lib.toast = Some(("清理失败，详见日志".into(), 3.0)),
+                }
+            }
+            DiagAction::Vacuum => {
+                let outcome = self.lib.db().map(|db| db.vacuum());
+                match outcome {
+                    Ok(Ok(())) => self.lib.toast = Some(("已压缩索引库".into(), 2.5)),
+                    _ => self.lib.toast = Some(("VACUUM 失败（可能被占用）".into(), 3.0)),
+                }
+            }
+            DiagAction::RebuildAll => {
+                {
+                    if let Ok(db) = self.lib.db() {
+                        let _ = db.clear_all_thumbs();
+                        let _ = db.vacuum();
+                    }
+                }
+                self.cache.clear();
+                let roots = self.lib.root_paths();
+                if !roots.is_empty() {
+                    self.index.enqueue_scan(&roots);
+                }
+                self.lib.toast = Some(("已开始全量重建".into(), 3.0));
+            }
+            DiagAction::RestoreExclusion(id) => {
+                match self.lib.restore_exclusion(id) {
+                    Ok(Some(root)) => {
+                        // 恢复排除项后必须重扫一次根目录，否则树里还是空的。
+                        self.index.enqueue_refresh(std::path::Path::new(&root));
+                        self.lib.toast = Some(("已恢复，正在重新索引".into(), 3.0));
+                    }
+                    Ok(None) => self.lib.toast = Some(("这条排除记录已不存在".into(), 2.5)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "恢复排除项失败");
+                        self.lib.toast = Some(("恢复失败，详见日志".into(), 3.0));
+                    }
+                }
+            }
+            DiagAction::ReopenRoot(path) => {
+                self.lib.add_root(std::path::Path::new(&path));
+                self.index.enqueue_refresh(std::path::Path::new(&path));
+                let _ = self.lib.reload_tree();
+                self.lib.toast = Some(("已重新添加，正在索引".into(), 3.0));
+            }
+            DiagAction::Refresh => {}
+        }
+        self.diag_dirty = true;
+    }
+
     fn draw_viewer(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme;
         if let Some(v) = self.viewer.as_mut() {
             if let Some(row) = self.lib.photos.get(v.index) {
                 viewer::ensure_loaded(v, row, &self.service);
+                // 逐级加载第一级：大图还没到、也还没预览 → 借栅格缓存里的 T0 缩略图顶上。
+                // T0 是 512，解码 + 上传只要几毫秒，比起等 2560 大图（24MP 要 200~400ms）
+                // 能立刻给用户画面。拿不到就维持「正在解码…」，不阻塞。
+                if v.tex.is_none() && v.preview.is_none() {
+                    let db_arc = self.lib.db.clone();
+                    let db = db_arc.lock().expect("db 锁");
+                    let mut budget = 1;
+                    if let TexState::Ready(t, s) =
+                        self.cache
+                            .get(ui.ctx(), &db, &self.service, row, &mut budget)
+                    {
+                        v.preview = Some((t, s));
+                    }
+                    drop(db);
+                }
             }
             let action = viewer::show(
                 ui,
@@ -638,7 +775,7 @@ impl OpenPicasaApp {
                         .corner_radius(3.0)
                         .inner_margin(egui::Margin::same(4))
                         .show(ui, |ui| {
-                            ui.set_min_width(160.0);
+                            ui.set_min_width(200.0);
                             if ui
                                 .add(egui::Button::new("在 Finder 中打开").frame(false))
                                 .clicked()
@@ -646,15 +783,93 @@ impl OpenPicasaApp {
                                 let _ = crate::macos::open_folder(std::path::Path::new(&path));
                                 close = true;
                             }
-                            if ui.button("从图库移除（不删文件）").clicked() {
-                                self.lib.remove_root(std::path::Path::new(&path));
-                                // 任务跟着关注文件夹一起撤掉，否则面板会留一行"幽灵任务"
-                                self.board.forget(&path);
-                                if let Err(e) = self.lib.reload_tree() {
-                                    tracing::warn!(error = %e, "刷新目录树失败");
-                                }
-                                let _ = self.lib.reload_photos();
+                            // ---- 刷新此文件夹（E 导航）：合并去重，连点只跑一次 ----
+                            if ui
+                                .add(egui::Button::new("刷新此文件夹").frame(false))
+                                .clicked()
+                            {
+                                let queued =
+                                    self.index.enqueue_refresh(std::path::Path::new(&path));
+                                self.lib.toast = Some((
+                                    if queued {
+                                        "已加入刷新队列".to_string()
+                                    } else {
+                                        "这个文件夹正在索引，已合并".to_string()
+                                    },
+                                    2.0,
+                                ));
                                 close = true;
+                            }
+
+                            let is_root = self
+                                .lib
+                                .root_paths()
+                                .iter()
+                                .any(|r| r.to_string_lossy().as_ref() == path.as_str());
+
+                            ui.separator();
+
+                            if is_root {
+                                // 根本身：「关闭」保留索引（可秒开），「移除」删索引
+                                if ui
+                                    .add(
+                                        egui::Button::new("关闭关注文件夹（保留索引）")
+                                            .frame(false),
+                                    )
+                                    .clicked()
+                                {
+                                    self.lib.close_root(std::path::Path::new(&path));
+                                    self.board.forget(&path);
+                                    self.viewer = None;
+                                    self.restore_scroll = Some(0.0);
+                                    self.lib.toast =
+                                        Some(("已关闭，重新添加同一目录可秒开".into(), 3.0));
+                                    close = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Button::new("从图库移除（删索引，不删文件）")
+                                            .frame(false),
+                                    )
+                                    .clicked()
+                                {
+                                    self.lib.remove_root(std::path::Path::new(&path));
+                                    // 任务跟着关注文件夹一起撤掉，否则面板会留一行"幽灵任务"
+                                    self.board.forget(&path);
+                                    if let Err(e) = self.lib.reload_tree() {
+                                        tracing::warn!(error = %e, "刷新目录树失败");
+                                    }
+                                    let _ = self.lib.reload_photos();
+                                    self.viewer = None;
+                                    self.restore_scroll = Some(0.0);
+                                    close = true;
+                                }
+                            } else {
+                                // 子文件夹：「关闭」= 加排除规则 + 删该子树索引
+                                if ui
+                                    .add(egui::Button::new("关闭此文件夹（不再显示）").frame(false))
+                                    .clicked()
+                                {
+                                    match self.lib.exclude_folder(std::path::Path::new(&path)) {
+                                        Ok(true) => {
+                                            self.board.forget(&path);
+                                            self.viewer = None;
+                                            self.restore_scroll = Some(0.0);
+                                            self.lib.toast =
+                                                Some(("已关闭。可在「诊断」里恢复".into(), 3.0));
+                                        }
+                                        Ok(false) => {
+                                            self.lib.toast =
+                                                Some(("根目录不能这样关闭".into(), 3.0));
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "关闭子目录失败");
+                                            self.lib.toast =
+                                                Some(("关闭失败，详见日志".into(), 3.0));
+                                        }
+                                    }
+                                    close = true;
+                                }
                             }
                         });
                 });
@@ -694,6 +909,25 @@ impl OpenPicasaApp {
                 });
             if !open {
                 self.confirm_trash = None;
+            }
+        }
+
+        // 诊断页（F 加固）：缓存占用 / 清理、失败记录、排除项、全量重建
+        if self.diagnostics_open {
+            if self.diag_dirty {
+                self.gather_diag_data();
+            }
+            let mut open = self.diagnostics_open;
+            let act = crate::diagnostics::show(
+                &ctx,
+                &theme,
+                &mut open,
+                &self.diag_data,
+                &mut self.confirm_rebuild,
+            );
+            self.diagnostics_open = open;
+            if let Some(a) = act {
+                self.apply_diag_action(a, &ctx);
             }
         }
 

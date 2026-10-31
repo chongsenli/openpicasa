@@ -20,6 +20,7 @@
 
 pub mod app;
 pub mod capture;
+pub mod diagnostics;
 pub mod grid;
 pub mod icons;
 pub mod index_progress;

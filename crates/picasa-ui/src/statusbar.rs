@@ -18,10 +18,14 @@ use crate::theme::{Metrics, Theme};
 pub struct StatusbarOut {
     pub index_clicked: bool,
     pub button_rect: Option<Rect>,
+    /// 「诊断」入口被点（F 加固）
+    pub diag_clicked: bool,
 }
 
 /// `索引进度` 按钮宽度（图标 + 文案 + 状态点）。定值，避免文字长度影响布局。
 const INDEX_BTN_W: f32 = 86.0;
+/// 「诊断」按钮宽度
+const DIAG_BTN_W: f32 = 52.0;
 
 pub fn show(
     ui: &mut Ui,
@@ -45,9 +49,12 @@ pub fn show(
     let font = FontId::new(11.0, egui::FontFamily::Proportional);
 
     // 左：「视图名 · N 张」／索引中的文件夹用「已就绪 X / 已发现 Y」
+    // ⚠️ 用 `photos_total` 而不是 `photos.len()`：C 包分页后 `photos` 只是已加载的前几页，
+    // 拿 `len()` 会显示「2000 张」，下一秒补齐又跳成「50000 张」——数字必须是视图总数。
+    let total = lib.photos_total.max(lib.photos.len());
     let left = match double_count_text(lib, snap) {
         Some(counts) => format!("{} · {counts}", lib.view_title()),
-        None => format!("{} · {} 张", lib.view_title(), lib.photos.len()),
+        None => format!("{} · {total} 张", lib.view_title()),
     };
     painter.text(
         pos2(rect.left() + 10.0, rect.center().y),
@@ -65,18 +72,38 @@ pub fn show(
     out.button_rect = Some(btn);
     out.index_clicked = IndexProgressUi::status_button(ui, theme, snap, btn);
 
-    let mut x = btn.left() - 10.0;
+    // 诊断入口（F 加固）：放在「索引进度」左边，不占栅格宽度、不动左栏。
+    let diag = Rect::from_center_size(
+        pos2(btn.left() - 6.0 - DIAG_BTN_W / 2.0, rect.center().y),
+        vec2(DIAG_BTN_W, Metrics::STATUS_H - 6.0),
+    );
+    let dresp = ui.interact(diag, ui.scope_id().with("diag-btn"), egui::Sense::click());
+    if dresp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        painter.rect_filled(diag, 2.0, theme.cell_hover);
+    }
+    painter.text(
+        diag.center(),
+        Align2::CENTER_CENTER,
+        "诊断",
+        font.clone(),
+        if dresp.hovered() {
+            theme.text_primary
+        } else {
+            theme.status_text
+        },
+    );
+    out.diag_clicked = dresp.clicked();
+
     if lib.selected_count() > 0 {
         painter.text(
-            pos2(x, rect.center().y),
+            pos2(diag.left() - 10.0, rect.center().y),
             Align2::RIGHT_CENTER,
             format!("已选 {} 张", lib.selected_count()),
             font,
             theme.status_text,
         );
-        x -= 90.0;
     }
-    let _ = x;
     out
 }
 

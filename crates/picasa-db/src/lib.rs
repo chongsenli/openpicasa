@@ -23,9 +23,9 @@ mod upgrade;
 
 pub use schema::{DATA_V2_ROOTS_FOLDERS, MIGRATIONS, SCHEMA_VERSION, TaskKind, TaskStatus};
 pub use types::{
-    DimsStats, ExclusionRow, FolderRow, FolderTreeRow, PhotoInput, PhotoRow, RootRow, RootSeed,
-    ScanApply, TaskRow, ThumbBuf, ThumbState, ThumbStats, UPSERT_UNCHANGED, UpgradeReport,
-    V2DataReport,
+    CacheStats, DimsStats, ExclusionRow, FolderRow, FolderTreeRow, PhotoInput, PhotoRow, RootRow,
+    RootSeed, ScanApply, TaskRow, ThumbBuf, ThumbState, ThumbStats, UPSERT_UNCHANGED,
+    UpgradeReport, V2DataReport,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -868,6 +868,52 @@ impl Db {
         let rows = st.query_map([], map_photo)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
+
+    // ------------------------------------------------------------ 维护（F 加固）
+
+    /// 缓存占用统计（诊断页显示「占了多少空间」）。
+    pub fn cache_stats(&self) -> Result<CacheStats> {
+        let photo_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?;
+        let (thumb_count, thumb_bytes): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(data)), 0) FROM thumbs",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let db_bytes = self
+            .path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .unwrap_or(0);
+        Ok(CacheStats {
+            db_bytes,
+            photo_count: photo_count.max(0) as u64,
+            thumb_count: thumb_count.max(0) as u64,
+            thumb_bytes: thumb_bytes.max(0) as u64,
+        })
+    }
+
+    /// 回收磁盘空间：先把 WAL 落盘并截断，再 `VACUUM`。
+    ///
+    /// ⚠️ **必须真的 `VACUUM`**：`DELETE FROM thumbs` 只是把页标成空闲，
+    /// 文件大小不会变——用户点了「清理」却看到占用没降，会认为功能没做（`docs/05` §2.2 已记）。
+    pub fn vacuum(&self) -> Result<()> {
+        // 截断 WAL 才能让 VACUUM 后紧接着看到文件变小。
+        let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        self.conn.execute_batch("VACUUM;")?;
+        Ok(())
+    }
+
+    /// 清空全部缩略图缓存，并把照片标回「待生成」。返回删掉的缩略图条数。
+    ///
+    /// 语义是「释放空间 + 下次扫描重建」，**不是**删除照片：`photos` 行一条不少。
+    pub fn clear_all_thumbs(&self) -> Result<u64> {
+        let n = self.conn.execute("DELETE FROM thumbs", [])?;
+        self.conn.execute("UPDATE photos SET thumb_state = 0", [])?;
+        Ok(n as u64)
+    }
 }
 
 pub(crate) fn map_photo(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
@@ -950,8 +996,12 @@ impl SortSpec {
             (SortKey::ModifiedAt, false) => "p.mtime_ns ASC".to_string(),
             (SortKey::Size, true) => "p.size_bytes DESC".to_string(),
             (SortKey::Size, false) => "p.size_bytes ASC".to_string(),
-            (SortKey::Dimensions, true) => "COALESCE(p.width,0)*COALESCE(p.height,0) DESC".to_string(),
-            (SortKey::Dimensions, false) => "COALESCE(p.width,0)*COALESCE(p.height,0) ASC".to_string(),
+            (SortKey::Dimensions, true) => {
+                "COALESCE(p.width,0)*COALESCE(p.height,0) DESC".to_string()
+            }
+            (SortKey::Dimensions, false) => {
+                "COALESCE(p.width,0)*COALESCE(p.height,0) ASC".to_string()
+            }
         }
     }
 }

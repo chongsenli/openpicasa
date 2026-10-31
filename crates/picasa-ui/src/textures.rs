@@ -90,6 +90,20 @@ impl TextureCache {
         self.failed.contains(&photo_id)
     }
 
+    /// 只读查询：这张照片的纹理**已经在缓存里**就返回，否则 `None`。
+    ///
+    /// 查看器「逐级加载」用：打开大图时先把栅格里已缓存的 T0 缩略图当预览画出来，
+    /// 等 2560 的大图解码完再换掉。**不触发解码、不请求、不改 LRU**——它只是「顺手看一眼」。
+    pub fn peek(&self, photo_id: i64) -> Option<(TextureId, egui::Vec2)> {
+        let tex = self.textures.get(&photo_id)?;
+        let size = self
+            .sizes
+            .get(&photo_id)
+            .copied()
+            .unwrap_or(egui::Vec2::ZERO);
+        Some((tex.id(), size))
+    }
+
     pub fn len(&self) -> usize {
         self.textures.len()
     }
