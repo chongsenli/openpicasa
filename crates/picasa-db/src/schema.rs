@@ -9,6 +9,7 @@
 //! | --- | --- | --- |
 //! | 1 | `m1_minimal` | folders / photos / thumbs |
 //! | 2 | `m21_data_layer` | roots、folders 层级、照片尺寸状态 + 生成列、排除表、任务与失败表 |
+//! | 3 | `m21_sort_effective_taken` | `eff_taken_at` 虚拟生成列 + 排序索引（**让「按拍摄时间」真正走索引**） |
 //!
 //! ⚠️ **M2（A 线索引底座）没有动 schema**，`SCHEMA_VERSION` 一直是 1。
 //! 所以 M2.1 的 `schema_version() == 1` 就是「这是 M2 的库」的判据
@@ -21,7 +22,7 @@ pub struct Migration {
 }
 
 /// 当前程序支持的 schema 版本 = 迁移数组里最大的 version。
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// v1 · M1 最小集（02 §5.3）。
 ///
@@ -86,7 +87,8 @@ CREATE TABLE thumbs (
 /// ## 两个容易写错的地方
 ///
 /// 1. `ADD COLUMN` **不允许**加 STORED 生成列，只能 `VIRTUAL`（SQLite 限制）。
-///    VIRTUAL 列不进索引；M3 瀑布流只读不筛，够用。若 M5 要按显示宽高筛选，届时再物化。
+///    VIRTUAL 列**可以**建索引（v3 的 `eff_taken_at` 就是这么做的）；
+///    M3 瀑布流只读不筛，够用。若 M5 要按显示宽高筛选，同样可加索引。
 /// 2. 加 `REFERENCES` 列时默认值必须是 NULL（且开了 `foreign_keys`），
 ///    所以 `root_id` / `parent_id` 都不带 `NOT NULL DEFAULT 0`——
 ///    用 0 表示「无父」会在外键检查上直接炸。
@@ -176,6 +178,34 @@ CREATE TABLE data_migrations (
 );
 "#;
 
+/// v3 · 让「按拍摄时间」排序真正用上索引（`docs/05` §1.9）。
+///
+/// ## 为什么要加一列
+///
+/// M1 的排序口径是 `COALESCE(p.taken_at, p.mtime_ns/1000000000) DESC, p.name_key ASC`
+/// ——`taken_at` 可能为 NULL（EXIF 缺失时回退到文件 mtime），所以用 COALESCE 兜。
+/// 但 **COALESCE 是表达式，SQLite 无法用任何索引满足它**，于是每次排序都是
+/// 「全表扫描 → 算 5 万次 COALESCE → 临时 B-tree 排序」。
+///
+/// 实测（5 万张，release）：`LIMIT 2000` 也要 **199 ms**——限行数一点忙都帮不上，
+/// 因为排序必须在截断之前完成。用户点开一个文件夹就卡住 200 ms。
+///
+/// 把同一个表达式固化成**虚拟生成列**并在它上面建索引后，同一条查询降到 **1.8 ms**。
+///
+/// ## 为什么是 VIRTUAL 而不是 STORED
+///
+/// `ALTER TABLE ADD COLUMN` 不允许 STORED 生成列（SQLite 限制，v2 的 `display_*`
+/// 也是因此选了 VIRTUAL）。VIRTUAL 不占存储、随源列自动更新、**且可以建索引**
+/// ——v2 注释里"VIRTUAL 列不进索引"的说法是错的，已在 `docs/05` §1.7 更正。
+///
+/// 顺序必须与查询逐字一致（`eff_taken_at DESC, name_key ASC`）才命得中索引；
+/// `OrderBy` 里那两条字符串与这里是一对，改一处必须改另一处。
+const V3: &str = r#"
+ALTER TABLE photos ADD COLUMN eff_taken_at INTEGER
+    GENERATED ALWAYS AS (COALESCE(taken_at, mtime_ns / 1000000000)) VIRTUAL;
+CREATE INDEX idx_photos_eff_taken ON photos(eff_taken_at DESC, name_key ASC);
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -186,6 +216,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 2,
         name: "m21_data_layer",
         sql: V2,
+    },
+    Migration {
+        version: 3,
+        name: "m21_sort_effective_taken",
+        sql: V3,
     },
 ];
 

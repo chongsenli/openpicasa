@@ -45,6 +45,11 @@ pub struct PhotoRow {
     pub taken_at_src: i64,
     pub thumb_state: i64,
     pub decoder_ver: i64,
+    /// 「有效拍摄时间」= `COALESCE(taken_at, mtime_ns/1e9)`，由 v3 的虚拟生成列算出。
+    ///
+    /// 重复保留了 `taken_at` 是**有意**的：界面要区分「EXIF 拍摄时间」与「回退值」
+    /// （`taken_at_src` 决定标签怎么写），而排序与分组只认这一个口径。
+    pub eff_taken_at: i64,
 }
 
 impl PhotoRow {
@@ -53,8 +58,11 @@ impl PhotoRow {
     }
 
     /// 用于日期分组的「天」时间戳（本地时区由 UI 侧决定）。
+    ///
+    /// 直接返回库里算好的 `eff_taken_at`——与 SQL 的排序口径**同一份数据**，
+    /// 不会再出现「SQL 按 A 排、分组按 B 分」导致同一天被拆成两段的情况。
     pub fn effective_taken_at(&self) -> i64 {
-        self.taken_at.unwrap_or(self.mtime_ns / 1_000_000_000)
+        self.eff_taken_at
     }
 }
 

@@ -33,6 +33,8 @@ pub struct OpenPicasaApp {
     theme: Theme,
 
     cache: TextureCache,
+    /// 栅格布局缓存（C1）：photos 不变时布局一次都不重算
+    grid_layout: grid::GridCache,
     service: ThumbService,
     rx: Receiver<CoreEvent>,
     tx: Sender<CoreEvent>,
@@ -109,6 +111,7 @@ impl OpenPicasaApp {
             paths,
             theme: Theme::picasa(),
             cache: TextureCache::new(),
+            grid_layout: grid::GridCache::new(),
             service,
             rx,
             tx,
@@ -478,6 +481,7 @@ impl OpenPicasaApp {
                     &db,
                     &self.service,
                     &mut self.cache,
+                    &mut self.grid_layout,
                     &theme,
                     &snap,
                 );
@@ -836,6 +840,30 @@ impl OpenPicasaApp {
         self.index.enqueue_scan(&[dir]);
     }
 
+    /// 分页补齐：一帧一页（C1）。
+    ///
+    /// ## 为什么要「一帧一页」而不是「一次补完」
+    ///
+    /// 补齐 5 万张要读十几批，一次做完就是 60~100 ms 的停顿——和 M2 的首屏卡顿
+    /// 是同一个毛病，只是换了个位置犯。摊到每帧一页（约 5 ms）之后，
+    /// 滚动与补页共享同一帧预算，用户感知不到。
+    ///
+    /// 补完一页**必须主动要下一帧**：egui 是事件驱动的，鼠标不动就不会有帧，
+    /// 那补齐会在用户「停下来看」的那一刻正好停住，剩下的照片永远不出现。
+    fn extend_photos_one_page(&mut self, ctx: &egui::Context) {
+        if self.lib.photos_complete || self.lib.photos_remaining() == 0 {
+            return;
+        }
+        match self.lib.extend_photos() {
+            Ok(true) => ctx.request_repaint(),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "分页补齐失败，停止补页");
+                self.lib.photos_complete = true;
+            }
+        }
+    }
+
     fn maybe_autosave(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         if now - self.last_autosave < 2.0 {
@@ -880,6 +908,11 @@ impl eframe::App for OpenPicasaApp {
             self.draw_viewer(ui);
         } else {
             self.draw_library(ui);
+            // 首屏之外的剩余照片：**每帧只补一页**，补完再要一帧。
+            //
+            // 放在栅格之后，是为了保证「这一帧先画用户看得见的东西」——
+            // 补齐是锦上添花，绝不能因为它在画第一格之前先卡 8ms。
+            self.extend_photos_one_page(&ctx);
         }
         self.draw_overlays(ui);
         self.maybe_autosave(&ctx);

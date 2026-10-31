@@ -46,12 +46,11 @@ impl Db {
         folder_ids: Option<&[i64]>,
         limit: usize,
     ) -> Result<Vec<PhotoRow>> {
-        let mut sql = String::from(
-            "SELECT p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
-                    p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
-                    p.thumb_state, p.decoder_ver
+        let mut sql = format!(
+            "SELECT {}
              FROM photos p JOIN folders f ON f.id = p.folder_id
              WHERE p.dims_status = 0",
+            self.photo_cols()
         );
         if let Some(ids) = folder_ids {
             if ids.is_empty() {
@@ -130,11 +129,10 @@ impl Db {
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "SELECT p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
-                        p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
-                        p.thumb_state, p.decoder_ver
+                "SELECT {}
                  FROM photos p JOIN folders f ON f.id = p.folder_id
-                 WHERE p.id IN ({list})"
+                 WHERE p.id IN ({list})",
+                self.photo_cols()
             );
             let mut st = self.conn.prepare(&sql)?;
             let rows = st.query_map([], crate::map_photo)?;

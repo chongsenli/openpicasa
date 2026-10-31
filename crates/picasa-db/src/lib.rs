@@ -53,6 +53,12 @@ pub struct Db {
     path: Option<PathBuf>,
     /// 本次打开时的升级现场（新库 / 已最新时为 `None`）。
     upgrade: Option<UpgradeReport>,
+    /// v3 的 `eff_taken_at` 生成列是否可用。
+    ///
+    /// **为什么不能只看 `schema_version()`**：迁移失败会整体回滚并以旧 schema 继续运行
+    /// （`docs/05` §1.4 的降级路径），此时版本号停在 2，但代码已经写成「按 3 查」。
+    /// 直接查 `PRAGMA table_xinfo` 一次，是唯一可靠的判据（也顺带覆盖「用户手动改过库」）。
+    has_eff_col: bool,
 }
 
 impl Db {
@@ -80,6 +86,7 @@ impl Db {
             conn,
             path: Some(path),
             upgrade: None,
+            has_eff_col: false,
         };
         if report.error.is_none() {
             db.migrate()?;
@@ -90,6 +97,8 @@ impl Db {
                 "本次以旧 schema 数据继续运行，新增能力不可用"
             );
         }
+        // 必须在 migrate 之后探测：新建的库到这一步才把列建出来。
+        db.has_eff_col = Self::detect_eff_col(&db.conn);
         let mut report = report;
         report.to = db.schema_version()?;
         db.upgrade = Some(report.clone());
@@ -99,13 +108,62 @@ impl Db {
     /// 纯内存库（测试用）。
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let db = Self {
+        let mut db = Self {
             conn,
             path: None,
             upgrade: None,
+            has_eff_col: false,
         };
         db.migrate()?;
+        db.has_eff_col = Self::detect_eff_col(&db.conn);
         Ok(db)
+    }
+
+    /// `photos` 表上有没有 v3 的 `eff_taken_at`（见字段注释）。
+    ///
+    /// ⚠️ **必须用 `table_xinfo`，不能用 `table_info`**：生成列在 `table_info`
+    /// 里根本不出现（SQLite 把它们归为 hidden 列，`hidden=2` 表示 VIRTUAL 生成列）。
+    /// 用 `table_info` 探测会**永远返回 false**，于是 `eff_col()` 恒走 COALESCE
+    /// 降级分支——库明明在 v3、索引明明建了，排序却每次全表扫。
+    /// 这条是用 `tests/photo_columns.rs` 的执行计划断言抓出来的：同一条 SQL
+    /// 拿 sqlite3 直连走 `idx_photos_eff_taken`，经 `Db` 却是 `USE TEMP B-TREE`。
+    fn detect_eff_col(conn: &Connection) -> bool {
+        let Ok(mut st) = conn.prepare("PRAGMA table_xinfo(photos)") else {
+            return false;
+        };
+        let Ok(rows) = st.query_map([], |r| r.get::<_, String>(1)) else {
+            return false;
+        };
+        rows.flatten().any(|name| name == "eff_taken_at")
+    }
+
+    /// 「有效拍摄时间」的 SQL 表达式。
+    ///
+    /// 正常情况直接用 v3 的生成列（命中 `idx_photos_eff_taken`）；
+    /// **降级到旧 schema 时退回 COALESCE 表达式**——语义完全一致，只是排序要全表扫。
+    /// 这样降级路径仍然「能用」，而不是一点开文件夹就 `no such column` 直接崩。
+    ///
+    /// 别名统一写成 `eff_taken_at`，所以 `map_photo` 的列顺序不受影响。
+    fn eff_col(&self) -> &'static str {
+        if self.has_eff_col {
+            "p.eff_taken_at"
+        } else {
+            "COALESCE(p.taken_at, p.mtime_ns/1000000000)"
+        }
+    }
+
+    /// `PhotoRow` 的列清单 —— **全项目只此一份**。
+    ///
+    /// 这个列表以前在 8 处 SELECT 里各写一遍，加字段时漏改一处就只在运行期炸
+    /// （`InvalidColumnIndex`）。收口到这里之后，`map_photo` 的下标与它是一对，
+    /// `tests/photo_columns.rs` 会把每条查询真跑一遍来守。
+    fn photo_cols(&self) -> String {
+        format!(
+            "p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
+             p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
+             p.thumb_state, p.decoder_ver, {} AS eff_taken_at",
+            self.eff_col()
+        )
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -405,11 +463,33 @@ impl Db {
         sort: SortSpec,
         limit: usize,
     ) -> Result<Vec<PhotoRow>> {
-        let mut sql = String::from(
-            "SELECT p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
-                    p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
-                    p.thumb_state, p.decoder_ver
-             FROM photos p JOIN folders f ON f.id = p.folder_id",
+        self.photos_from(folder_ids, sort, limit, 0)
+    }
+
+    /// 分页版：跳过前 `offset` 行再取 `limit` 行（C 包的「大文件夹快速打开」用）。
+    ///
+    /// ## 为什么是 OFFSET 而不是 keyset
+    ///
+    /// keyset 分页（`WHERE (eff_taken_at, name_key) < (?, ?)`）在**按拍摄时间**这一种
+    /// 排序下最优，但本项目有 5 种排序键，每种都要写一份「严格小于」的元组比较；
+    /// 而 OFFSET 在命中索引时是顺序跳过，代价 O(offset) 但**不需要排序**。
+    /// 实测 5 万行跳 4.8 万 ≈ 8 ms，追加一批 4000 行的代价与它同量级——
+    /// 摊到十几帧上完全无感。用一份代码换五种排序的一致行为，值。
+    ///
+    /// ⚠️ **一致性**：分页补齐期间若有并发写入（扫描正把新照片插到前面），
+    /// OFFSET 会错位，可能出现重复或漏行。这里**不试图加锁修它**——
+    /// 补齐结束后 `Library::reload_photos` 会整体重取一次收敛。
+    /// 分页是「让用户尽快看见」，不是「保证某一瞬间的严格快照」。
+    pub fn photos_from(
+        &self,
+        folder_ids: Option<&[i64]>,
+        sort: SortSpec,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<PhotoRow>> {
+        let mut sql = format!(
+            "SELECT {} FROM photos p JOIN folders f ON f.id = p.folder_id",
+            self.photo_cols()
         );
         if let Some(ids) = folder_ids {
             if ids.is_empty() {
@@ -423,11 +503,55 @@ impl Db {
             sql.push_str(&format!(" WHERE p.folder_id IN ({list})"));
         }
         sql.push_str(" ORDER BY ");
-        sql.push_str(sort.order_by());
+        sql.push_str(&sort.order_by(self.eff_col()));
         sql.push_str(&format!(" LIMIT {limit}"));
+        if offset > 0 {
+            // SQLite 语法要求 OFFSET 跟在 LIMIT 后；没有 LIMIT 不能用 OFFSET，
+            // 所以这里 limit 恒有值（调用方用 usize::MAX 表示「不设上限」时也一样）。
+            sql.push_str(&format!(" OFFSET {offset}"));
+        }
 
         let mut st = self.conn.prepare(&sql)?;
         let rows = st.query_map([], map_photo)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 视图内照片总数（C1 首屏先拿总数，用来判断「要不要继续补」与显示进度）。
+    /// 走 `EXPLAIN QUERY PLAN` 验证过：有 `folder_id` 条件时用 `idx_photos_folder_taken`，
+    /// 无条件时是 `SCAN photos` 的计数优化（SQLite 对无 WHERE 的 `COUNT(*)` 直接读页数）。
+    pub fn count_photos(&self, folder_ids: Option<&[i64]>) -> Result<u64> {
+        let mut sql = String::from("SELECT COUNT(*) FROM photos p");
+        if let Some(ids) = folder_ids {
+            if ids.is_empty() {
+                return Ok(0);
+            }
+            let list = ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(" WHERE p.folder_id IN ({list})"));
+        }
+        let n: i64 = self.conn.query_row(&sql, [], |r| r.get(0))?;
+        Ok(n.max(0) as u64)
+    }
+
+    /// 取「按某个排序取照片」这条查询的执行计划（诊断与回归测试用）。
+    ///
+    /// 存在的理由是可测试性：C1 的整个价值都压在「排序能不能走索引」上，
+    /// 而这件事**只有执行计划能证明**——没有它，只能靠 release 构建手动跑 5 万张样本
+    /// 看耗时，那种断言既慢又会随机器负载飘。有它之后，
+    /// `tests/photo_columns.rs` 可以断言计划里必须出现 `idx_photos_eff_taken`、
+    /// 且不出现 `TEMP B-TREE FOR ORDER BY`。
+    pub fn explain_photos_plan(&self, sort: SortSpec) -> Result<Vec<String>> {
+        let sql = format!(
+            "EXPLAIN QUERY PLAN
+             SELECT p.id FROM photos p JOIN folders f ON f.id = p.folder_id
+             ORDER BY {} LIMIT 2000",
+            sort.order_by(self.eff_col())
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], |r| r.get::<_, String>(3))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -444,13 +568,12 @@ impl Db {
         limit: usize,
     ) -> Result<Vec<PhotoRow>> {
         let like = format!("%{}%", escape_like(needle));
-        let mut sql = String::from(
-            "SELECT p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
-                    p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
-                    p.thumb_state, p.decoder_ver
+        let mut sql = format!(
+            "SELECT {}
              FROM photos p JOIN folders f ON f.id = p.folder_id
              WHERE (p.name_key LIKE ?1 ESCAPE '\\'
                     OR f.path_key LIKE ?1 ESCAPE '\\')",
+            self.photo_cols()
         );
         // 日期区间是**收窄条件（AND）**，不是并列条件（OR）：
         // 「搜 苏州 + 限定 2011 年」应当是交集；空关键字时 LIKE '%%' 恒真，AND 依然等价于纯日期筛选。
@@ -484,16 +607,13 @@ impl Db {
     }
 
     pub fn photo(&self, id: i64) -> Result<Option<PhotoRow>> {
+        let sql = format!(
+            "SELECT {} FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?1",
+            self.photo_cols()
+        );
         Ok(self
             .conn
-            .query_row(
-                "SELECT p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
-                        p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
-                        p.thumb_state, p.decoder_ver
-                 FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?1",
-                params![id],
-                map_photo,
-            )
+            .query_row(&sql, params![id], map_photo)
             .optional()?)
     }
 
@@ -506,13 +626,12 @@ impl Db {
 
     /// 「最近更改」入口：按 mtime 倒序（F1-22 的 M1 可用入口之一）。
     pub fn recently_changed(&self, limit: usize) -> Result<Vec<PhotoRow>> {
-        let mut st = self.conn.prepare(
-            "SELECT p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
-                    p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
-                    p.thumb_state, p.decoder_ver
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {}
              FROM photos p JOIN folders f ON f.id = p.folder_id
              ORDER BY p.mtime_ns DESC LIMIT ?1",
-        )?;
+            self.photo_cols()
+        ))?;
         let rows = st.query_map(params![limit as i64], map_photo)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
@@ -693,12 +812,11 @@ impl Db {
 
     /// 失败项明细（面板展开用）。**只读查询，不重试、不改状态。**
     pub fn failed_photos(&self, folder_id: Option<i64>) -> Result<Vec<PhotoRow>> {
-        let mut sql = String::from(
-            "SELECT p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
-                    p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
-                    p.thumb_state, p.decoder_ver
+        let mut sql = format!(
+            "SELECT {}
              FROM photos p JOIN folders f ON f.id = p.folder_id
              WHERE p.thumb_state IN (2, 3)",
+            self.photo_cols()
         );
         if let Some(id) = folder_id {
             sql.push_str(&format!(" AND p.folder_id = {id}"));
@@ -728,12 +846,11 @@ impl Db {
         folder_ids: Option<&[i64]>,
         limit: usize,
     ) -> Result<Vec<PhotoRow>> {
-        let mut sql = String::from(
-            "SELECT p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
-                    p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
-                    p.thumb_state, p.decoder_ver
+        let mut sql = format!(
+            "SELECT {}
              FROM photos p JOIN folders f ON f.id = p.folder_id
              WHERE p.thumb_state = 0",
+            self.photo_cols()
         );
         if let Some(ids) = folder_ids {
             if ids.is_empty() {
@@ -768,6 +885,7 @@ pub(crate) fn map_photo(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
         taken_at_src: r.get(10)?,
         thumb_state: r.get(11)?,
         decoder_ver: r.get(12)?,
+        eff_taken_at: r.get(13)?,
     })
 }
 
@@ -812,24 +930,28 @@ impl Default for SortSpec {
 }
 
 impl SortSpec {
-    fn order_by(self) -> &'static str {
-        // taken_at 可能为 NULL（EXIF 缺失且未回退），统一用 COALESCE 保证排序稳定。
+    /// 生成 `ORDER BY` 子句。`eff` 是「有效拍摄时间」的列表达式（见 `Db::eff_col`）：
+    ///
+    /// - 正常情况传 `"p.eff_taken_at"` → 命中 `idx_photos_eff_taken`，5 万张 `LIMIT 2000` 1.8 ms；
+    /// - 降级到 v2 schema 时传 `"COALESCE(p.taken_at, p.mtime_ns/1000000000)"`
+    ///   → 语义一样，但没有索引（全表排序），这是迁移失败后「能用但慢」的代价。
+    ///
+    /// ⚠️ **不能直接写 COALESCE 表达式**：表达式会让 SQLite 放弃所有索引，
+    /// 5 万张实测 199 ms，而且 `LIMIT` 完全帮不上忙（排序在截断之前）。
+    /// `docs/05` §1.9 记了这件事的来龙去脉，`tests/photo_columns.rs` 用执行计划守着。
+    fn order_by(self, eff: &str) -> String {
         // 中文文件名用 name_key（已做小写 + NFC）比较，避免大小写与归一化导致的乱序。
         match (self.key, self.descending) {
-            (SortKey::TakenAt, true) => {
-                "COALESCE(p.taken_at, p.mtime_ns/1000000000) DESC, p.name_key ASC"
-            }
-            (SortKey::TakenAt, false) => {
-                "COALESCE(p.taken_at, p.mtime_ns/1000000000) ASC, p.name_key ASC"
-            }
-            (SortKey::Name, true) => "p.name_key DESC",
-            (SortKey::Name, false) => "p.name_key ASC",
-            (SortKey::ModifiedAt, true) => "p.mtime_ns DESC",
-            (SortKey::ModifiedAt, false) => "p.mtime_ns ASC",
-            (SortKey::Size, true) => "p.size_bytes DESC",
-            (SortKey::Size, false) => "p.size_bytes ASC",
-            (SortKey::Dimensions, true) => "COALESCE(p.width,0)*COALESCE(p.height,0) DESC",
-            (SortKey::Dimensions, false) => "COALESCE(p.width,0)*COALESCE(p.height,0) ASC",
+            (SortKey::TakenAt, true) => format!("{eff} DESC, p.name_key ASC"),
+            (SortKey::TakenAt, false) => format!("{eff} ASC, p.name_key ASC"),
+            (SortKey::Name, true) => "p.name_key DESC".to_string(),
+            (SortKey::Name, false) => "p.name_key ASC".to_string(),
+            (SortKey::ModifiedAt, true) => "p.mtime_ns DESC".to_string(),
+            (SortKey::ModifiedAt, false) => "p.mtime_ns ASC".to_string(),
+            (SortKey::Size, true) => "p.size_bytes DESC".to_string(),
+            (SortKey::Size, false) => "p.size_bytes ASC".to_string(),
+            (SortKey::Dimensions, true) => "COALESCE(p.width,0)*COALESCE(p.height,0) DESC".to_string(),
+            (SortKey::Dimensions, false) => "COALESCE(p.width,0)*COALESCE(p.height,0) ASC".to_string(),
         }
     }
 }

@@ -62,11 +62,13 @@ fn upgrade_to_v2_keeps_a_brand_new_backup() {
     let (db, db_path) = open_fixture(tmp.path());
 
     assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 2, "M2.1 的迁移版本必须是 2");
+    // v2 是数据层迁移（roots/层级/尺寸状态），v3 是排序生成列——
+    // 对「v1 库升级」来说两者都该一口气跑完，最终落在 SCHEMA_VERSION。
+    assert_eq!(SCHEMA_VERSION, 3, "M2.1 结束时的迁移版本必须是 3");
 
     let report = db.last_upgrade_note().expect("升级现场应被记录");
     assert_eq!(report.from, 1);
-    assert_eq!(report.to, 2);
+    assert_eq!(report.to, SCHEMA_VERSION);
     assert!(report.error.is_none());
 
     let backup = report.backup.clone().expect("v1 → v2 必须先备份");

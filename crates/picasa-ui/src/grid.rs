@@ -174,6 +174,56 @@ impl GridLayout {
         self.groups.last().map(|g| g.first + g.count).unwrap_or(0)
     }
 
+    /// 增量追加：把 `photos[from..]` 接到现有布局的尾部（C1 分页补齐用）。
+    ///
+    /// **不做全量重算**——这是分页的意义所在：补齐时若每次都 `build` 一遍，
+    /// 5 万张要 100 ms，用户滚到底会周期性卡顿，等于把首屏省下的时间又还回去。
+    ///
+    /// 做法：从 `from - 1`（上一张已排的照片）开始重新分组，这样第一组必然接得上
+    /// 现有最后一天；标题相同且位置连续就合并进最后一天，否则追加新组。
+    /// 之后整体重算 y——O(分组数)，1800 组实测 ~10 µs，且不发生内存分配。
+    fn extend(&mut self, photos: &[PhotoRow], from: usize) {
+        if from == 0 || from >= photos.len() {
+            return;
+        }
+        let anchor = from - 1;
+        let raw = library::group_by_day(&photos[anchor..]);
+        for (i, (title, start, end)) in raw.into_iter().enumerate() {
+            let abs_first = anchor + start;
+            let abs_end = anchor + end;
+            if i == 0
+                && let Some(last) = self.groups.last_mut()
+                && last.title == title
+                && last.first + last.count == abs_first
+            {
+                // 与最后一个分组是同一天：把新照片并进去，不新建组。
+                last.count = abs_end - last.first;
+                continue;
+            }
+            self.groups.push(Group {
+                title,
+                y: 0.0, // 下面 recompute_y 统一填
+                first: abs_first,
+                count: abs_end - abs_first,
+            });
+        }
+        self.recompute_y();
+    }
+
+    /// 按当前 `cols` / `cell_h` 重排所有分组的 y 与 `total_h`。
+    ///
+    /// 追加与「列数变了但分组没变」都走这里。纯算术，无分配。
+    fn recompute_y(&mut self) {
+        let header = self.header();
+        let mut y = Metrics::GRID_PAD;
+        for g in &mut self.groups {
+            g.y = y;
+            let rows = g.count.div_ceil(self.cols);
+            y += header + rows as f32 * (self.cell_h + Metrics::CELL_GAP) + Metrics::CELL_GAP;
+        }
+        self.total_h = y + Metrics::GRID_PAD;
+    }
+
     /// 索引区间覆盖到的分组下标范围（左闭右开），用于画**普通位置**的分组头。
     ///
     /// 分组头只有在「离开视口顶部」时才交给吸顶头补画；在正常位置时必须自己画出来，
@@ -307,6 +357,114 @@ impl GridLayout {
     }
 }
 
+/// 栅格布局的缓存（C1）。**跨帧复用**，`photos` 没变就一次 `build` 都不做。
+///
+/// ## 为什么必须有它
+///
+/// `GridLayout::build` 会对全部照片跑一遍 `group_by_day`（含时区换算）。
+/// 5 万张实测 **110 ms/帧**——它是「M1 每帧都在做的事」里最贵的一件，
+/// 而它**每帧输入的都一模一样**。缓存之后，滚动时的代价是 0。
+///
+/// ## 三种命中
+///
+/// | 情况 | 动作 | 代价 |
+/// | --- | --- | --- |
+/// | 什么都没变 | 直接返回 | 0 |
+/// | photos 尾部变长（分页补齐） | 只排新增部分 | O(新增量) |
+/// | 窗口宽度 / 档位 / 分组头 / 排序变了 | 全量重建 | O(n) |
+pub struct GridCache {
+    layout: GridLayout,
+    key: LayoutKey,
+    /// 布局已纳入的照片数（可能小于 `photos.len()`，因为 extend 是分步的）
+    built: usize,
+    ready: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct LayoutKey {
+    width_bits: u32,
+    tier: u8,
+    headers: bool,
+    /// 首尾 id 用来识别「同样长度但内容换了」（切排序、切视图）
+    first_id: i64,
+    last_id: i64,
+}
+
+impl Default for GridCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GridCache {
+    pub fn new() -> Self {
+        Self {
+            layout: GridLayout {
+                cell: 0.0,
+                cell_h: 0.0,
+                cols: 1,
+                groups: Vec::new(),
+                total_h: 0.0,
+                content_w: 0.0,
+                show_filename: false,
+                has_headers: false,
+            },
+            key: LayoutKey {
+                width_bits: 0,
+                tier: 0,
+                headers: false,
+                first_id: 0,
+                last_id: 0,
+            },
+            built: 0,
+            ready: false,
+        }
+    }
+
+    /// 取（必要时算）当前帧的布局。
+    pub fn get(
+        &mut self,
+        photos: &[PhotoRow],
+        width: f32,
+        tier: Tier,
+        has_headers: bool,
+    ) -> &GridLayout {
+        let key = LayoutKey {
+            width_bits: width.to_bits(),
+            tier: tier.index() as u8,
+            headers: has_headers,
+            first_id: photos.first().map(|p| p.id).unwrap_or(0),
+            last_id: photos.last().map(|p| p.id).unwrap_or(0),
+        };
+
+        if self.ready {
+            // ① 完全没变
+            if key == self.key && photos.len() == self.built {
+                return &self.layout;
+            }
+            // ② 前缀不变、尾部变长 → 增量追加（分页补齐）
+            let prefix_same = key.width_bits == self.key.width_bits
+                && key.tier == self.key.tier
+                && key.headers == self.key.headers
+                && key.first_id == self.key.first_id
+                && photos.len() > self.built;
+            if prefix_same {
+                self.layout.extend(photos, self.built);
+                self.built = photos.len();
+                self.key = key;
+                return &self.layout;
+            }
+        }
+
+        // ③ 全量重建
+        self.layout = GridLayout::build(photos, width, tier, has_headers);
+        self.built = photos.len();
+        self.key = key;
+        self.ready = true;
+        &self.layout
+    }
+}
+
 /// 一次点击的信息（交给 `Library` 处理，栅格自己不碰选择集）。
 #[derive(Clone, Copy, Debug)]
 pub struct ClickInfo {
@@ -349,6 +507,7 @@ pub fn show(
     db: &Db,
     service: &ThumbService,
     cache: &mut TextureCache,
+    grid: &mut GridCache,
     theme: &Theme,
     snapshot: &IndexSnapshot,
 ) -> GridOutput {
@@ -372,7 +531,9 @@ pub fn show(
 
     let ctx = ui.ctx().clone();
     let content_w = (ui.available_width() - Metrics::SCROLLBAR).max(120.0);
-    let layout = GridLayout::build(photos, content_w, tier, has_headers);
+    // 每帧「算布局」在 M2 是 5 万张 110 ms 的开销，而输入几乎每帧都一样——
+    // 交给 GridCache，滚动时这一行是 0 代价。
+    let layout = grid.get(photos, content_w, tier, has_headers);
     // 正在索引的文件夹（含子目录）：这些目录里 `thumb_state == 0` 的格子只画占位，
     // **不要**再向 ThumbService 要一次缩略图（会和索引线程抢同一张图的解码）。
     let indexing_folders: std::collections::HashSet<i64> = {
@@ -407,8 +568,6 @@ pub fn show(
     }
 
     let mut budget = Metrics::TEX_UPLOAD_PER_FRAME;
-    let mut tex_requests: Vec<(i64, std::path::PathBuf)> = Vec::new();
-    let _ = &mut tex_requests;
 
     let area_out = area.show_viewport(ui, |ui, viewport| {
         ui.set_height(layout.total_h);
@@ -692,6 +851,8 @@ mod tests {
             taken_at_src: 0,
             thumb_state: 1,
             decoder_ver: 0,
+            // 与 v3 生成列同口径：有 taken_at 就用它
+            eff_taken_at: taken_at,
         }
     }
 
