@@ -22,7 +22,7 @@ pub struct Migration {
 }
 
 /// 当前程序支持的 schema 版本 = 迁移数组里最大的 version。
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// v1 · M1 最小集（02 §5.3）。
 ///
@@ -206,6 +206,33 @@ ALTER TABLE photos ADD COLUMN eff_taken_at INTEGER
 CREATE INDEX idx_photos_eff_taken ON photos(eff_taken_at DESC, name_key ASC);
 "#;
 
+/// v4 · 让「取一批待补缩略图」不再把整表排一遍（`docs/05` §1.12）。
+///
+/// ## 问题是这把锁，不是这条查询
+///
+/// `photos_pending_thumbs` 的形状是
+/// `WHERE thumb_state = 0 AND folder_id IN (…) ORDER BY taken_at DESC LIMIT 50000`。
+/// 原来的执行计划是「走 `idx_photos_thumb` 取全部待补行（实测 225,191 行）
+/// → `USE TEMP B-TREE FOR ORDER BY` → 再截断」，**LIMIT 一点忙都帮不上**。
+///
+/// 25.9 万张的库上实测单次 **1851 ms**（release 关系统计，纯 CPU 排序）。
+/// 致命的地方在于它是**每处理一个目录调一次**（`scanner.rs::generate_thumbs`），
+/// 而这条查询**持着 `Inner.db` 那把全局 Mutex**——UI 每 150 ms 要重载照片列表，
+/// 抢的就是同一把锁。于是界面每隔几秒被锁住近 2 秒，用户看到的就是「打开就死机」。
+///
+/// ## 索引怎么解
+///
+/// `(thumb_state, taken_at DESC)`：条件与排序**在索引里已经有序**，
+/// SQLite 从索引头部顺序读出、边读边按 `folder_id` 过滤、凑够 LIMIT 就停，
+/// 不再物化临时 B-tree。同样的库上降到个位数毫秒。
+///
+/// 为什么把 `folder_id` 放在 `taken_at` 前面反而不行：`folder_id IN (…)` 是多段区间，
+/// 跨多个 folder 之后 `taken_at` 就不再全局有序了，SQLite 只能退回去做排序——
+/// 那是我们刚修掉的那个问题。
+const V4: &str = r#"
+CREATE INDEX idx_photos_thumb_taken ON photos(thumb_state, taken_at DESC);
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -221,6 +248,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "m21_sort_effective_taken",
         sql: V3,
+    },
+    Migration {
+        version: 4,
+        name: "m21_pending_thumbs_index",
+        sql: V4,
     },
 ];
 
