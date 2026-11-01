@@ -23,9 +23,9 @@ mod upgrade;
 
 pub use schema::{DATA_V2_ROOTS_FOLDERS, MIGRATIONS, SCHEMA_VERSION, TaskKind, TaskStatus};
 pub use types::{
-    CacheStats, DimsStats, ExclusionRow, FolderRow, FolderTreeRow, PhotoInput, PhotoRow, RootRow,
-    RootSeed, ScanApply, TaskRow, ThumbBuf, ThumbState, ThumbStats, UPSERT_UNCHANGED,
-    UpgradeReport, V2DataReport,
+    CacheStats, CachedMeta, DimsStats, ExclusionRow, FolderRow, FolderTreeRow, PhotoInput,
+    PhotoRow, RootRow, RootSeed, ScanApply, TaskRow, ThumbBuf, ThumbState, ThumbStats,
+    UPSERT_UNCHANGED, UpgradeReport, V2DataReport,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -359,12 +359,20 @@ impl Db {
                 {
                     // 缓存键相同：只更新可能变化的 EXIF 摘要字段，不改 thumb_state
                     // dims_status 跟着宽高一起刷新：扫描器给了宽高就算「已完成」，
-                    // 没给就回到「待回填」（下一轮回填会再试）
+                    // 没给就回到「待回填」（下一轮回填会再试）。
+                    //
+                    // ⚠️ 但**终态（2）必须保住**。`dims_status = 2` 的含义是「文件读得到、
+                    // 但拿不到宽高」（HEIC/AVIF/文件头损坏），它的 `width` 永远是 NULL。
+                    // 早期版本这里无条件写 0，于是这批照片每次启动都被打回「待回填」：
+                    // 25.9 万张的真实库里实测 **903 张**，每启动一次就把这 903 个文件头
+                    // 重读一遍、再由回填线程重新判一次失败——永远没有终止的一天。
+                    // 「文件没变过」是保住终态的前提；变了就把状态归零重试（见下面的分支）。
                     self.conn.execute(
                         "UPDATE photos SET width = ?2, height = ?3, orientation = ?4,
                                            taken_at = ?5, taken_at_src = ?6,
                                            dims_status = CASE
                                                WHEN ?2 IS NOT NULL AND ?3 IS NOT NULL THEN 1
+                                               WHEN dims_status = 2 THEN 2
                                                ELSE 0 END
                          WHERE id = ?1",
                         params![
@@ -403,6 +411,7 @@ impl Db {
                     self.conn
                         .execute("DELETE FROM thumbs WHERE photo_id = ?1", params![id])?;
                     out.updated += 1;
+                    out.touched.push(*id);
                 }
                 None => {
                     self.conn.execute(
@@ -427,6 +436,7 @@ impl Db {
                         ],
                     )?;
                     out.added += 1;
+                    out.touched.push(self.conn.last_insert_rowid());
                 }
             }
         }
@@ -840,6 +850,33 @@ impl Db {
         Ok(n as u64)
     }
 
+    /// 把**点名的一批**失败项重置为「待生成」，返回重置条数。
+    ///
+    /// 「重建失败索引」用。为什么不直接全库重置（`UPDATE ... WHERE thumb_state IN (2,3)`）：
+    /// 重置后这些照片会变成「待生成」，而**待生成并不等于马上会被处理**——
+    /// 启动扫描只补本次新增，历史欠账一律不碰。于是「重置了但没入队」的照片
+    /// 会永远停在灰格子上，比失败状态更糟（失败至少还有明细可查）。
+    /// 所以必须**先算清楚哪些 id 真的会入队，再只重置这些**。
+    ///
+    /// 分块是因为 SQLite 的 `IN (...)` 变量数有上限（默认 32766）：
+    /// 一次 500 个既安全，也让单条语句保持在毫秒级。
+    pub fn reset_failed_thumbs_by_ids(&self, ids: &[i64]) -> Result<u64> {
+        let mut total = 0u64;
+        for chunk in ids.chunks(500) {
+            let list = chunk
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE photos SET thumb_state = 0
+                 WHERE thumb_state IN (2, 3) AND id IN ({list})"
+            );
+            total += self.conn.execute(&sql, [])? as u64;
+        }
+        Ok(total)
+    }
+
     /// 待生成的缩略图（`None` 表示全库）。给扫描后的补图队列用。
     pub fn photos_pending_thumbs(
         &self,
@@ -869,8 +906,63 @@ impl Db {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    // ------------------------------------------------------------ 维护（F 加固）
+    /// 指定 id 里仍在「待生成」的照片（用于扫描结束只补**本次新增/变化**的那批）。
+    pub fn pending_thumbs_by_ids(&self, ids: &[i64], limit: usize) -> Result<Vec<PhotoRow>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let list = ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT {}
+             FROM photos p JOIN folders f ON f.id = p.folder_id
+             WHERE p.thumb_state = 0 AND p.id IN ({list})
+             ORDER BY p.taken_at DESC LIMIT {limit}",
+            self.photo_cols()
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], map_photo)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
 
+    /// 一个目录里已入库照片的缓存键与已解出的元数据（`name_key` → `CachedMeta`）。
+    ///
+    /// 扫描器先问这个，就能对「没变过」的文件**不再读盘**：25.9 万张的库，
+    /// 每次启动都全量重新解析 EXIF 要几十分钟，而增量发现本该只碰变化的文件。
+    pub fn folder_cached_meta(
+        &self,
+        folder_id: i64,
+    ) -> Result<std::collections::HashMap<String, CachedMeta>> {
+        let mut st = self.conn.prepare(
+            "SELECT name_key, size_bytes, mtime_ns, decoder_ver,
+                    width, height, orientation, taken_at, taken_at_src, dims_status
+             FROM photos WHERE folder_id = ?1",
+        )?;
+        let mut rows = st.query(params![folder_id])?;
+        let mut out = std::collections::HashMap::new();
+        while let Some(r) = rows.next()? {
+            out.insert(
+                r.get(0)?,
+                CachedMeta {
+                    size_bytes: r.get(1)?,
+                    mtime_ns: r.get(2)?,
+                    decoder_ver: r.get(3)?,
+                    width: r.get(4)?,
+                    height: r.get(5)?,
+                    orientation: r.get(6)?,
+                    taken_at: r.get(7)?,
+                    taken_at_src: r.get(8)?,
+                    dims_status: r.get(9)?,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    // ------------------------------------------------------------ 维护（F 加固）
     /// 缓存占用统计（诊断页显示「占了多少空间」）。
     pub fn cache_stats(&self) -> Result<CacheStats> {
         let photo_count: i64 = self
@@ -913,6 +1005,45 @@ impl Db {
         let n = self.conn.execute("DELETE FROM thumbs", [])?;
         self.conn.execute("UPDATE photos SET thumb_state = 0", [])?;
         Ok(n as u64)
+    }
+
+    /// 删除**索引数据**：照片、缩略图、目录、历史任务与失败记录。
+    ///
+    /// ## 保留什么、为什么
+    ///
+    /// | 表 | 处理 | 理由 |
+    /// |---|---|---|
+    /// | `photos` / `thumbs` / `folders` | 删 | 就是"索引"本身 |
+    /// | `index_tasks` / `index_task_failures` | 删 | 历史任务记录指向已不存在的目录，留着只会让面板显示幽灵任务 |
+    /// | `roots` | **保留** | 关注文件夹是**用户配置**，不是索引产物。删了等于顺手把用户添加的文件夹也清了 |
+    /// | `exclusions` | **保留** | 同上——"关闭此子文件夹"是用户的决定，重建索引后必须继续生效 |
+    ///
+    /// 返回 `(照片数, 缩略图数)`，给界面报一个如实的数字（"已删除 N 张照片的索引"）。
+    ///
+    /// ⚠️ 顺序不能反：`thumbs` 有 `REFERENCES photos(id) ON DELETE CASCADE`，
+    /// 但**外键级联不一定开着**（用户手工改过库、或连接是别的路径开的）。
+    /// 先删子表再删父表，任何情况下都不会留下孤儿行。
+    pub fn clear_index(&self) -> Result<(u64, u64)> {
+        let photos: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?;
+        let thumbs: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM thumbs", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        let tx = self.conn.unchecked_transaction()?;
+        // 子表先走
+        let _ = tx.execute("DELETE FROM index_task_failures", []);
+        let _ = tx.execute("DELETE FROM index_tasks", []);
+        tx.execute("DELETE FROM thumbs", [])?;
+        tx.execute("DELETE FROM photos", [])?;
+        // folders 里有 root_id / parent_id 自引用：先断开父链再删，避免自引用外键顺序问题
+        tx.execute("UPDATE folders SET parent_id = NULL", [])?;
+        tx.execute("DELETE FROM folders", [])?;
+        tx.commit()?;
+
+        Ok((photos.max(0) as u64, thumbs.max(0) as u64))
     }
 }
 

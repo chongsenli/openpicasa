@@ -166,6 +166,8 @@ pub struct Library {
 
     dirty_prefs: bool,
     path_to_id: HashMap<String, i64>,
+    /// 左栏树需要重建（扫描落库是**每个目录一条事件**，不能照着事件数重建树）
+    tree_dirty: bool,
 }
 
 impl Library {
@@ -231,6 +233,7 @@ impl Library {
             photos_complete: true,
             dirty_prefs: false,
             path_to_id: HashMap::new(),
+            tree_dirty: false,
         };
         lib.tray = lib.prefs.tray.clone();
         lib.prune_tray();
@@ -252,21 +255,26 @@ impl Library {
     /// ⚠️ 根目录来自 **DB**，不是偏好文件（M2.1 起 `Preferences.roots` 只读兼容）。
     /// 表还没建好（老库迁移失败、降级运行）时退回偏好，避免树整个空掉。
     pub fn reload_tree(&mut self) -> Result<()> {
+        // 任何显式重建都算把脏标记清掉了（扫描期的节流见 `take_tree_dirty`）
+        self.tree_dirty = false;
         self.refresh_roots();
         let folders = self.db()?.all_folders()?;
         self.total_in_db = folders.iter().map(|f| f.photo_count as u64).sum();
         self.path_to_id = folders.iter().map(|f| (f.path.clone(), f.id)).collect();
 
         // 1) 所有候选路径：roots 本身 + DB 里的目录
-        let mut entries: Vec<(String, Option<i64>, u32)> = Vec::new();
-        for (path, id) in &self.path_to_id {
-            entries.push((path.clone(), Some(*id), 0));
-        }
-        for f in &folders {
-            if let Some(e) = entries.iter_mut().find(|e| e.0 == f.path) {
-                e.2 = f.photo_count;
-            }
-        }
+        //
+        // ⚠️ 这里曾经是 O(N²)：先按 `path_to_id` 铺 N 条，再对每个 folder 用
+        // `entries.iter_mut().find(...)` 线性回填计数。`tree_bench` 实测：2000 个
+        // 相册目录单次 42.8 ms、8000 个目录 462 ms；而 `apply_event` 的
+        // `FolderScanned` 分支**每扫完一个目录就调一次这个函数**——8000 个目录
+        // 累计 3744 秒卡在 UI 线程上，界面完全动不了。
+        // `folders` 本身就带着 id 和 photo_count，直接映射即可，不必再查一遍。
+        let mut entries: Vec<(String, Option<i64>, u32)> = folders
+            .iter()
+            .map(|f| (f.path.clone(), Some(f.id), f.photo_count))
+            .collect();
+        // roots 数量是个位数，这里保持线性判断（不值得为它引入集合）
         for root in &self.root_paths {
             if !entries.iter().any(|e| &e.0 == root) {
                 entries.push((root.clone(), None, 0));
@@ -316,6 +324,15 @@ impl Library {
         self.roots = roots;
         self.rebuild_visible_folders();
         Ok(())
+    }
+
+    /// 取走「树需要重建」的脏标记。
+    ///
+    /// 调用方（UI）负责节流：扫描落库是每个目录一条 `FolderScanned`，而重建树是
+    /// O(N log N) 的重活。`tree_bench` 实测 8000 个相册目录时单次 46.8 ms，
+    /// 照事件数各来一次就是 405 秒——**这不是慢，是界面死掉**。
+    pub fn take_tree_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.tree_dirty)
     }
 
     pub fn rebuild_visible_folders(&mut self) {
@@ -921,7 +938,13 @@ impl Library {
             } => {
                 self.scanning = true;
                 tracing::debug!(path = %path, added, removed, "目录已落库");
-                let _ = self.reload_tree();
+                // ⚠️ 这里**不能**直接 `reload_tree()`。
+                //
+                // 落库是逐目录一事务、逐目录一条事件：一个装照片的移动硬盘动辄几千个
+                // 相册目录。`tree_bench` 实测 8000 个目录时单次 `reload_tree` 46.8 ms，
+                // 若照事件数各来一次，累计 405 秒全花在 UI 线程重建树上——界面就是
+                // 「一动不动」。改成置脏，由 UI 侧节流调用 `flush_tree_if_due`。
+                self.tree_dirty = true;
                 true
             }
             CoreEvent::Progress { dirs, photos, .. } => {
@@ -948,6 +971,27 @@ impl Library {
                     let _ = db.set_folder_online(folder_id, online);
                 }
                 false
+            }
+            CoreEvent::IndexCleared { photos, thumbs } => {
+                // 删索引是**整体重置**，不是增量刷新：照片列表、树、选择集、
+                // 查看器指针、扫描状态全部归零，否则会留下一堆指向已不存在行的引用。
+                self.scanning = false;
+                self.scan_progress = None;
+                self.scan_summary = None;
+                self.photos.clear();
+                self.photos_total = 0;
+                self.photos_complete = true;
+                self.selection.clear();
+                self.current = None;
+                self.tree_dirty = true;
+                let _ = self.reload_tree();
+                let msg = if photos == 0 && thumbs == 0 {
+                    "索引已清空（本来就没有索引数据）".to_string()
+                } else {
+                    format!("索引已删除：{photos} 张照片、{thumbs} 张缩略图")
+                };
+                self.toast = Some((msg, 4.0));
+                true
             }
             CoreEvent::Error(e) => {
                 self.last_error = Some(e.clone());

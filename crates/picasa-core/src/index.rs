@@ -72,7 +72,10 @@ impl IndexState {
     /// 注意 `部分失败` 也算终态——它在等用户决定重试还是忽略；
     /// 但**弹框不能因为它是终态就收起**（`04` §1.4：有失败项时降级为异常摘要）。
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::PartialFailed | Self::Unreachable)
+        matches!(
+            self,
+            Self::Completed | Self::PartialFailed | Self::Unreachable
+        )
     }
 
     /// 还在跑（含排队与系统暂停）。
@@ -190,7 +193,9 @@ impl IndexSnapshot {
 
     /// 有不可访问的目录（需要用户处理，弹框不得自动消失）。
     pub fn has_unreachable(&self) -> bool {
-        self.tasks.iter().any(|t| t.state == IndexState::Unreachable)
+        self.tasks
+            .iter()
+            .any(|t| t.state == IndexState::Unreachable)
     }
 
     /// 存在系统暂停的任务。
@@ -449,12 +454,61 @@ impl IndexBoard {
         batch
     }
 
+    /// 重建批次：只点名重做 N 张（「重建失败索引」）。
+    ///
+    /// 与 `begin_retry` 的区别只在「起点怎么画」：重试是接着上一批的失败数往前推，
+    /// 而重建的这 N 张此刻已经**不是失败项**了（调用方刚把它们重置成待生成），
+    /// 起点若还画成失败，用户会以为按钮没生效。
+    pub fn begin_rebuild(&self, path: &str, total: u64) -> u64 {
+        let now = now_secs();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.next_batch += 1;
+        let batch = inner.next_batch;
+        inner.last_batch = batch;
+        inner.last_started = now;
+        inner.last_finished = None;
+        inner.agg_displayed = 0;
+        let name = display_name(path);
+        let mut task = new_task(path.to_string(), name, batch, now);
+        task.state = IndexState::Scanning;
+        task.reason = Some("重建失败索引".into());
+        task.discovered = total;
+        task.completed = 0;
+        task.failed = 0;
+        task.frozen = true; // 分母固定为点名数量
+        task.bump_percent();
+        if let Some(t) = inner.find_mut(path) {
+            *t = task;
+        } else {
+            inner.tasks.push(task);
+        }
+        drop(inner);
+        self.bump();
+        batch
+    }
+
     pub fn mark_scanning(&self, path: &str) {
         self.transition(path, IndexState::Scanning, None);
     }
 
     pub fn mark_thumbnailing(&self, path: &str) {
         self.transition(path, IndexState::Thumbnailing, None);
+    }
+
+    /// 只换阶段、**保留** `reason`。
+    ///
+    /// 「重建失败索引」用：那条 `reason` 是 `begin_rebuild` 写下的批次来源，
+    /// 被 `mark_thumbnailing` 清掉的话，任务行在跑的时候只会显示「正在生成缩略图」，
+    /// 用户看不出这是他自己点的那次重建、还是又一次自动扫描。
+    pub fn mark_thumbnailing_keep_reason(&self, path: &str) {
+        let now = now_secs();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = inner.find_mut(path) {
+            t.state = IndexState::Thumbnailing;
+            t.last_update = now;
+        }
+        drop(inner);
+        self.bump();
     }
 
     fn transition(&self, path: &str, state: IndexState, reason: Option<String>) {
@@ -654,12 +708,29 @@ impl IndexBoard {
         self.bump();
     }
 
+    /// 清空**全部**任务（删除索引时用）。
+    ///
+    /// 与逐个 `forget` 的区别是连会话级状态一起复位：批次号、开始/结束时刻一起归零，
+    /// 否则面板会显示"0 个文件夹，但已发现 3 万张"这种自相矛盾的残留。
+    pub fn forget_all(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.tasks.clear();
+        inner.agg_displayed = 0;
+        inner.last_started = 0.0;
+        inner.last_finished = None;
+        inner.recompute_agg();
+        drop(inner);
+        self.bump();
+    }
+
     /// 取一份快照。**UI 唯一的读入口**。
     pub fn snapshot(&self) -> IndexSnapshot {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let tasks: Vec<TaskSnapshot> = inner.tasks.iter().map(|t| t.snapshot()).collect();
         let percent = if tasks.is_empty()
-            || tasks.iter().any(|t| t.percent.is_none() || t.discovered == 0)
+            || tasks
+                .iter()
+                .any(|t| t.percent.is_none() || t.discovered == 0)
         {
             None
         } else {
@@ -753,7 +824,11 @@ mod tests {
         b.freeze_denominator("/p/a", 4, 4); // 4 张早已就绪
         assert_eq!(b.snapshot().tasks[0].percent, Some(100));
         b.note_thumb_failed("/p/a", fail(1));
-        assert_eq!(b.snapshot().tasks[0].percent, Some(100), "已显示的值不能倒退");
+        assert_eq!(
+            b.snapshot().tasks[0].percent,
+            Some(100),
+            "已显示的值不能倒退"
+        );
     }
 
     #[test]
@@ -881,7 +956,10 @@ mod tests {
         b.mark_scanning("/p/a");
         b.freeze_denominator("/p/a", 4, 2);
         b.mark_scanning("/p/b");
-        assert!(b.snapshot().percent.is_none(), "有一个还在扫描就不能给汇总百分比");
+        assert!(
+            b.snapshot().percent.is_none(),
+            "有一个还在扫描就不能给汇总百分比"
+        );
         b.freeze_denominator("/p/b", 4, 0);
         assert_eq!(b.snapshot().percent, Some(25));
     }
@@ -900,7 +978,15 @@ mod tests {
         .map(|s| s.label());
         assert_eq!(
             labels,
-            ["等待", "扫描中", "生成缩略图中", "已完成", "部分失败", "暂停", "不可访问"]
+            [
+                "等待",
+                "扫描中",
+                "生成缩略图中",
+                "已完成",
+                "部分失败",
+                "暂停",
+                "不可访问"
+            ]
         );
     }
 
@@ -917,13 +1003,17 @@ mod tests {
             IndexState::Paused,
             IndexState::Unreachable,
         ] {
-            let back = TaskStatus::from_code(state.code())
-                .unwrap_or_else(|| panic!("{:?} 的编码 {} 在 DB 侧没有对应值", state, state.code()));
+            let back = TaskStatus::from_code(state.code()).unwrap_or_else(|| {
+                panic!("{:?} 的编码 {} 在 DB 侧没有对应值", state, state.code())
+            });
             assert_eq!(back.code(), state.code());
         }
         // 七态 + 0..6 是双射，没有空洞
         for code in 0..7 {
-            assert!(TaskStatus::from_code(code).is_some(), "编码 {code} 不该是空洞");
+            assert!(
+                TaskStatus::from_code(code).is_some(),
+                "编码 {code} 不该是空洞"
+            );
         }
         assert!(TaskStatus::from_code(7).is_none());
     }

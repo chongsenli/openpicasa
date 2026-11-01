@@ -66,13 +66,58 @@ impl PhotoRow {
     }
 }
 
-/// `apply_scan` 的结果计数。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// `apply_scan` 的结果。
+///
+/// `touched` 是**本次真正需要重做缩略图**的照片 id（新增 + 缓存键变化），
+/// 与「库里所有待补缩略图的照片」是两件事：25.9 万张的库里有 22 万张历史欠账，
+/// 启动时把它们全补一遍要几小时。扫描只补 `touched`，
+/// 欠账由用户显式点「重试 / 补全」再动。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScanApply {
     pub added: u32,
     pub updated: u32,
     pub removed: u32,
     pub unchanged: u32,
+    pub touched: Vec<i64>,
+}
+
+/// 一个目录里已入库照片的「缓存键 + 已解出的元数据」。
+///
+/// 扫描器用它判断「这个文件没变过」——没变过就不必再读盘解析 EXIF。
+/// 25.9 万张的库，全量探测一次要几十分钟；增量发现应该只碰真正变了的文件。
+#[derive(Clone, Debug)]
+pub struct CachedMeta {
+    pub size_bytes: i64,
+    pub mtime_ns: i64,
+    pub decoder_ver: i64,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub orientation: Option<i64>,
+    pub taken_at: Option<i64>,
+    pub taken_at_src: i64,
+    /// 宽高的状态位（0 待回填 / 1 已完成 / 2 读取失败即终态）。
+    ///
+    /// 单看 `width` 分不清「还没读过」和「读过、读不出来」——两者都是 NULL。
+    /// 这个字段就是为了把这两件事分开，否则 903 张读不出宽高的照片每次启动
+    /// 都会被重新 `probe()` 一遍，然后再失败一遍。
+    pub dims_status: i64,
+}
+
+impl CachedMeta {
+    /// 缓存键是否与磁盘上这个文件一致（一致就可以直接复用元数据）。
+    pub fn matches(&self, size_bytes: i64, mtime_ns: i64, decoder_ver: i64) -> bool {
+        self.size_bytes == size_bytes
+            && self.mtime_ns == mtime_ns
+            && self.decoder_ver == decoder_ver
+    }
+
+    /// 宽高这件事**已经出过结论**了吗（读到值，或已判终态失败）。
+    ///
+    /// 出过结论就不必再碰文件内容。`dims_status = 2` 也算——它的宽高会永远是
+    /// NULL，若拿「宽高非空」当唯一判据，这批文件就会被无限重试。
+    pub fn dims_settled(&self) -> bool {
+        (self.width.is_some() && self.height.is_some()) || self.dims_status == 2
+    }
 }
 
 /// 缩略图 BLOB。
