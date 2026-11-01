@@ -27,6 +27,16 @@ use crate::theme::{Metrics, Theme};
 use crate::toolbar::{self, ToolbarAction};
 use crate::viewer::{self, Viewer, ViewerAction};
 
+/// 索引管理页数据的刷新间隔（毫秒）。
+///
+/// 规格 §6.1 的上限是 4 次/秒（`picasa_core::SNAPSHOT_HZ_MAX`），这里取 1 次/秒：
+/// 实测一次轻量快照在 25.9 万张库上约 70 ms，4 Hz 会把主线程三成以上的时间
+/// 耗在查库上。1 Hz 同样满足「≤ 4 Hz」，且给界面留足余量。
+const MGMT_REFRESH_MS: u64 = 1000;
+
+/// 缩略图占用统计的有效期（秒）。这段时间内重开管理页直接复用缓存，不重算。
+const THUMB_STATS_TTL_SECS: u64 = 30;
+
 pub struct OpenPicasaApp {
     lib: Library,
     /// 应用容器的路径（诊断/自检用；也保证「谁能写哪儿」在 UI 层只有这一份引用）
@@ -87,14 +97,35 @@ pub struct OpenPicasaApp {
     confirm_delete_index: bool,
     /// 「重建失败索引」是否已进入二次确认（`Some(n)` = 待约定的失败项数量）
     confirm_rebuild_failed: Option<u64>,
+    /// §4.8 启动增量校验的执行器（首屏之后才建，跑完置 `None`）
+    verify: Option<picasa_core::verify::VerifyRunner>,
+    /// 启动校验是否已跑完（跑完就不再尝试重建，避免每帧重试）
+    verify_done: bool,
+    /// 启动校验的进度文案（状态栏 tooltip 显示；空 = 没在跑）
+    verify_text: String,
 
-    // ---- 工具栏「索引管理」----
-    /// 二级菜单是否打开
-    index_menu_open: bool,
-    /// 二级菜单的落点（按钮左下角）
-    index_menu_pos: Pos2,
-    /// 菜单打开的帧号，用途同 `sort_menu_frame`
-    index_menu_frame: u64,
+    // ⚠️ M2.2 §2.6：工具栏「索引管理」二级菜单已**整体移除**，
+    // 索引操作的唯一入口是状态栏那个按钮 → [`crate::index_mgr`] 的四标签页。
+    /// 索引管理页（M2.2 §4.1）
+    index_mgr: crate::index_mgr::IndexMgrUi,
+    /// 管理页的唯一数据源（由 core 以 ≤ 4 次/秒发布，UI 只读）
+    mgmt: picasa_core::MgmtSnapshot,
+    /// 离线判定探针（注入到快照构建里，测试可替换；生产用真文件系统）
+    offline_probe: picasa_core::OfflineProbe,
+    /// `mgmt` 的下一次刷新时刻（节流到 [`MGMT_REFRESH_MS`]）
+    mgmt_next_refresh: std::time::Instant,
+    /// 缩略图占用统计（**后台线程算**，UI 只读缓存）。
+    ///
+    /// ## 为什么必须异步
+    ///
+    /// 它要 `SUM(LENGTH(blob))` 过一遍缩略图表。冷缓存下 1.26 GB 从 eMMC 读出是
+    /// 90 秒级（改写成 `EXISTS` 后降到 ~0.9 s），**任何情况下都不该在主线程跑**——
+    /// 2026-11-01 的点「索引」按钮死机就是它同步跑在了 UI 线程上。
+    thumb_storage: Option<picasa_core::ThumbStorage>,
+    /// 后台统计任务的收件口（`None` = 当前没有在算）
+    thumb_rx: Option<Receiver<picasa_core::ThumbStorage>>,
+    /// 上次发起后台统计的时刻（用于节流：不是每次开页面都重算）
+    thumb_req_at: Option<std::time::Instant>,
     /// 缩略图失败项数量（角标 + 菜单文案）。
     ///
     /// **必须缓存**：取它的 `library_thumb_stats()` 是全表扫描，25.9 万张时要几十毫秒，
@@ -186,9 +217,16 @@ impl OpenPicasaApp {
             confirm_rebuild: false,
             confirm_delete_index: false,
             confirm_rebuild_failed: None,
-            index_menu_open: false,
-            index_menu_pos: Pos2::ZERO,
-            index_menu_frame: u64::MAX,
+            index_mgr: crate::index_mgr::IndexMgrUi::new(),
+            mgmt: picasa_core::MgmtSnapshot::default(),
+            offline_probe: picasa_core::default_offline_probe(),
+            mgmt_next_refresh: std::time::Instant::now(),
+            thumb_storage: None,
+            thumb_rx: None,
+            thumb_req_at: None,
+            verify: None,
+            verify_done: false,
+            verify_text: String::new(),
             failed_thumbs: 0,
             reload_now: false,
             restore_scroll,
@@ -207,7 +245,21 @@ impl OpenPicasaApp {
         // 角标要在**第一帧**就有数：用户打开程序的第一眼就该知道"有 970 张坏图"，
         // 而不是等他点开菜单才去算。
         app.refresh_failed_thumbs();
-        app.start_index();
+        // ⚠️ 诊断开关：`OPENPICASA_NO_STARTUP_SCAN=1` 时**启动不扫盘**。
+        //
+        // 存在的理由：25.9 万张 / 4330 目录 / exFAT USB 的库上，启动扫描要跑十几分钟，
+        // 期间它与 UI 抢同一把 db 锁。要判断「界面卡是扫描造成的还是别的」，
+        // 最快的办法就是让它别扫——**这是个诊断开关，不是产品的默认行为**。
+        // 设了它，界面照常显示库里已有的内容，只是不发现新照片。
+        if std::env::var("OPENPICASA_NO_STARTUP_SCAN").as_deref() == Ok("1") {
+            app.lib.toast = Some((
+                "诊断模式：本次启动未扫描磁盘（OPENPICASA_NO_STARTUP_SCAN=1）".into(),
+                6.0,
+            ));
+            tracing::info!("启动扫描已按环境变量跳过");
+        } else {
+            app.start_index();
+        }
         app
     }
 
@@ -218,6 +270,387 @@ impl OpenPicasaApp {
         {
             self.failed_thumbs = s.failed;
         }
+    }
+
+    /// 重算 [`picasa_core::MgmtSnapshot`]（索引管理页的唯一数据源）。
+    ///
+    /// ⚠️ 这是一次十几个查询的批量读，**只能**以 ≤ [`picasa_core::SNAPSHOT_HZ_MAX`]
+    /// 次/秒调用，且只在页面打开时调（R-M2-3：UI 线程不许干重活）。
+    ///
+    /// ## 刷新间隔为什么是 1 Hz 而不是规格允许的上限 4 Hz
+    ///
+    /// 实测（25.9 万张 / 1.4 GB 库）：一次轻量快照 ≈ 70 ms 热缓存、≈ 0.5 s 冷缓存。
+    /// 4 Hz 刷新等于把主线程 30%~100% 的时间花在查库上，在 2 核 5 W 的机器上就是卡。
+    /// 规格 §6.1 写的是「≤ 4 次/秒」，1 Hz 同样满足，且给界面留足余量。
+    fn refresh_mgmt(&mut self) {
+        self.mgmt_next_refresh =
+            std::time::Instant::now() + std::time::Duration::from_millis(MGMT_REFRESH_MS);
+
+        let live = picasa_core::live_task_views(&self.progress.snapshot().clone());
+        let input = picasa_core::SnapshotInput {
+            seq: self.mgmt.seq + 1,
+            live: &live,
+            paused_by_system: self.index.is_paused(),
+            offline: &self.offline_probe,
+            prev_dataset_version: self.mgmt.dataset_version,
+            prev_photo_count: self.mgmt.storage.photo_count,
+        };
+        if let Ok(db) = self.lib.db() {
+            match picasa_core::build_snapshot(&db, &input) {
+                Ok(snap) => {
+                    self.mgmt = snap;
+                    // 快照本身不带 BLOB 统计（那部分慢），把后台算好的那份贴回去，
+                    // 否则每次刷新都会把「缩略图占用」清空成 0。
+                    if let Some(st) = &self.thumb_storage {
+                        picasa_core::apply_storage(&mut self.mgmt, st);
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "索引管理快照刷新失败"),
+            }
+        }
+    }
+
+    /// 收后台线程的缩略图统计（有结果就贴回当前快照）。每帧调，开销是一次 `try_recv`。
+    fn poll_thumb_storage(&mut self) {
+        let got = self.thumb_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(st) = got {
+            self.thumb_rx = None;
+            picasa_core::apply_storage(&mut self.mgmt, &st);
+            self.thumb_storage = Some(st);
+        }
+    }
+
+    /// 发起一次后台缩略图统计。
+    ///
+    /// - 已在算（`thumb_rx` 有值）→ 直接返回，绝不并发两条；
+    /// - `force = false` 且上次发起未超 [`THUMB_STATS_TTL_SECS`] → 复用缓存。
+    ///
+    /// ⚠️ 后台线程会锁住 `Db`，所以**一次**统计要尽量短——这也是 `collect_storage`
+    /// 里坚持用 `EXISTS` 写法的原因（112 s → 0.28 s）。
+    fn request_thumb_storage(&mut self, force: bool) {
+        self.poll_thumb_storage();
+        if self.thumb_rx.is_some() {
+            return;
+        }
+        if !force
+            && let Some(at) = self.thumb_req_at
+            && at.elapsed() < Duration::from_secs(THUMB_STATS_TTL_SECS)
+        {
+            return;
+        }
+        let root_ids: Vec<i64> = self.mgmt.roots.iter().map(|r| r.id).collect();
+        if root_ids.is_empty() {
+            return;
+        }
+        let db = Arc::clone(&self.lib.db);
+        let (tx, rx) = channel();
+        self.thumb_rx = Some(rx);
+        self.thumb_req_at = Some(Instant::now());
+        std::thread::spawn(move || {
+            // ⚠️ **每个根一次短锁，算完立刻放**。
+            // 整段只拿一次锁的话，实测会连着占用 2.2 s（3 个根），把 UI 自己的库访问
+            // 全堵住——那就只是把死机从 UI 线程挪到了后台，照样卡。
+            // 改成逐根取锁后，单次占用降到 ~0.7 s，且用 `try_lock`：
+            // 拿不到就放弃（下一帧会重试），绝不阻塞等待 UI 放锁。
+            let mut by_root = Vec::with_capacity(root_ids.len());
+            for rid in &root_ids {
+                let bytes = match db.try_lock() {
+                    Ok(d) => d
+                        .root_thumb_bytes(std::slice::from_ref(rid))
+                        .ok()
+                        .and_then(|m| m.get(rid).copied())
+                        .unwrap_or(0),
+                    Err(_) => return,
+                };
+                by_root.push((*rid, bytes));
+            }
+            let (thumb_count, thumb_bytes) = match db.try_lock() {
+                Ok(d) => d.thumb_cache_stats().ok().unwrap_or((0, 0)),
+                Err(_) => return,
+            };
+            let _ = tx.send(picasa_core::ThumbStorage {
+                thumb_count,
+                thumb_bytes,
+                by_root,
+            });
+        });
+    }
+
+    /// 缩略图占用发生变化（清理缩略图 / VACUUM / 重建）后调用：缓存作废，下次强制重算。
+    fn invalidate_thumb_storage(&mut self) {
+        self.thumb_storage = None;
+        self.thumb_req_at = None;
+        self.mgmt.storage.thumb_stats_known = false;
+    }
+
+    /// §4.8 启动增量校验：首屏出图之后才启动，然后每帧推进一步。
+    ///
+    /// 为什么放在这里而不是启动时：校验要 `read_dir` 4330 个目录，
+    /// 虽然每目录只有几十微秒，但**不能在首屏之前**抢 IO——用户先看见照片更重要。
+    /// 执行器内部按 `VERIFY_DIR_INTERVAL_MS`（50ms/目录）自己限速，这里不用 sleep。
+    fn tick_startup_verify(&mut self, ctx: &egui::Context) {
+        if self.verify.is_none() && !self.verify_done && self.frames > 30 {
+            let paths: Vec<std::path::PathBuf> = {
+                let Ok(db) = self.lib.db() else {
+                    return;
+                };
+                db.roots(false)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| std::path::PathBuf::from(r.path))
+                    .collect()
+            };
+            let plan = picasa_core::VerifyPlan::from_root_paths(paths);
+            if plan.is_empty() {
+                // 没有活跃根（全关或全离线）：本轮无事可做，不再反复尝试
+                self.verify_done = true;
+            } else {
+                self.verify = Some(picasa_core::verify::VerifyRunner::new(plan));
+            }
+        }
+
+        let Some(runner) = self.verify.as_mut() else {
+            return;
+        };
+        let tick = {
+            let Ok(db) = self.lib.db() else {
+                return;
+            };
+            runner.tick(&db)
+        };
+        self.verify_text = runner.progress().text();
+
+        if tick == picasa_core::verify::VerifyTick::Finished {
+            let changed = runner.take_changed();
+            let n = changed.len();
+            for (_folder_id, path) in changed {
+                self.index
+                    .enqueue_refresh(std::path::Path::new(path.as_str()));
+            }
+            if n > 0 {
+                tracing::info!(dirs = n, "启动校验发现变化，已排队重新扫描");
+                self.lib.toast = Some((format!("启动校验：{n} 个目录有变化，正在更新索引"), 3.0));
+            }
+            self.verify = None;
+            self.verify_done = true;
+            self.verify_text.clear();
+            ctx.request_repaint();
+        }
+    }
+
+    /// 索引管理页点出的动作。
+    ///
+    /// 本方法**只调已有能力**，不在这里写 SQL——与 `diagnostics` 一样，
+    /// 「谁写库」仍然只有 `Library` / `Db` 一层。
+    fn handle_mgr_actions(&mut self, actions: Vec<crate::index_mgr::MgrAction>) {
+        use crate::index_mgr::MgrAction;
+        for a in actions {
+            match a {
+                // ⚠️ 已知缺口：M2.1 只有「整体暂停/继续」，没有按任务取消。
+                // 单任务取消要等流水线（M2.2 迭代 2 / M3）把任务身份落到板上。
+                // 这里**不做**「点了取消其实只暂停全部」那种骗人的映射，
+                // 而是暂停并如实说明。
+                MgrAction::CancelTask(_) => {
+                    self.index.pause();
+                    self.lib.toast = Some((
+                        "已暂停索引（单任务取消随流水线落地，当前只能整体暂停）".into(),
+                        4.0,
+                    ));
+                }
+                MgrAction::RetryKind(kind) => self.retry_failure_kind(kind),
+                MgrAction::IgnoreKind(kind) => self.set_failure_kind_ignored(kind, true),
+                MgrAction::UnignoreKind(kind) => self.set_failure_kind_ignored(kind, false),
+                MgrAction::RefreshRoot(id) | MgrAction::ReindexRoot(id) => self.reindex_root(id),
+                MgrAction::RebuildRoot(id) => self.rebuild_root(id),
+                MgrAction::CloseRoot(id) => self.set_root_closed(id, true),
+                MgrAction::ReopenRoot(id) => self.set_root_closed(id, false),
+                MgrAction::RevealRoot(id) => self.reveal_root(id),
+                MgrAction::DeleteIndexRoot(_) => self.confirm_delete_index = true,
+                MgrAction::RestoreExclusion(id) => self.restore_exclusion(id),
+                MgrAction::PruneStaleExclusions => self.prune_stale_exclusions(),
+                MgrAction::ClearThumbs => {
+                    self.clear_thumbs();
+                    self.invalidate_thumb_storage();
+                }
+                MgrAction::Vacuum => {
+                    self.vacuum();
+                    self.invalidate_thumb_storage();
+                }
+                // 日志导出与帧直方图：本版接线到位，实现随 §4.9 / PERF-18 的工具落地
+                MgrAction::ExportDiagLog => {
+                    self.lib.toast =
+                        Some(("诊断日志导出（§4.9）待接线：需要系统保存对话框".into(), 3.0));
+                }
+                MgrAction::ToggleFrameStats(on) => {
+                    self.lib.toast = Some((
+                        if on {
+                            "帧时间直方图已开启（⌥+点击状态栏入口查看）".to_string()
+                        } else {
+                            "帧时间直方图已关闭".to_string()
+                        },
+                        2.5,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// 重试某一类失败项（**按 id 点名**，§4.3 的边界要求：不走整目录重建）。
+    fn retry_failure_kind(&mut self, kind: picasa_db::FailureKind) {
+        let ids = match self.lib.db() {
+            Ok(db) => db.photo_ids_of_failure_kind(kind).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        if ids.is_empty() {
+            self.lib.toast = Some((format!("没有可重试的「{}」项", kind.label()), 2.5));
+            return;
+        }
+        let n = ids.len();
+        if let Ok(db) = self.lib.db() {
+            let _ = db.reset_failed_thumbs_by_ids(&ids);
+        }
+        if let Some(root) = self.lib.scan_roots().first().cloned() {
+            self.index.enqueue_rebuild_failed(ids, &root);
+        }
+        self.lib.toast = Some((format!("已重新入队 {n} 张（{}）", kind.label()), 3.0));
+        self.mgmt_next_refresh = std::time::Instant::now();
+    }
+
+    /// 忽略 / 取消忽略某一类失败项。**忽略后仍在列表可见**（R-M2-4）。
+    fn set_failure_kind_ignored(&mut self, kind: picasa_db::FailureKind, ignored: bool) {
+        // ⚠️ `db()` 借的是 `self.lib`（MutexGuard），借用期间不能再写 `self.lib.toast`。
+        // 所以先把结果算成字符串，锁放掉之后才落地提示。
+        let msg = match self.lib.db() {
+            Ok(db) => {
+                let n = if ignored {
+                    db.ignore_failures_of_kind(kind)
+                } else {
+                    db.unignore_failures_of_kind(kind)
+                };
+                match n {
+                    Ok(k) => format!(
+                        "已{} {} 条「{}」失败项（列表仍然可见）",
+                        if ignored { "忽略" } else { "取消忽略" },
+                        k,
+                        kind.label()
+                    ),
+                    Err(_) => "操作失败".to_string(),
+                }
+            }
+            Err(e) => format!("操作失败：{e}"),
+        };
+        self.lib.toast = Some((msg, 3.0));
+        self.mgmt_next_refresh = std::time::Instant::now();
+    }
+
+    fn reindex_root(&mut self, id: i64) {
+        let Some(path) = self.mgmt.root_by_id(id).map(|r| r.path.clone()) else {
+            return;
+        };
+        self.index.enqueue_refresh(std::path::Path::new(&path));
+        self.mgmt_next_refresh = std::time::Instant::now();
+    }
+
+    /// 全量重建（§4.2 M22-IDX-06）：**不先清再建**，旧缩略图保持可见直到被替换。
+    fn rebuild_root(&mut self, id: i64) {
+        let Some(root) = self.mgmt.root_by_id(id).map(|r| r.path.clone()) else {
+            return;
+        };
+        let path = std::path::PathBuf::from(&root);
+        if let Ok(db) = self.lib.db()
+            && let Ok(Some(fid)) = db.folder_id(&root)
+        {
+            // 只把缩略图状态重置为「待生成」，**不删已有 BLOB**——
+            // 这样重建期间用户看到的还是旧图，不会满屏灰格。
+            let _ = db.reset_failed_thumbs_subtree(fid);
+        }
+        self.index.enqueue_scan(std::slice::from_ref(&path));
+        self.lib.toast = Some((
+            format!("已对 {root} 开始全量重建（旧缩略图保留直到替换）"),
+            3.0,
+        ));
+        self.mgmt_next_refresh = std::time::Instant::now();
+    }
+
+    fn set_root_closed(&mut self, id: i64, closed: bool) {
+        let Some(path) = self.mgmt.root_by_id(id).map(|r| r.path.clone()) else {
+            return;
+        };
+        let p = std::path::Path::new(&path);
+        if closed {
+            self.lib.close_root(p);
+        } else {
+            self.lib.add_root(p);
+        }
+        self.reload_now = true;
+        self.mgmt_next_refresh = std::time::Instant::now();
+    }
+
+    fn reveal_root(&mut self, id: i64) {
+        let Some(path) = self.mgmt.root_by_id(id).map(|r| r.path.clone()) else {
+            return;
+        };
+        if let Err(e) = crate::macos::reveal_in_finder(std::path::Path::new(&path)) {
+            self.lib.toast = Some((e, 3.0));
+        }
+    }
+
+    fn restore_exclusion(&mut self, id: i64) {
+        match self.lib.restore_exclusion(id) {
+            Ok(Some(p)) => {
+                self.lib.toast = Some((format!("已恢复 {p}"), 2.5));
+                self.reload_now = true;
+            }
+            Ok(None) => {}
+            Err(e) => self.lib.toast = Some((format!("恢复失败：{e}"), 3.0)),
+        }
+        self.mgmt_next_refresh = std::time::Instant::now();
+    }
+
+    /// 清理全部「路径已不存在」的排除项（§4.1 第三行）。
+    fn prune_stale_exclusions(&mut self) {
+        let stale: Vec<i64> = self
+            .mgmt
+            .exclusions
+            .iter()
+            .filter(|e| e.path_missing)
+            .map(|e| e.id)
+            .collect();
+        let n = stale.len();
+        for id in stale {
+            if let Ok(db) = self.lib.db() {
+                let _ = db.remove_exclusion(id);
+            }
+        }
+        self.lib.toast = Some((format!("已清理 {n} 条失效排除项"), 2.5));
+        self.mgmt_next_refresh = std::time::Instant::now();
+    }
+
+    fn clear_thumbs(&mut self) {
+        let (msg, ok) = match self.lib.db() {
+            Ok(db) => match db.clear_all_thumbs() {
+                Ok(n) => (format!("已清理 {n} 条缩略图"), true),
+                Err(e) => (format!("清理失败：{e}"), false),
+            },
+            Err(e) => (format!("清理失败：{e}"), false),
+        };
+        if ok {
+            self.reload_now = true;
+        }
+        self.lib.toast = Some((msg, 3.0));
+        self.mgmt_next_refresh = std::time::Instant::now();
+    }
+
+    fn vacuum(&mut self) {
+        let msg = match self.lib.db() {
+            Ok(db) => match db.vacuum() {
+                Ok(()) => "已完成 VACUUM".to_string(),
+                Err(e) => format!("VACUUM 失败：{e}"),
+            },
+            Err(e) => format!("VACUUM 失败：{e}"),
+        };
+        self.lib.toast = Some((msg, 3.0));
+        self.mgmt_next_refresh = std::time::Instant::now();
     }
 
     /// 启动时的索引：把每个关注文件夹作为一个任务入队（**同一批次**）。
@@ -490,6 +923,13 @@ impl OpenPicasaApp {
         let theme = self.theme;
         // 本帧的进度切片：状态栏/左栏/栅格**读同一份**（`04` §3.2 的四处一致）
         let snap = self.progress.snapshot().clone();
+        // ---- M2.2 §6.1：管理快照 ≤ 4 次/秒刷新（PERF-05 的「每帧 ≤ 1 次 DB 查询」）
+        //
+        // 只在**页面打开**时才刷：关着的页面不需要数据，白刷等于每 250 ms
+        // 做一次十几个查询的批量读，这在主线程上是白花钱（R-M2-3）。
+        if self.index_mgr.open && std::time::Instant::now() >= self.mgmt_next_refresh {
+            self.refresh_mgmt();
+        }
 
         // ① 顶部工具栏
         egui::Panel::top("toolbar-panel")
@@ -504,11 +944,8 @@ impl OpenPicasaApp {
                     !self.lib.selection.is_empty(),
                     &mut self.search_buf,
                     self.sort_menu_open,
-                    self.index_menu_open,
-                    self.failed_thumbs,
                 );
                 let sort_btn_rect = out.sort_button.as_ref().map(|r| r.rect);
-                let index_btn_rect = out.index_button.as_ref().map(|r| r.rect);
                 if let Some(new_search) = out.search_changed {
                     if let Err(e) = self.lib.set_search(new_search) {
                         tracing::warn!(error = %e, "搜索失败");
@@ -518,16 +955,12 @@ impl OpenPicasaApp {
                 if let Some(rect) = sort_btn_rect {
                     self.sort_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
                 }
-                if let Some(rect) = index_btn_rect {
-                    self.index_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
-                }
                 for action in out.actions {
                     match action {
                         ToolbarAction::AddFolder => self.add_folder(),
                         ToolbarAction::RevealCurrent => self.reveal_selected(),
                         ToolbarAction::ToggleSortMenu => {
                             self.sort_menu_open = !self.sort_menu_open;
-                            self.index_menu_open = false; // 两个二级菜单不同时开
                             if self.sort_menu_open {
                                 self.sort_menu_frame = ctx.cumulative_frame_nr();
                             }
@@ -553,14 +986,18 @@ impl OpenPicasaApp {
                             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
                         }
-                        ToolbarAction::ToggleIndexMenu => {
-                            self.index_menu_open = !self.index_menu_open;
-                            self.sort_menu_open = false; // 两个二级菜单不同时开
-                            if self.index_menu_open {
-                                self.index_menu_frame = ctx.cumulative_frame_nr();
-                                // 打开时重取一次：角标可能是几小时前算的
-                                self.refresh_failed_thumbs();
-                            }
+                        ToolbarAction::Quit => {
+                            // 菜单「档案 → 退出」。走正常退出路径，on_exit 会存偏好。
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        ToolbarAction::About => {
+                            self.lib.toast = Some((
+                                format!(
+                                    "OpenPicasa {} · 本地照片库（只读不改原文件）",
+                                    env!("CARGO_PKG_VERSION")
+                                ),
+                                3.0,
+                            ));
                         }
                     }
                 }
@@ -571,12 +1008,20 @@ impl OpenPicasaApp {
             .exact_size(Metrics::STATUS_H)
             .frame(egui::Frame::new().fill(theme.chrome_bg))
             .show(ui, |ui| {
-                let out = statusbar::show(ui, &self.lib, &theme, &snap);
+                let out =
+                    statusbar::show(ui, &self.lib, &theme, &snap, &self.mgmt, &self.verify_text);
                 if out.index_clicked {
-                    self.progress.open_panel();
+                    // M2.2 §2.6：唯一入口 → 索引管理页（并自动定位到有问题的标签）。
+                    // 旧的 `progress.open_panel()` 不再挂在这里——右下角弹框仍然自己出现
+                    // （M2-FD-29~36 保留），但**索引按钮**只剩这一个。
+                    self.index_mgr
+                        .open_at(&self.mgmt, self.mgmt.failed_task_count);
                 }
                 if out.diag_clicked {
-                    self.diagnostics_open = !self.diagnostics_open;
+                    // 过渡期：旧的「诊断」页仍从这里打开。它不是"忘了删的旧入口"，
+                    // 而是新页面「存储与诊断」标签还没齐的两项（诊断日志导出、
+                    // 带进度/取消的 VACUUM）目前的唯一可达路径。齐了之后按规格 §9 迭代 3 再删。
+                    self.diagnostics_open = true;
                     self.diag_dirty = true;
                 }
             });
@@ -892,35 +1337,6 @@ impl OpenPicasaApp {
             }
         }
 
-        // 索引管理二级菜单
-        //
-        // 关闭规则与排序菜单同款（三条，顺序不能改）：点了菜单项 → 关；
-        // 本帧刚由按钮打开 → 豁免（按钮的 click 与「点别处」同帧为真）；
-        // 点击落在实测矩形外 → 关。矩形用 `Area` 返回值，不猜尺寸。
-        if self.index_menu_open && self.viewer.is_none() {
-            let (action, menu_rect) =
-                toolbar::index_menu(ui, self.index_menu_pos, self.failed_thumbs);
-            if let Some(action) = action {
-                self.index_menu_open = false;
-                match action {
-                    toolbar::IndexMenuAction::RebuildFailed => {
-                        self.confirm_rebuild_failed = Some(self.failed_thumbs);
-                    }
-                    toolbar::IndexMenuAction::OpenProgress => self.progress.open_panel(),
-                }
-            }
-            if self.index_menu_frame != ctx.cumulative_frame_nr()
-                && ctx.input(|i| i.pointer.any_click())
-            {
-                let pos = ctx.input(|i| i.pointer.interact_pos());
-                if let Some(p) = pos
-                    && !menu_rect.contains(p)
-                {
-                    self.index_menu_open = false;
-                }
-            }
-        }
-
         // 文件夹右键菜单
         if let Some((path, pos)) = self.folder_ctx.clone() {
             let mut close = false;
@@ -1188,7 +1604,35 @@ impl OpenPicasaApp {
                 self.lib.toast = Some(("索引已继续".into(), 2.0));
             }
             Some(ProgressAction::DeleteIndex) => self.confirm_delete_index = true,
+            Some(ProgressAction::OpenManager) => {
+                // 打开前先刷一次：从弹框过来时用户期待看到**当下**的数据
+                self.refresh_mgmt();
+                self.index_mgr
+                    .open_at(&self.mgmt, self.mgmt.failed_task_count);
+            }
             Some(ProgressAction::ClosePanel) | None => {}
+        }
+
+        // ---- M2.2 §4.1：索引管理页（四个标签，唯一入口打开）
+        //
+        // ⚠️ 放在 `confirm_delete_index` **之前**：页面里的「删除索引」会把
+        // `confirm_delete_index` 置真，下一帧才能画出确认框（同帧画不出来——
+        // egui 的 Window 是在调用点当帧绘制的）。
+        if self.index_mgr.open {
+            // 缩略图占用是慢查询，只在页面开着时、由后台线程算（死机修复的关键）。
+            self.request_thumb_storage(false);
+            let now = chrono::Utc::now().timestamp();
+            let actions = crate::index_mgr::show(
+                &ctx,
+                &self.theme,
+                &mut self.index_mgr,
+                &self.mgmt,
+                self.mgmt.failed_task_count,
+                now,
+            );
+            if !actions.is_empty() {
+                self.handle_mgr_actions(actions);
+            }
         }
 
         if self.confirm_delete_index {
@@ -1482,6 +1926,8 @@ impl eframe::App for OpenPicasaApp {
         self.handle_keys(&ctx);
         // 索引进度：按 250 ms 节流取快照（不在 UI 线程做任何索引工作）
         self.progress.tick(&ctx, &self.board);
+        // §4.8 启动增量校验：首屏之后启动，之后每帧推进一步（**内部自己限速**）
+        self.tick_startup_verify(&ctx);
 
         // 调试入口：等照片装载好再进查看器（首帧时 photos 还是空的）
         // 45 帧 ≈ 0.7s：扫描是逐目录入库的，太早会拿到半截列表（实测拿到过 3/9）。
@@ -1528,6 +1974,11 @@ impl eframe::App for OpenPicasaApp {
 
     fn on_exit(&mut self) {
         self.index.stop();
+        // M22-PERF-04：退出前把 ANALYZE 结果落进 sqlite_stat1，下次启动不必重跑。
+        // 失败无所谓——只是少一点查询计划优化，不能因此拦住退出。
+        if let Ok(db) = self.lib.db() {
+            let _ = db.optimize();
+        }
         self.lib.save_prefs();
         tracing::info!("退出：偏好已保存");
     }

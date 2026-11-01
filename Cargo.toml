@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0-beta.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -31,6 +31,11 @@ image = { version = "0.25", default-features = false, features = [
     "bmp",
 ] }
 kamadak-exif = "0.6"
+# M2.2 PERF-13：JPEG 的 DCT 缩放解码。
+# 选它的唯一理由：`Decoder::scale()` 原生支持 1/8 · 1/4 · 1/2 三档 DCT 缩放，
+# 而这正是 §3.4 写的「目标边长 ≤ 原图/8 用 1/8 …」。依赖树里现成的 `zune-jpeg`
+# （`image` 0.25 的 JPEG 后端）**没有**缩放 API，`turbojpeg`/`mozjpeg` 又要编 C。
+jpeg-decoder = { version = "0.3", default-features = false, features = ["platform_independent"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 rayon = "1.12"
 notify = "8.2"

@@ -9,8 +9,8 @@
 //! 所以：托盘是左栏 `Panel::bottom(...)`，展开时左栏变高、**栅格宽度不变**（U-37）。
 
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2,
-    vec2,
+    self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui,
+    pos2, vec2,
 };
 use picasa_core::{IndexSnapshot, Library, ThumbService, View};
 use picasa_db::{Db, PhotoRow};
@@ -102,29 +102,144 @@ fn section_header(
         Sense::click(),
     );
     let painter = ui.painter_at(rect);
+
+    // ---- 组头白盒（量自 09-library-zh-full.png y=82..102 / 144..164）----
+    // 底是 (241,243,246)→(220,221,225) 的竖直渐变，四周 1px (155,155,155) 边框。
+    // 之前画的「灰字 + 右端箭头」和原版差得很远——原版是**一个带边框的盒子**。
+    {
+        use eframe::epaint::Mesh;
+        let inner = rect.shrink(1.0); // 渐变铺在边框内侧
+        let (c_top, c_bot) = (t.header_top, t.header_bottom);
+        let mut mesh = Mesh::default();
+        for (p, c) in [
+            (inner.left_top(), c_top),
+            (inner.right_top(), c_top),
+            (inner.right_bottom(), c_bot),
+            (inner.left_bottom(), c_bot),
+        ] {
+            mesh.colored_vertex(p, c);
+        }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        painter.add(Shape::Mesh(std::sync::Arc::new(mesh)));
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0, t.header_border),
+            StrokeKind::Inside,
+        );
+    }
+
+    // ---- 折叠钮：Picasa 绿的圆角方块 + 白色三角（量自参考图 #0A9000）----
+    let disc = Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), vec2(15.0, 15.0));
+    painter.rect_filled(disc, 3.0, t.disclosure_green);
+    let tri_h = if collapsed { 5.0 } else { 4.5 };
+    let (p1, p2, p3) = if collapsed {
+        (
+            pos2(disc.center().x - 2.0, disc.center().y - tri_h),
+            pos2(disc.center().x - 2.0, disc.center().y + tri_h),
+            pos2(disc.center().x + 3.0, disc.center().y),
+        )
+    } else {
+        (
+            pos2(disc.center().x - tri_h, disc.center().y - 2.0),
+            pos2(disc.center().x + tri_h, disc.center().y - 2.0),
+            pos2(disc.center().x, disc.center().y + 3.0),
+        )
+    };
+    painter.add(Shape::convex_polygon(
+        vec![p1, p2, p3],
+        Color32::WHITE,
+        Stroke::NONE,
+    ));
+
+    // ---- 标题：粗体 #4D4D4D（量值），文字起点在折叠钮右侧 ----
     painter.text(
-        pos2(rect.left() + 10.0, rect.center().y),
+        pos2(rect.left() + 34.0, rect.center().y),
         Align2::LEFT_CENTER,
         title,
-        FontId::new(11.5, egui::FontFamily::Proportional),
-        t.text_secondary,
+        FontId::new(12.0, egui::FontFamily::Proportional),
+        t.tree_text,
     );
-    // 折叠箭头（U-13：灰色小字 + 折叠箭头，不是按钮样式）
-    let chev = Rect::from_center_size(pos2(rect.right() - 14.0, rect.center().y), vec2(9.0, 9.0));
-    icons::draw(
-        &painter,
-        if collapsed {
-            Icon::ChevronRight
-        } else {
-            Icon::ChevronDown
-        },
-        chev,
-        t.text_secondary,
-        1.2,
+    // 粗体：参考图的组头是 bold。egui 没注册 bold 字族，用 0.5px 重影模拟。
+    painter.text(
+        pos2(rect.left() + 34.5, rect.center().y),
+        Align2::LEFT_CENTER,
+        title,
+        FontId::new(12.0, egui::FontFamily::Proportional),
+        t.tree_text,
     );
+
     if resp.clicked() {
         actions.push(SidebarAction::ToggleSection(title.to_string()));
     }
+}
+
+/// I-02：树里的拟物文件夹图标。
+///
+/// **量自 `09-library-zh-full.png`**（1312×768 原生分辨率，非选中行 y=213..224）：
+/// - 箱体 15×12px（行高 22px 里垂直居中）；
+/// - 前面板竖直渐变 `#F9DCA1 → #EBCD9A → #C29F68`（逐行实测均值）；
+/// - 描边 `#A67C59`（图标区域内最深像素）。
+///
+/// 用矢量而不是 PNG：15×12 的位图在高分屏上会糊，且免掉资源管线。
+/// 后盖（tab）比前面板深一档，形成「盒盖在后面」的层次——这是原版图标的关键特征。
+fn draw_folder_icon(painter: &egui::Painter, rect: Rect) {
+    const OUTLINE: Color32 = Color32::from_rgb(0xA6, 0x7C, 0x59);
+    const BACK: Color32 = Color32::from_rgb(0xC2, 0x9B, 0x5E);
+    const FRONT_TOP: Color32 = Color32::from_rgb(0xF9, 0xDC, 0xA1);
+    const FRONT_MID: Color32 = Color32::from_rgb(0xEB, 0xCD, 0x9A);
+    const FRONT_BOT: Color32 = Color32::from_rgb(0xC2, 0x9F, 0x68);
+
+    let w = rect.width();
+    let h = rect.height();
+    // 后盖：左上带标签耳（占 60% 宽、高 55%），右下被前面板盖住
+    let tab_w = w * 0.55;
+    let tab_h = h * 0.5;
+    painter.rect_filled(
+        Rect::from_min_size(rect.left_top(), vec2(tab_w, tab_h + 1.0)),
+        1.0,
+        BACK,
+    );
+    painter.rect_filled(
+        Rect::from_min_size(
+            rect.left_top() + vec2(0.0, tab_h * 0.6),
+            vec2(w, h - tab_h * 0.6),
+        ),
+        0.0,
+        BACK,
+    );
+    // 前面板：竖直三段渐变（顶亮 → 底深），用 Mesh 顶点色插值
+    let front = Rect::from_min_size(
+        rect.left_top() + vec2(0.0, tab_h * 0.8),
+        vec2(w, h - tab_h * 0.8),
+    );
+    let mut mesh = eframe::epaint::Mesh::default();
+    let mid_y = (front.top() + front.bottom()) * 0.45;
+    for (p, c) in [
+        (pos2(front.left(), front.top()), FRONT_TOP),
+        (pos2(front.right(), front.top()), FRONT_TOP),
+        (pos2(front.right(), mid_y), FRONT_MID),
+        (pos2(front.left(), mid_y), FRONT_MID),
+        (pos2(front.right(), front.bottom()), FRONT_BOT),
+        (pos2(front.left(), front.bottom()), FRONT_BOT),
+    ] {
+        mesh.colored_vertex(p, c);
+    }
+    // 顶带 0-1-2 / 0-2-3，底带 2-3-4 / 3-4-5（顶点顺序：0左上 1右上 2右中 3左中 4右下 5左下）
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    mesh.add_triangle(3, 2, 4);
+    mesh.add_triangle(3, 4, 5);
+    painter.add(Shape::Mesh(std::sync::Arc::new(mesh)));
+    // 描边：前面板 + 整体轮廓各一圈 1px
+    painter.rect_stroke(front, 0.0, Stroke::new(1.0, OUTLINE), StrokeKind::Inside);
+    painter.rect_stroke(
+        Rect::from_min_size(rect.left_top(), vec2(tab_w, tab_h + 1.0)),
+        1.0,
+        Stroke::new(1.0, OUTLINE),
+        StrokeKind::Inside,
+    );
 }
 
 fn favorites(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut Vec<SidebarAction>) {
@@ -260,10 +375,14 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
 
                 // U-14：每级缩进固定步长
                 let indent = 8.0 + row.depth as f32 * Metrics::INDENT;
+                // 图标槽：所有行的图标都从 `indent + 12` 起（有折叠箭头的行，
+                // 箭头占用前面的 12px 槽）——保证父子行的图标**垂直对齐**，
+                // 这与参考图里「图标全部左对齐」一致。
+                let icon_x = rect.left() + indent + 12.0;
                 // 折叠箭头（有子目录才出现，U-17）
                 if row.has_children {
                     let chev = Rect::from_center_size(
-                        pos2(rect.left() + indent, rect.center().y),
+                        pos2(rect.left() + indent + 5.0, rect.center().y),
                         vec2(10.0, 10.0),
                     );
                     icons::draw(
@@ -283,7 +402,7 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
                     );
                     // 箭头是可点的：窄区域，避免误触「选中」
                     let chev_rect = Rect::from_center_size(
-                        pos2(rect.left() + indent, rect.center().y),
+                        pos2(rect.left() + indent + 5.0, rect.center().y),
                         vec2(14.0, row_h),
                     );
                     let chev_resp = ui.interact(
@@ -297,7 +416,15 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
                     }
                 }
 
-                let text_x = rect.left() + indent + 14.0;
+                // I-02：拟物文件夹图标（15×12，量自参考图）。选中行图标不反色——
+                // 参考图里选中行的文件夹仍是彩色的。
+                draw_folder_icon(
+                    &painter,
+                    Rect::from_min_size(pos2(icon_x, rect.center().y - 6.0), vec2(15.0, 12.0)),
+                );
+
+                // 文字与图标间距：量自参考图（图标右沿 x=45，文字起点 x≈50）
+                let text_x = icon_x + 15.0 + 5.0;
                 painter.text(
                     pos2(text_x, rect.center().y),
                     Align2::LEFT_CENTER,
@@ -306,7 +433,7 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
                     if active && ctx.has_focus {
                         Color32::WHITE
                     } else {
-                        t.text_primary
+                        t.tree_text
                     },
                 );
                 // U-15：计数右对齐、灰色；为 0 不显示
@@ -324,12 +451,13 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
                     painter.text(
                         pos2(count_right, rect.center().y),
                         Align2::RIGHT_CENTER,
-                        row.count.to_string(),
-                        FontId::new(10.5, egui::FontFamily::Proportional),
+                        // 参考图里 Picasa 的计数是 `(1)` 形式，与标签同色（#4D4D4D）
+                        format!("({})", row.count),
+                        FontId::new(11.0, egui::FontFamily::Proportional),
                         if active && ctx.has_focus {
                             Color32::from_white_alpha(210)
                         } else {
-                            t.text_secondary
+                            t.tree_text
                         },
                     );
                 }

@@ -329,7 +329,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.1.0"
+version      = "0.2.0-beta.1"
 edition      = "2024"
 rust-version = "1.95"          # 受 eframe 0.37 的 MSRV 约束
 license      = "MIT OR Apache-2.0"
@@ -431,7 +431,7 @@ cargo build --release --bin OpenPicasa     # → target/release/OpenPicasa
 
 # 打成 .deb
 ./packaging/make_deb.sh                     # → dist/openpicasa_<version>-1_amd64.deb
-sudo apt install ./dist/openpicasa_0.1.0-1_amd64.deb
+sudo apt install ./dist/openpicasa_0.2.0-beta.1-1_amd64.deb
 ```
 
 三个平台差异要知道：

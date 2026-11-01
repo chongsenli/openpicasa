@@ -10,11 +10,10 @@
 //! | 1 | `m1_minimal` | folders / photos / thumbs |
 //! | 2 | `m21_data_layer` | roots、folders 层级、照片尺寸状态 + 生成列、排除表、任务与失败表 |
 //! | 3 | `m21_sort_effective_taken` | `eff_taken_at` 虚拟生成列 + 排序索引（**让「按拍摄时间」真正走索引**） |
-//!
-//! ⚠️ **M2（A 线索引底座）没有动 schema**，`SCHEMA_VERSION` 一直是 1。
-//! 所以 M2.1 的 `schema_version() == 1` 就是「这是 M2 的库」的判据
-//! （`docs/05` §1.1：本项目**没有**用 `PRAGMA user_version`）。
+//! | 4 | `m21_pending_thumbs_index` | `(thumb_state, taken_at DESC)` —— 让「取一批待补缩略图」不再全表排序 |
+//! | 5 | `m22_index_management` | 失败分类 `kind`/`ignored`、任务历史终态列、`folders.last_verified_at` |
 
+/// 一条迁移：版本号 + 名字 + 一段 SQL。**只追加，不改已有的**。
 pub struct Migration {
     pub version: i64,
     pub name: &'static str,
@@ -22,7 +21,12 @@ pub struct Migration {
 }
 
 /// 当前程序支持的 schema 版本 = 迁移数组里最大的 version。
-pub const SCHEMA_VERSION: i64 = 4;
+///
+/// ⚠️ **与 `docs/06`（M2.2 规格）的编号偏差**：规格 §5 把它写成「迁移 v3」，
+/// 因为它成文时代码停在 v2；本仓库在 M2.1 收尾时又落了 v3（`eff_taken_at`）与
+/// v4（待补缩略图索引）。**内容按规格做，版本号以代码为准 = 5**，
+/// 已登记进 `docs/06` §12.1 冲突表。
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// v1 · M1 最小集（02 §5.3）。
 ///
@@ -233,6 +237,49 @@ const V4: &str = r#"
 CREATE INDEX idx_photos_thumb_taken ON photos(thumb_state, taken_at DESC);
 "#;
 
+/// v5 · M2.2 索引管理（`docs/06` §4/§5）。
+///
+/// ## 三件事，全部只增列 / 只建索引
+///
+/// 1. **失败分类**（§4.5）：`index_task_failures` 加 `kind` / `ignored`。
+///    以前失败只有一串 `error_code` 文本，`NoPermission` 与 `Corrupt` 在界面上长得一样，
+///    于是「重试全部」会把注定失败的格式不支持项也重跑一遍。分类后每组可单独处置，
+///    `ignored` 是**标记不是删除**（R-M2-4：忽略的失败项必须仍在列表可见）。
+/// 2. **任务历史**（§4.7）：`index_tasks` 加 `outcome` / `processed` / `failed` /
+///    `duration_ms`。`finished_at` 在 v2 就有了，不重复加。
+/// 3. **目录级校验时间戳**（P-16 预留）：`folders.last_verified_at`。本版**只写不依赖**，
+///    避免"按上次扫描时间跳过目录"这个策略问题没定却先把行为改了。
+///
+/// ## 为什么 `kind` 的默认是 3（Unreachable）而不是 0 或 1
+///
+/// 历史失败项没有分类信息。M2.1 实测那 970 张「解码失败」经核实是**瞬时失败被固化**
+/// （`docs/05` §1.12），不是文件坏了。默认标成 `Unreachable`（可重试）才符合事实；
+/// 标成 `Corrupt` 等于把 970 张好照片判了死刑。
+///
+/// ## ⚠️ 不建 `idx_thumbs_photo`
+///
+/// 规格 §5.2 里有一条 `CREATE INDEX idx_thumbs_photo ON thumbs(photo_id)`。
+/// `thumbs` 是 `WITHOUT ROWID` 且主键就是 `(photo_id, tier)`，photo_id 前缀已由主键
+/// 索引完全覆盖 —— 再建一条是纯粹的写放大（每次落库多维护一棵 B 树）。
+/// 这条**不做**，已登记进 `docs/06` §12.1。
+const V5: &str = r#"
+-- ------------------------------------------------------- 1. 失败分类（§4.5）
+ALTER TABLE index_task_failures ADD COLUMN kind    INTEGER NOT NULL DEFAULT 3;
+ALTER TABLE index_task_failures ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_failures_kind ON index_task_failures(kind, ignored);
+
+-- ------------------------------------------------------- 2. 任务历史（§4.7）
+-- finished_at 在 v2 已存在，这里只补「结局与账目」四列。
+ALTER TABLE index_tasks ADD COLUMN outcome     INTEGER;
+ALTER TABLE index_tasks ADD COLUMN processed   INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE index_tasks ADD COLUMN failed      INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE index_tasks ADD COLUMN duration_ms INTEGER;
+CREATE INDEX IF NOT EXISTS idx_tasks_finished ON index_tasks(finished_at);
+
+-- ------------------------------------------- 3. 目录级校验时间戳（P-16 预留）
+ALTER TABLE folders ADD COLUMN last_verified_at INTEGER;
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -254,10 +301,18 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "m21_pending_thumbs_index",
         sql: V4,
     },
+    Migration {
+        version: 5,
+        name: "m22_index_management",
+        sql: V5,
+    },
 ];
 
 /// 数据步骤名（`data_migrations` 的主键）。写成常量，避免调用方手打字符串写错。
 pub const DATA_V2_ROOTS_FOLDERS: &str = "v2_roots_folders";
+/// v5 的失败分类补数（历史 `error_code` 文本 → `kind`）。同样是「数据步骤」，
+/// 用 `data_migrations` 单独守卫，与 DDL 的守卫分开（理由见 `upgrade.rs` 文件头）。
+pub const DATA_V5_FAILURE_KINDS: &str = "v5_failure_kinds";
 
 /// 索引任务的七态编码（与 `picasa-core::index::IndexState` 一一对应）。
 ///
@@ -308,10 +363,36 @@ pub enum TaskKind {
     Resume = 3,
     /// 宽高回填
     DimsBackfill = 4,
+    /// 启动增量校验（M2.2 §4.8，P-12 落定后的**唯一**变化发现机制）
+    Verify = 5,
 }
 
 impl TaskKind {
     pub fn code(self) -> i64 {
         self as i64
+    }
+
+    pub fn from_code(code: i64) -> Option<Self> {
+        Some(match code {
+            0 => Self::FirstScan,
+            1 => Self::Refresh,
+            2 => Self::Reindex,
+            3 => Self::Resume,
+            4 => Self::DimsBackfill,
+            5 => Self::Verify,
+            _ => return None,
+        })
+    }
+
+    /// 界面文案（**唯一措辞来源**：任务标签的「类型」列就用这个）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FirstScan => "首次索引",
+            Self::Refresh => "刷新",
+            Self::Reindex => "重建",
+            Self::Resume => "恢复",
+            Self::DimsBackfill => "回填尺寸",
+            Self::Verify => "校验",
+        }
     }
 }

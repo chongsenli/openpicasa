@@ -54,6 +54,8 @@ pub enum ProgressAction {
     ResumeIndex,
     /// 删除索引数据（界面上需要二次确认，这里只负责"用户点了"）
     DeleteIndex,
+    /// 打开索引管理页（M2.2 §2.6：弹框内必须有这个入口）
+    OpenManager,
     /// 面板被用户关闭
     ClosePanel,
 }
@@ -652,6 +654,11 @@ impl IndexProgressUi {
                     }
                     if snap.has_failures() && ui.button("全部重试").clicked() {
                         retry_all = true;
+                    }
+                    // M2.2 §2.6：弹框保留，但加一个去索引管理页的链接——
+                    // 「暂停/删除」这类操作已经搬到那边了，用户从弹框必须能过去。
+                    if ui.button("打开索引管理").clicked() {
+                        action = Some(ProgressAction::OpenManager);
                     }
                     // 放最右：破坏性操作不跟常用按钮挨着
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

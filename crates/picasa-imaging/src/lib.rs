@@ -10,15 +10,19 @@ mod decode;
 mod dims;
 mod exif;
 mod orient;
+mod scaled;
 mod thumb;
 
 pub use decode::{decode, decode_oriented, probe_dimensions};
 pub use dims::{Dims, DimsError, probe_dims};
 pub use exif::{ExifSummary, probe};
 pub use orient::{apply_orientation, orientation_swaps_axes};
+pub use scaled::{
+    SCALED_STATS, ScaledStats, dct_scale_for, decode_jpeg_scaled, mean_abs_error, psnr,
+};
 pub use thumb::{
-    ThumbImage, encode_jpeg, flatten_on_white, oriented_size, resize_to_fit, thumb_from_file,
-    thumb_t0,
+    ThumbImage, encode_jpeg, flatten_on_white, oriented_size, resize_to_fit, thumb_from_bytes,
+    thumb_from_file, thumb_t0,
 };
 
 /// 解码器版本。**任何影响像素输出的改动都必须 +1**，否则 10 万张的旧缓存不会失效（02 §5.3）。

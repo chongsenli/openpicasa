@@ -138,8 +138,8 @@ cat > "$stage/changelog" <<EOF
 openpicasa ($version-1) unstable; urgency=medium
 
   * Build for Linux from upstream main.
-  * Requires glibc 2.44 or newer (the release binary links against the
-    symbols of the distribution it was built on).
+  * The binary links against the glibc symbol versions of the distribution it
+    was built on — install it on the same release or newer (see Depends).
 
  -- chongsenli <chongsenli@users.noreply.github.com>  $(date -R)
 EOF
@@ -167,12 +167,45 @@ Recommends: mesa-vulkan-drivers | libgl1, libwayland-client0, libxkbcommon0
 Description: open-source photo library browser (Picasa alternative)
  OpenPicasa indexes a folder tree you point it at, decodes and orients
  thumbnails, and shows them in a virtualised grid with date grouping, a folder
- sidebar, a tray and a dark full-screen viewer. Metadata lives in a local
- SQLite database; the photo directories are only ever read, never written to.
+ sidebar, a tray and a dark full-screen viewer. Indexing runs in the background
+ and can be paused at a folder boundary or cleared without touching the photos;
+ metadata lives in a local SQLite database; the photo directories are only ever
+ read, never written to.
  .
- This is the M1 milestone: browsing, indexing and viewing only.
+ Current stage: M2.2 (index management, failure classification and a three-stage index pipeline).
 EOF
 chmod 644 "$root/DEBIAN/control"
+
+# ---- 6.5 维护者脚本（图标缓存 / desktop 数据库）----
+# 装完之后必须刷新这两个缓存，否则 GNOME / KDE 的应用列表里会出现
+# 「入口在、图标是个问号」——文件其实已经装到 /usr/share 下了，只是索引没更新。
+#
+# ⚠️ 两个命令都不保证存在（最小化系统没有 gtk-update-icon-cache），用 command -v 兜住；
+# ⚠️ 更关键的是**不能让它们的退出码决定安装成败**：缓存刷新失败只是图标显示问题，
+#    让它把 dpkg 打断成 half-installed 是最坏的一种结果，所以末尾无条件 `exit 0`。
+cat > "$root/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -q /usr/share/icons/hicolor || true
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+exit 0
+EOF
+cat > "$root/DEBIAN/postrm" <<'EOF'
+#!/bin/sh
+set -e
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -q /usr/share/icons/hicolor || true
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+exit 0
+EOF
+chmod 755 "$root/DEBIAN/postinst" "$root/DEBIAN/postrm"
 
 # ---- 7. 打包 ----
 deb="$out_dir/openpicasa_${version}-1_${arch}.deb"

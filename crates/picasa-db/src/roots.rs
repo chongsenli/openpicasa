@@ -144,6 +144,29 @@ impl Db {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// 全量排除项（跨所有根，M2.2 §4.1「排除项」标签用）。
+    ///
+    /// `stale` 是**库里记的**上次判定结果；M2.2 §4.4 要求的「路径已不存在」是
+    /// **当下**的判定（`path_missing`），由 core 的 [`crate::MgmtSnapshot`] 生成时
+    /// 现算——库里的值可能过期（盘拔了又插回来），不能拿它当角标依据。
+    pub fn all_exclusions(&self) -> Result<Vec<ExclusionRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, root_id, relative_path, match_key, created_at, stale
+             FROM exclusions ORDER BY root_id, relative_path",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(ExclusionRow {
+                id: r.get(0)?,
+                root_id: r.get(1)?,
+                relative_path: r.get(2)?,
+                match_key: r.get(3)?,
+                created_at: r.get(4)?,
+                stale: r.get::<_, i64>(5)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// 恢复（删除）一条排除项。
     pub fn remove_exclusion(&self, id: i64) -> Result<()> {
         self.conn

@@ -21,11 +21,14 @@ mod tasks;
 mod types;
 mod upgrade;
 
-pub use schema::{DATA_V2_ROOTS_FOLDERS, MIGRATIONS, SCHEMA_VERSION, TaskKind, TaskStatus};
+pub use schema::{
+    DATA_V2_ROOTS_FOLDERS, DATA_V5_FAILURE_KINDS, MIGRATIONS, SCHEMA_VERSION, TaskKind, TaskStatus,
+};
 pub use types::{
-    CacheStats, CachedMeta, DimsStats, ExclusionRow, FolderRow, FolderTreeRow, PhotoInput,
-    PhotoRow, RootRow, RootSeed, ScanApply, TaskRow, ThumbBuf, ThumbState, ThumbStats,
-    UPSERT_UNCHANGED, UpgradeReport, V2DataReport,
+    CacheStats, CachedMeta, DimsStats, ExclusionRow, FailureGroup, FailureKind, FolderFingerprint,
+    FolderRow, FolderTreeRow, PhotoInput, PhotoRow, RootRow, RootSeed, RootStat, ScanApply,
+    TaskOutcome, TaskRow, ThumbBuf, ThumbState, ThumbStats, UPSERT_UNCHANGED, UpgradeReport,
+    V2DataReport, classify_failure,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -174,14 +177,52 @@ impl Db {
         // WAL：读写不互斥，扫描时 UI 仍可查。
         // foreign_keys：ON DELETE CASCADE 才能生效（thumb 跟着 photo 走）。
         // synchronous=NORMAL：WAL 下崩溃最多丢最后一个事务，而索引本来可重建（02 §5.6）。
+        // M22-PERF-04：这四个数是 25 万张库下的打开参数，不是随手挑的——
+        //  · mmap_size 256MB：让大库的读走内存映射，省掉反复的 read 系统调用；
+        //    它只映射**我们自己的索引库**（在应用容器里），照片目录一个字节都不碰（R-1）。
+        //  · cache_size -65536：页缓存 64MB（负数 = 以 KiB 计）。
+        //  · wal_autocheckpoint 4000：checkpoint 攒到 4000 页再做，避免索引高峰期
+        //    每隔几秒就同步一次把 I/O 打满。
+        //  · temp_store MEMORY：临时表/排序不落盘（排序本来就在容器里，但放内存更快）。
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA foreign_keys = ON;
              PRAGMA temp_store = MEMORY;
-             PRAGMA cache_size = -16384;",
+             PRAGMA cache_size = -65536;
+             PRAGMA mmap_size = 268435456;
+             PRAGMA wal_autocheckpoint = 4000;",
         )?;
         Ok(())
+    }
+
+    /// M22-PERF-04：退出前跑一次 `PRAGMA optimize`。
+    ///
+    /// 它只做两件很便宜的事：把 `ANALYZE` 的结果写进 `sqlite_stat1`（下次启动直接读，
+    /// 不用重跑 ANALYZE），以及必要时整理索引统计。**不对数据库做重写**，
+    /// 所以放在退出路径上是安全的；失败也只当没发生，不该阻止退出。
+    pub fn optimize(&self) -> Result<()> {
+        self.conn.execute_batch("PRAGMA optimize;")?;
+        Ok(())
+    }
+
+    /// 读一个整数型 `PRAGMA`（`cache_size` / `mmap_size` / `wal_autocheckpoint` …）。
+    ///
+    /// 存在的理由只有一个：**让打开参数可被断言**。M22-PERF-04 给的是具体数值，
+    /// 光看代码里那句 `PRAGMA` 看不出它到底生效了没有（SQLite 会静默裁剪越界值，
+    /// 比如编译期没开 mmap 时 `mmap_size` 就是 0）。测试与「诊断导出」都走这个口子。
+    pub fn pragma_i64(&self, name: &str) -> Result<i64> {
+        let sql = format!("PRAGMA {name}");
+        let v: i64 = self.conn.query_row(&sql, [], |r| r.get(0))?;
+        Ok(v)
+    }
+
+    /// `ANALYZE` 结果是否已经在库里（`sqlite_stat1` 有行）。
+    pub fn has_analyzer_stats(&self) -> Result<bool> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM sqlite_stat1", [], |r| r.get(0))?;
+        Ok(n > 0)
     }
 
     /// 顺序跑迁移；已应用的跳过。**框架比表重要**（02 §5.5）。
@@ -202,11 +243,29 @@ impl Db {
                 supported: SCHEMA_VERSION,
             });
         }
-        if current >= SCHEMA_VERSION {
-            return Ok(());
+        if current < SCHEMA_VERSION {
+            upgrade::apply_pending(&self.conn, current)?;
         }
-        upgrade::apply_pending(&self.conn, current)?;
+        // ⚠️ 数据步骤的守卫必须**独立于**「要不要跑 DDL」：
+        // 走 `open_with_report` 这条路径时，DDL 已经在 `upgrade_file` 里跑完了，
+        // 到这里 `current >= SCHEMA_VERSION` 会提前返回 —— 若把补数放在那个分支里，
+        // 首次升级的库就永远补不上分类（`tests/migrate_v5.rs` 抓到过）。
+        self.apply_v5_data()?;
         Ok(())
+    }
+
+    /// v5 数据步骤：历史失败记录补 `kind`。**幂等**，跑第二次返回 0。
+    pub fn apply_v5_data(&self) -> Result<u64> {
+        if self.data_migration_done(DATA_V5_FAILURE_KINDS)? {
+            return Ok(0);
+        }
+        let n = self.backfill_failure_kinds()?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO data_migrations (name, applied_at)
+             VALUES (?1, strftime('%s','now'))",
+            params![DATA_V5_FAILURE_KINDS],
+        )?;
+        Ok(n)
     }
 
     pub fn schema_version(&self) -> Result<i64> {
@@ -985,6 +1044,306 @@ impl Db {
             thumb_count: thumb_count.max(0) as u64,
             thumb_bytes: thumb_bytes.max(0) as u64,
         })
+    }
+
+    /// 缩略图的 `(条数, 字节数)`。**读 BLOB**：冷缓存下可达 1 s，只给后台线程用。
+    pub fn thumb_cache_stats(&self) -> Result<(u64, u64)> {
+        let (n, bytes): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(data)), 0) FROM thumbs",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((n.max(0) as u64, bytes.max(0) as u64))
+    }
+
+    /// 主库文件字节（`-wal` 不计）。纯 `stat`，可以放心地每帧调。
+    pub fn db_bytes(&self) -> u64 {
+        self.path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    /// 全库照片数（`COUNT(*) FROM photos`，走 `idx_photos_*`，亚毫秒）。
+    pub fn photo_count_total(&self) -> Result<u64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?;
+        Ok(n.max(0) as u64)
+    }
+
+    /// WAL 文件大小（「存储与诊断」标签）。
+    ///
+    /// 为什么单独报：用户清理完缩略图后主库文件常常没变小（页只是标记为空闲），
+    /// 而 WAL 可能还挂着几百 MB。不把这两个数字分开摆，用户只会认为「清理没生效」。
+    pub fn wal_bytes(&self) -> u64 {
+        self.path
+            .as_ref()
+            .map(|p| {
+                let wal = p.with_extension("sqlite-wal");
+                let shm = p.with_extension("sqlite-shm");
+                std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0)
+                    + std::fs::metadata(&shm).map(|m| m.len()).unwrap_or(0)
+            })
+            .unwrap_or(0)
+    }
+
+    /// 「关注文件夹」标签的每行统计（M2.2 §4.1）。
+    ///
+    /// 照片数/缩略图占用/失败数都按**整棵子树**算：用户关注 `2020` 时，
+    /// 他关心的数字是这整个文件夹，不是它自己那一层（`docs/04` §3.2 的同一口径）。
+    pub fn root_stats(&self) -> Result<Vec<RootStat>> {
+        // ---- 照片数：对 `folders` 做**一次**分组求和，而不是「每个根一个相关子查询」
+        //
+        // 旧写法对每个根跑 `SELECT COUNT(*) FROM photos JOIN folders ...`，
+        // 在 25.9 万张的库上 **3 个根 = 1.025 s**；而照片数本来就以 `direct_count`
+        // 冗余存在 `folders` 里（4330 行），一次分组求和即可 —— 实测 **1.025 s → 0.002 s**。
+        let mut photo_count: std::collections::HashMap<i64, u64> = Default::default();
+        let mut last_scan: std::collections::HashMap<i64, Option<i64>> = Default::default();
+        {
+            let mut st = self.conn.prepare(
+                "SELECT root_id, SUM(direct_count), MAX(last_scan_at)
+                   FROM folders GROUP BY root_id",
+            )?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                let rid: i64 = r.get(0)?;
+                photo_count.insert(rid, r.get::<_, i64>(1)?.max(0) as u64);
+                last_scan.insert(rid, r.get(2)?);
+            }
+        }
+        // ---- 失败数：走 `idx_photos_thumb`，只扫失败项，不碰 BLOB
+        let mut failed: std::collections::HashMap<i64, u64> = Default::default();
+        {
+            let mut st = self.conn.prepare(
+                "SELECT f.root_id, COUNT(*) FROM photos p
+                   JOIN folders f ON f.id = p.folder_id
+                  WHERE p.thumb_state IN (2, 3) GROUP BY f.root_id",
+            )?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                failed.insert(r.get(0)?, r.get::<_, i64>(1)?.max(0) as u64);
+            }
+        }
+        let mut st = self
+            .conn
+            .prepare("SELECT id, path, state FROM roots ORDER BY path")?;
+        let rows = st.query_map([], |r| {
+            let id: i64 = r.get(0)?;
+            Ok(RootStat {
+                id,
+                path: r.get(1)?,
+                state: r.get(2)?,
+                photo_count: photo_count.get(&id).copied().unwrap_or(0),
+                failed: failed.get(&id).copied().unwrap_or(0),
+                last_indexed_at: last_scan.get(&id).copied().flatten(),
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 每个根的缩略图 BLOB 字节数。**慢查询**：只能由后台线程调用，
+    /// 禁止进每帧 / 每秒的路径（[`Db::root_stats`] 里已不再包含它）。
+    ///
+    /// ## 为什么是 `EXISTS` 而不是 `JOIN`
+    ///
+    /// 同一件事的三种写法，在 25.9 万张 / 1.26 GB 缩略图的库上实测：
+    ///
+    /// | 写法 | 耗时 |
+    /// | --- | --- |
+    /// | `thumbs JOIN photos JOIN folders … GROUP BY root_id` | **112 s** |
+    /// | `WHERE photo_id IN (SELECT …)` | 23 s／根 |
+    /// | `WHERE EXISTS (SELECT …)` | **0.28 s／根（热缓存 0.06 s）** |
+    ///
+    /// 差别在于 SQLite 对 `LENGTH(blob)` 有个优化：**列宽写在记录头里，不读溢出页就能取到**
+    /// （所以裸 `SUM(LENGTH(data)) FROM thumbs` 只要 0.02 s）。写成 `JOIN` 后优化器会把整行
+    /// 物化，1.26 GB 的 BLOB 溢出页被逐字节读出来，在 eMMC 上就是几十秒级。
+    /// `EXISTS` 是**半连接**，不物化 `thumbs` 行，优化得以保留。
+    ///
+    /// ⚠️ 即便如此，冷缓存首次仍是 **~0.9 s**（3 个根），所以仍然只能异步跑。
+    pub fn root_thumb_bytes(
+        &self,
+        root_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, u64>> {
+        let mut out = std::collections::HashMap::with_capacity(root_ids.len());
+        let mut st = self.conn.prepare(
+            "SELECT COALESCE(SUM(LENGTH(t.data)), 0) FROM thumbs t
+              WHERE EXISTS (SELECT 1 FROM photos p JOIN folders f ON f.id = p.folder_id
+                             WHERE p.id = t.photo_id AND f.root_id = ?1)",
+        )?;
+        for &rid in root_ids {
+            let n: i64 = st.query_row(params![rid], |r| r.get(0))?;
+            out.insert(rid, n.max(0) as u64);
+        }
+        Ok(out)
+    }
+
+    /// 「所有照片」的总数（§2.9：只数 **active** 根，含失败项与离线项）。
+    ///
+    /// 离线根的照片**要算**：它们仍以置灰形式显示在栅格里（`TC-DM-016`），
+    /// 树上的计数与栅格里的照片必须一致（R-M22-6）。已关闭子目录的照片不算——
+    /// 关闭时那批索引已经删掉了。
+    pub fn all_photos_active(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM photos p
+               JOIN folders f ON f.id = p.folder_id
+               JOIN roots   r ON r.id = f.root_id
+              WHERE r.state = 0",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u64)
+    }
+
+    /// 每个目录的「库内指纹」（§4.8 启动增量校验的比对基准）。
+    ///
+    /// 返回 `(folder_id, 路径, 库内照片数, 库内字节总和, 库内最大 mtime_ns)`。
+    /// 校验时拿它与 `read_dir` 的实时结果比对——**不等**就说明用户在外部动过这个目录。
+    ///
+    /// ⚠️ 用一次 `LEFT JOIN + GROUP BY` 而不是「每目录三个子查询」：
+    /// 后者在 4330 个目录上会退化成 1.3 万次索引查找，实测数量级差百倍
+    /// （同类教训见 `root_thumb_bytes` 的注释）。
+    pub fn folder_fingerprints(&self, root_id: i64) -> Result<Vec<FolderFingerprint>> {
+        let mut st = self.conn.prepare(
+            "SELECT f.id, f.path,
+                    COUNT(p.id),
+                    COALESCE(SUM(p.size_bytes), 0),
+                    COALESCE(MAX(p.mtime_ns), 0)
+               FROM folders f
+               LEFT JOIN photos p ON p.folder_id = f.id
+              WHERE f.root_id = ?1
+              GROUP BY f.id
+              ORDER BY f.path",
+        )?;
+        let rows = st.query_map(params![root_id], |r| {
+            Ok(FolderFingerprint {
+                folder_id: r.get(0)?,
+                path: r.get(1)?,
+                photo_count: r.get::<_, i64>(2)?.max(0) as u64,
+                size_sum: r.get::<_, i64>(3)?.max(0) as u64,
+                mtime_max: r.get::<_, i64>(4)?.max(0) as u64,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 该根下所有已入库目录的路径集合（用来发现「外部新建的目录」）。
+    pub fn folder_paths_of_root(&self, root_id: i64) -> Result<std::collections::HashSet<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT path FROM folders WHERE root_id = ?1")?;
+        let rows = st.query_map(params![root_id], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<std::collections::HashSet<_>, _>>()?)
+    }
+
+    /// 批量记「这几个目录刚校验过」。
+    ///
+    /// 为什么批量：4330 个目录逐个 `UPDATE` 就是 4330 个写事务，在 WAL 下
+    /// 光 fsync 排队就够拖慢启动阶段了。一条 `WHERE id IN (...)` 只有一次事务。
+    pub fn mark_verified_many(&self, folder_ids: &[i64]) -> Result<()> {
+        if folder_ids.is_empty() {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let holes = std::iter::repeat_n("?", folder_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("UPDATE folders SET last_verified_at = ?1 WHERE id IN ({holes})");
+        let mut st = self.conn.prepare(&sql)?;
+        st.execute(rusqlite::params_from_iter(
+            std::iter::once(now).chain(folder_ids.iter().copied()),
+        ))?;
+        Ok(())
+    }
+
+    /// 记下「这个目录刚校验过」（§4.8 P-16 预留列，本版只写不依赖）。
+    pub fn mark_verified(&self, folder_id: i64) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "UPDATE folders SET last_verified_at = ?1 WHERE id = ?2",
+            params![now, folder_id],
+        )?;
+        Ok(())
+    }
+
+    /// 每个目录的 `direct_count`（树与栅格组头共用，**同一事务同一份数**）。
+    pub fn folder_counts(&self) -> Result<std::collections::HashMap<i64, u32>> {
+        let mut st = self.conn.prepare("SELECT id, direct_count FROM folders")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (id, n) = row?;
+            out.insert(id, n.max(0) as u32);
+        }
+        Ok(out)
+    }
+
+    /// **同一事务**内取 `folder_counts` + `all_photos`（M2.2 §6.1 硬约束）。
+    ///
+    /// ## 为什么非得是一个方法
+    ///
+    /// R-M22-6 要求「树节点计数 / 组头 N / 所有照片 / 索引管理页」四处**逐字段相等**。
+    /// 分两次 `SELECT` 就有缝：中间若有人提交了扫描结果，两份数就来自不同的世界线，
+    /// 而 `TC-M22-IDX-011` 会在索引进行中连取 100 个 `seq` —— 必挂。
+    /// 所以这里用 `DEFERRED` 事务把两次查询夹住：SQLite 的读事务一旦拿到快照，
+    /// 直到 `COMMIT` 前都不会看到别人的写入。
+    ///
+    /// ⚠️ 只做**只读**查询，别往这个事务里塞写操作（`DEFERRED` 会升级成写锁，
+    /// 在 WAL 下与落库线程抢锁，把流水线拖住）。
+    pub fn mgmt_counts(&self) -> Result<(std::collections::HashMap<i64, u32>, u64)> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut st = tx.prepare("SELECT id, direct_count FROM folders")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut counts = std::collections::HashMap::new();
+        for row in rows {
+            let (id, n) = row?;
+            counts.insert(id, n.max(0) as u32);
+        }
+        drop(st);
+        let all: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM photos p
+               JOIN folders f ON f.id = p.folder_id
+               JOIN roots   r ON r.id = f.root_id
+              WHERE r.state = 0",
+            [],
+            |r| r.get(0),
+        )?;
+        tx.commit()?;
+        Ok((counts, all.max(0) as u64))
+    }
+
+    /// 每个目录**直接**包含的失败照片数（树上的 S-02 状态点用）。
+    ///
+    /// 只数直接包含的（与 `direct_count` 同口径）：状态点的语义是
+    /// 「这个文件夹里有失败」，不是「这棵子树里某处有失败」。
+    pub fn folders_with_failures(&self) -> Result<std::collections::HashMap<i64, u64>> {
+        let mut st = self.conn.prepare(
+            "SELECT folder_id, COUNT(*) FROM photos
+             WHERE thumb_state IN (2, 3) GROUP BY folder_id",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (id, n) = row?;
+            out.insert(id, n.max(0) as u64);
+        }
+        Ok(out)
+    }
+
+    /// 记下一次目录校验完成（P-16 预留列，`folders.last_verified_at`）。
+    pub fn set_folder_verified(&self, folder_id: i64, at: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE folders SET last_verified_at = ?2 WHERE id = ?1",
+            params![folder_id, at],
+        )?;
+        Ok(())
     }
 
     /// 回收磁盘空间：先把 WAL 落盘并截断，再 `VACUUM`。

@@ -1451,6 +1451,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2275,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "picasa-core"
-version = "0.1.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "chrono",
  "image",
@@ -2294,7 +2300,7 @@ dependencies = [
 
 [[package]]
 name = "picasa-db"
-version = "0.1.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "rusqlite",
  "serde",
@@ -2306,10 +2312,11 @@ dependencies = [
 
 [[package]]
 name = "picasa-imaging"
-version = "0.1.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "chrono",
  "image",
+ "jpeg-decoder",
  "kamadak-exif",
  "serde",
  "tempfile",
@@ -2319,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "picasa-ui"
-version = "0.1.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "chrono",
  "eframe",

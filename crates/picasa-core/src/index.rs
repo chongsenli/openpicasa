@@ -86,6 +86,21 @@ impl IndexState {
         )
     }
 
+    /// 从整数编码还原（读库时用）。未知编码返回 `None`——**不猜**：
+    /// 猜错会把「不可访问」显示成「已完成」，而这正是 R-M2-4 要防的「失败被静默」。
+    pub fn from_code(code: i64) -> Option<Self> {
+        Some(match code {
+            0 => Self::Waiting,
+            1 => Self::Scanning,
+            2 => Self::Thumbnailing,
+            3 => Self::Completed,
+            4 => Self::PartialFailed,
+            5 => Self::Paused,
+            6 => Self::Unreachable,
+            _ => return None,
+        })
+    }
+
     /// 七态的**整数编码**。落库口径：`index_tasks.status`（`picasa-db::TaskStatus`）。
     ///
     /// 两边必须同号，否则诊断页会把「暂停」显示成「已完成」这种荒谬的东西。

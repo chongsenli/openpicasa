@@ -23,6 +23,7 @@ pub mod capture;
 pub mod diagnostics;
 pub mod grid;
 pub mod icons;
+pub mod index_mgr;
 pub mod index_progress;
 pub mod macos;
 pub mod shortcuts;

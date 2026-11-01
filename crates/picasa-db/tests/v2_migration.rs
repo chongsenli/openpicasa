@@ -63,9 +63,9 @@ fn upgrade_to_v2_keeps_a_brand_new_backup() {
 
     assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
     // v2 是数据层迁移（roots/层级/尺寸状态），v3 是排序生成列，
-    // v4 是「取待补缩略图」的复合索引——对「v1 库升级」来说都该一口气跑完，
-    // 最终落在 SCHEMA_VERSION。
-    assert_eq!(SCHEMA_VERSION, 4, "v4 加待补缩略图索引后版本必须是 4");
+    // v4 是「取待补缩略图」的复合索引，v5 是 M2.2 索引管理（失败分类/任务历史）——
+    // 对「v1 库升级」来说都该一口气跑完，最终落在 SCHEMA_VERSION。
+    assert_eq!(SCHEMA_VERSION, 5, "v5 加索引管理列后版本必须是 5");
 
     let report = db.last_upgrade_note().expect("升级现场应被记录");
     assert_eq!(report.from, 1);

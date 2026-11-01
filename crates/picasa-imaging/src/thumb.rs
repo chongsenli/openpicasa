@@ -93,8 +93,17 @@ pub fn thumb_from_file(path: &Path, max_edge: u32) -> Result<(Vec<u8>, u32, u32)
 }
 
 /// 同 [`thumb_from_file`]，但字节已在内存里。
+///
+/// ## M2.2 PERF-13：JPEG 先走 DCT 缩放解码
+///
+/// 流程变成「**缩放解码** → 摆正 → 精确 resize → 合白底 → 编码」。
+/// 缩放解码失败（非 JPEG / CMYK / 16bit 灰度 / 坏文件）时**静默回落**到 M2.1 的
+/// 「全解码 → 摆正」——宁可慢，不可缺图。`SCALED_STATS` 记录两条路径各走了多少次。
 pub fn thumb_from_bytes(bytes: &[u8], max_edge: u32) -> Result<(Vec<u8>, u32, u32)> {
-    let img = decode::decode_oriented_bytes(bytes)?;
+    let img = match crate::scaled::decode_jpeg_scaled(bytes, max_edge)? {
+        Some(fast) => fast,
+        None => decode::decode_oriented_bytes(bytes)?,
+    };
     let small = resize_to_fit(&img, max_edge);
     let (w, h) = (small.width(), small.height());
     let out = encode_jpeg(&small, 82)?;
@@ -168,6 +177,48 @@ mod tests {
         // 能被解回来，且尺寸一致
         let back = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert_eq!((back.width(), back.height()), (64, 48));
+    }
+
+    /// PERF-13 的**接线**测试：主路径真的走了缩放解码，而不是只在 `scaled` 模块里自嗨。
+    ///
+    /// 这条用例存在的理由：`decode_jpeg_scaled` 全绿但没人调用，是这类优化最常见的
+    /// 落地失败方式——「更快的代码写好了，主路径还在走老路」。
+    #[test]
+    fn thumb_pipeline_takes_the_scaled_decode_path() {
+        use crate::scaled::SCALED_STATS;
+        let mut src = image::RgbImage::new(1600, 1200);
+        for (x, y, px) in src.enumerate_pixels_mut() {
+            px.0 = [((x + y) % 256) as u8, (x % 256) as u8, (y % 256) as u8];
+        }
+        let mut bytes = Vec::new();
+        let mut enc = JpegEncoder::new_with_quality(&mut bytes, 90);
+        enc.encode(
+            src.as_raw(),
+            src.width(),
+            src.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap();
+
+        let before = SCALED_STATS.scaled_count();
+        let (out, w, h) = thumb_from_bytes(&bytes, 512).unwrap();
+        assert!(
+            SCALED_STATS.scaled_count() > before,
+            "JPEG 主路径必须走 DCT 缩放解码"
+        );
+        assert_eq!(&out[..2], &[0xFF, 0xD8], "产出仍是合法 JPEG");
+        assert!(w <= 512 && h <= 512, "长边贴合目标：{w}x{h}");
+
+        // 非 JPEG 必须回落，且**仍然出图**（不能因为快路径不可用就缺缩略图）
+        let fb = SCALED_STATS.fallback_count();
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(64, 48, image::Rgb([1, 2, 3])))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let (out2, w2, h2) = thumb_from_bytes(&png, 512).unwrap();
+        assert!(SCALED_STATS.fallback_count() > fb, "非 JPEG 记一次回落");
+        assert_eq!(&out2[..2], &[0xFF, 0xD8]);
+        assert_eq!((w2, h2), (64, 48), "小图不放大");
     }
 
     #[test]

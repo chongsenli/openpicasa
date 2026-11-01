@@ -9,6 +9,7 @@ description = "OpenPicasa M1 · 解码 / EXIF Orientation / 缩略图（无任�
 # 依赖方向：不依赖 picasa-db（缓存与索引的协调放在 picasa-core，02 §6.2）
 [dependencies]
 image = { workspace = true }
+jpeg-decoder = { workspace = true }
 kamadak-exif = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }

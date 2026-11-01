@@ -70,6 +70,16 @@ pub struct Theme {
     pub overlay_bg: Color32,
     /// 占位格底色（灰底 +「待生成」，`04` §3.2.1）
     pub placeholder_bg: Color32,
+
+    // ---- 树 / 组头（量自 09-library-zh-full.png，见 ui-baseline.toml）----
+    /// 树行文字与计数（Picasa 用 #4D4D4D，计数与标签同色）
+    pub tree_text: Color32,
+    /// 组头渐变顶 / 底与 1px 边框
+    pub header_top: Color32,
+    pub header_bottom: Color32,
+    pub header_border: Color32,
+    /// 组头折叠钮的 Picasa 绿
+    pub disclosure_green: Color32,
 }
 
 impl Theme {
@@ -79,20 +89,34 @@ impl Theme {
         Self {
             // TODO(U-43-①): 待取色。目测 ≈ #F0F0F0
             chrome_bg: Color32::from_rgb(0xF0, 0xF0, 0xF0),
-            // TODO(U-43-②): 待取色。目测 ≈ #EBEBEB
-            grid_bg: Color32::from_rgb(0xEB, 0xEB, 0xEB),
+            // ② 栅格背景：量自 09-library-zh-full.png（242,242,242）
+            grid_bg: Color32::from_rgb(0xF2, 0xF2, 0xF2),
             // TODO(U-43-④): 待取色。目测 ≈ #D6D6D6
             header_bg: Color32::from_rgb(0xD8, 0xD8, 0xD8),
-            sidebar_bg: Color32::from_rgb(0xF5, 0xF5, 0xF5),
+            // 侧栏底：量自 09-library-zh-full.png（243,243,243）
+            sidebar_bg: Color32::from_rgb(0xF3, 0xF3, 0xF3),
 
             separator: Color32::from_rgb(0xC8, 0xC8, 0xC8),
             cell_border: Color32::from_rgb(0xCF, 0xCF, 0xCF),
 
             // TODO(U-43-③): 待取色。目测 ≈ #4A90D9
             selected: Color32::from_rgb(0x4A, 0x90, 0xD9),
-            sidebar_selected: Color32::from_rgb(0x38, 0x75, 0xD7),
+            // 树选中行：量自 09-library-zh-full.png（131,167,189）——钢青蓝，**纯色无渐变**，
+            // 上面配白字。之前目测的 #3875D7 偏亮偏饱和，量出来才知道是灰蓝。
+            sidebar_selected: Color32::from_rgb(0x83, 0xA7, 0xBD),
             sidebar_selected_inactive: Color32::from_rgb(0xD6, 0xE4, 0xF7),
             cell_hover: Color32::from_rgb(0xDC, 0xE6, 0xF2),
+
+            // 树文字/计数：量自参考图（最深像素 77,77,77）——Picasa 的计数「(1)」
+            // **与标签同色**，不是更浅的灰；只是字号更小。
+            tree_text: Color32::from_rgb(0x4D, 0x4D, 0x4D),
+            // 组头（「人物 (1)」那种带边框的白盒）：
+            // 底是 (241,243,246)→(220,221,225) 的竖直渐变，上下各 1px (155,155,155) 边框；
+            // 左端折叠钮是 Picasa 绿 (10,144,0)。
+            header_top: Color32::from_rgb(0xF1, 0xF3, 0xF6),
+            header_bottom: Color32::from_rgb(0xDC, 0xDD, 0xE1),
+            header_border: Color32::from_rgb(0x9B, 0x9B, 0x9B),
+            disclosure_green: Color32::from_rgb(0x0A, 0x90, 0x00),
 
             text_primary: Color32::from_rgb(0x20, 0x20, 0x20),
             text_secondary: Color32::from_rgb(0x66, 0x66, 0x66),
@@ -118,8 +142,23 @@ impl Theme {
 pub struct Metrics;
 
 impl Metrics {
-    /// U-06：工具栏高度。目测 64~72，取 68（单行大图标 + 下方文案）。
-    pub const TOOLBAR_H: f32 = 68.0;
+    /// 顶部两段式（量自 09-library-zh-full.png x=650 逐行扫描）：
+    /// 标题栏(y0..19)是 OS 的，我们不画；**菜单栏** 21px + 1px 分隔 + **工具行** 38px。
+    /// 总高 = 21 + 1 + 38 = 60（旧的 68「图标上文下」版式已废弃，PM 2026-11-01 拍板照抄参考图）。
+    pub const MENUBAR_H: f32 = 21.0;
+    pub const TOOLROW_H: f32 = 38.0;
+    pub const TOOLBAR_H: f32 = 60.0;
+    /// 菜单栏：白→淡蓝渐变的三个采样点（y22 #FEFEFF / y30 #D4DBEE / y39 #E1E6F6）
+    pub const MENUBAR_TOP: Color32 = Color32::from_rgb(0xFE, 0xFE, 0xFF);
+    pub const MENUBAR_MID: Color32 = Color32::from_rgb(0xD4, 0xDB, 0xEE);
+    pub const MENUBAR_BOT: Color32 = Color32::from_rgb(0xE1, 0xE6, 0xF6);
+    /// 菜单栏底边 1px（y40）与工具行底边 1px（y80）
+    pub const MENUBAR_BORDER: Color32 = Color32::from_rgb(0xB6, 0xBC, 0xCC);
+    pub const TOOLROW_BORDER: Color32 = Color32::from_rgb(0xBA, 0xBA, 0xBA);
+    /// 工具行底色（y41..79）
+    pub const TOOLROW_BG: Color32 = Color32::from_rgb(0xE8, 0xE8, 0xE8);
+    /// 搜索框边框（x=1250 处 #7F9DB9 蓝灰边 + 白芯，XP 经典风格）
+    pub const SEARCH_BORDER: Color32 = Color32::from_rgb(0x7F, 0x9D, 0xB9);
     /// 工具栏里一个按钮的宽度（图标在上、文案在下）
     pub const TOOL_BTN_W: f32 = 58.0;
     /// 工具栏按钮的图标边长
@@ -134,11 +173,13 @@ impl Metrics {
     pub const SIDEBAR_MIN: f32 = 160.0;
     pub const SIDEBAR_MAX: f32 = 420.0;
 
-    /// U-18：左栏行高。目测 18~22，取 20（比 macOS 侧栏更密）。
-    pub const ROW_H: f32 = 20.0;
+    /// 左栏行高：量自 09-library-zh-full.png —— 相邻文件夹图标行顶距恒为 **22px**。
+    pub const ROW_H: f32 = 22.0;
     /// U-14：每级缩进。目测 12~16，取 14。
+    /// ⚠️ 参考图里所有可见文件夹都在同一层级，**量不出**每级缩进；沿用 14，
+    /// 已登记进 `ui-baseline.toml` 的「本图不可测」清单。
     pub const INDENT: f32 = 14.0;
-    /// U-13：分组标题行高
+    /// 组头行高：量自参考图 —— 「人物 (1)」白盒上下边框外沿 82..102，高 21px，取 22 对齐行高。
     pub const SECTION_H: f32 = 22.0;
 
     /// U-36/U-37：左栏底部照片托盘（收起高度 / 展开高度）
@@ -200,6 +241,13 @@ pub fn text_styles() -> Vec<(TextStyle, FontId)> {
 pub fn apply(ctx: &egui::Context) {
     let theme = Theme::picasa();
 
+    // 🔒 锁定浅色（2026-11-01 用户报告「索引管理里按钮文字与按钮颜色接近，无法识别」）：
+    // egui 默认**跟随系统**主题偏好，GNOME 深色模式下 egui 走 dark 调色板——
+    // 控件底色变成深灰，而我们下面的 window_fill / 文字色仍按 Picasa 浅色系硬编码，
+    // 结果就是深灰按钮上叠深灰文字。Picasa 是浅色应用（查看器是暗的，但那是
+    // `viewer_bg` 手绘的，不走 egui 控件），所以这里直接钉死 Light。
+    ctx.set_theme(egui::Theme::Light);
+
     ctx.all_styles_mut(|style| {
         for (style_kind, font_id) in text_styles() {
             style.text_styles.insert(style_kind, font_id);
@@ -216,6 +264,22 @@ pub fn apply(ctx: &egui::Context) {
         style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(2);
         style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(2);
         style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(2);
+
+        // 控件配色**显式**给出，不依赖 egui 默认调色板（同上：防止主题跟随把
+        // 底色/前景色拆到两个世界里）。量值来源见 `docs/ui-baseline/ui-baseline.toml`。
+        for w in [
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+        ] {
+            w.fg_stroke = egui::Stroke::new(1.0, theme.text_primary);
+        }
+        // 非交互文字（分组标签等）用次级灰
+        style.visuals.widgets.noninteractive.fg_stroke =
+            egui::Stroke::new(1.0, theme.text_secondary);
+        // 按钮：近白底 + 灰边，压在 #F0F0F0 的窗口底上可辨（参考图「分享」按钮同款）
+        style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(0xFB, 0xFB, 0xFB);
+        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme.separator);
 
         style.visuals.window_fill = theme.chrome_bg;
         style.visuals.panel_fill = theme.chrome_bg;
