@@ -8,8 +8,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Align2, Color32, Pos2, Rect, vec2};
+use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, vec2};
 use picasa_core::{
     AppPaths, CoreEvent, DimsService, IndexBoard, IndexService, Library, ThumbService, Tier,
     watcher,
@@ -54,10 +55,25 @@ pub struct OpenPicasaApp {
     search_buf: String,
     sort_menu_open: bool,
     sort_menu_pos: Pos2,
+    /// 排序菜单打开的帧号，用途同 `folder_ctx_frame`（点按钮也是 click，同一帧会被误关）
+    sort_menu_frame: u64,
     tray_expanded: bool,
     favorites_collapsed: bool,
     folders_collapsed: bool,
     folder_ctx: Option<(String, Pos2)>,
+    /// 右键菜单是在**哪一帧**打开的。
+    /// 必须记这个：右键释放的那一帧里，`secondary_clicked()` 与 `pointer.any_click()`
+    /// **同时**为真（egui 的 click 就是在 release 时判定）。菜单在 `draw_library`
+    /// 里被设好、在 `draw_overlays` 里画出来，紧接着同一个 `draw_overlays` 的
+    /// 「点别处就关」逻辑就把它清掉了——于是菜单只活了一帧，看起来就是「弹不出来」。
+    folder_ctx_frame: u64,
+    /// 「底层数据变了，界面该重载」的脏标记。
+    ///
+    /// 不直接重载的原因：扫描落库是**每个目录一条事件**。一个装照片的移动硬盘
+    /// 动辄几千个相册目录，各触发一次「重建树 + 重新查首屏」就是几百秒的 UI 卡死。
+    reload_dirty: bool,
+    /// 上次真正完成重载的时刻，配合 `reload_dirty` 做节流
+    last_reload: Instant,
     confirm_trash: Option<usize>,
     /// 诊断页（F 加固）是否打开
     diagnostics_open: bool,
@@ -67,6 +83,25 @@ pub struct OpenPicasaApp {
     diag_dirty: bool,
     /// 「全量重建」是否已进入二次确认
     confirm_rebuild: bool,
+    /// 「删除索引」是否已进入二次确认
+    confirm_delete_index: bool,
+    /// 「重建失败索引」是否已进入二次确认（`Some(n)` = 待约定的失败项数量）
+    confirm_rebuild_failed: Option<u64>,
+
+    // ---- 工具栏「索引管理」----
+    /// 二级菜单是否打开
+    index_menu_open: bool,
+    /// 二级菜单的落点（按钮左下角）
+    index_menu_pos: Pos2,
+    /// 菜单打开的帧号，用途同 `sort_menu_frame`
+    index_menu_frame: u64,
+    /// 缩略图失败项数量（角标 + 菜单文案）。
+    ///
+    /// **必须缓存**：取它的 `library_thumb_stats()` 是全表扫描，25.9 万张时要几十毫秒，
+    /// 每帧算一次等于把界面按在地上。只在「启动 / 打开菜单 / 一个批次结束」时重取。
+    failed_thumbs: u64,
+    /// 下一次重载**不等节流**立刻做（扫描结束/删索引这类终态必须马上落屏）
+    reload_now: bool,
 
     /// 需要恢复的滚动位置（只在必要时设置一次，否则会锁死滚动）
     restore_scroll: Option<f32>,
@@ -136,15 +171,26 @@ impl OpenPicasaApp {
             search_buf,
             sort_menu_open: false,
             sort_menu_pos: Pos2::ZERO,
+            sort_menu_frame: u64::MAX,
             tray_expanded: false,
             favorites_collapsed: false,
             folders_collapsed: false,
             folder_ctx: None,
+            folder_ctx_frame: u64::MAX,
+            reload_dirty: false,
+            last_reload: Instant::now(),
             confirm_trash: None,
             diagnostics_open: false,
             diag_data: crate::diagnostics::DiagData::default(),
             diag_dirty: false,
             confirm_rebuild: false,
+            confirm_delete_index: false,
+            confirm_rebuild_failed: None,
+            index_menu_open: false,
+            index_menu_pos: Pos2::ZERO,
+            index_menu_frame: u64::MAX,
+            failed_thumbs: 0,
+            reload_now: false,
             restore_scroll,
             anchor_id: None,
             pending_anchor: None,
@@ -158,8 +204,20 @@ impl OpenPicasaApp {
             frames: 0,
         };
         app.refresh_tray_rows();
+        // 角标要在**第一帧**就有数：用户打开程序的第一眼就该知道"有 970 张坏图"，
+        // 而不是等他点开菜单才去算。
+        app.refresh_failed_thumbs();
         app.start_index();
         app
+    }
+
+    /// 重取「缩略图失败项」数量（全表扫描，**只在必要时调**）。
+    fn refresh_failed_thumbs(&mut self) {
+        if let Ok(db) = self.lib.db()
+            && let Ok(s) = db.library_thumb_stats()
+        {
+            self.failed_thumbs = s.failed;
+        }
     }
 
     /// 启动时的索引：把每个关注文件夹作为一个任务入队（**同一批次**）。
@@ -228,6 +286,17 @@ impl OpenPicasaApp {
                         }
                     }
                 }
+                // 终态事件（扫描跑完 / 索引被删）必须**立刻落屏**，不等 150 ms 节流：
+                // 这是用户判断"到底索引成没成"的那一眼，晚一帧他就去点别的了。
+                ev @ (CoreEvent::ScanFinished { .. } | CoreEvent::IndexCleared { .. }) => {
+                    if self.lib.apply_event(ev) {
+                        need_reload = true;
+                    }
+                    self.reload_now = true;
+                    self.tray_rows_dirty = true;
+                    // 一个批次收尾 → 失败项数量变了（重建完可能从 970 掉到 0），角标要跟上
+                    self.refresh_failed_thumbs();
+                }
                 other => {
                     if self.lib.apply_event(other) {
                         need_reload = true;
@@ -237,18 +306,56 @@ impl OpenPicasaApp {
             }
         }
         if need_reload {
-            // 视图变了（扫描流式入库 / 外部变更）：**锚定用户当前看的那张**，不跳回顶部。
-            //
-            // 只记 id 不记像素：扫描会把新照片插到列表任意位置，旧的像素 offset 指向的
-            // 已经不是原来那张了。等重载完、布局重建好，再由 `grid::show` 把这个 id
-            // 换算成新的 y，滚回它——这才是「同一张照片还在原地」。
-            self.pending_anchor = self.anchor_id;
-            if let Err(e) = self.lib.reload_photos() {
-                tracing::warn!(error = %e, "刷新照片列表失败");
-            }
+            // 只置脏。真正的「重建树 + 重查首屏」交给 `flush_reload` 节流执行——
+            // 扫描期这里每帧都可能被置脏，而且事件本身是**每个目录一条**。
+            self.reload_dirty = true;
         }
         if self.tray_rows_dirty {
             self.refresh_tray_rows();
+        }
+    }
+
+    /// 把「底层数据变了」按节流真正落成一次界面重载。
+    ///
+    /// ## 为什么必须节流
+    ///
+    /// `FolderScanned` 是**每个目录一条**事件。装照片的移动硬盘通常是一堆相册目录，
+    /// 几千个很常见。原来每个事件都同步做「重建左栏树 + 重查首屏」，
+    /// `tree_bench` 实测 8000 目录时单次重建 46.8 ms —— 累计 405 秒全部花在 UI 线程，
+    /// 表现就是用户说的「主界面弹不出来」：窗口在那儿，但一帧都画不完。
+    ///
+    /// 现在聚合成「最多每 150 ms 刷一次」。150 ms 是权衡：再长用户会觉得数字和缩略图
+    /// 跟不上扫描进度；再短就退回到「每几帧重建一次树」。
+    fn flush_reload(&mut self, ctx: &egui::Context) {
+        const RELOAD_GAP: Duration = Duration::from_millis(150);
+        if !self.reload_dirty {
+            return;
+        }
+        let elapsed = self.last_reload.elapsed();
+        if !self.reload_now && elapsed < RELOAD_GAP {
+            // ⚠️ 必须主动约一次唤醒。egui 是事件驱动的：鼠标不动就没有帧，
+            // 不 request_repaint 的话这次「脏」会一直挂到用户下次碰鼠标才生效，
+            // 表现为「扫描进度在动，但照片列表和左栏数字一直是旧的」。
+            ctx.request_repaint_after(RELOAD_GAP - elapsed);
+            return;
+        }
+        self.reload_dirty = false;
+        self.reload_now = false;
+        self.last_reload = Instant::now();
+
+        // 树只在真的脏了时重建（一次重建是 O(N log N)，不是每 150 ms 都值得付）
+        if self.lib.take_tree_dirty()
+            && let Err(e) = self.lib.reload_tree()
+        {
+            tracing::warn!(error = %e, "重建目录树失败");
+        }
+
+        // 重载会换掉整个照片列表：**锚定用户当前看的那张**，不跳回顶部。
+        // 只记 id 不记像素——扫描会把新照片插到列表任意位置，旧的像素 offset
+        // 指向的已经不是原来那张了。
+        self.pending_anchor = self.anchor_id;
+        if let Err(e) = self.lib.reload_photos() {
+            tracing::warn!(error = %e, "刷新照片列表失败");
         }
     }
 
@@ -397,8 +504,11 @@ impl OpenPicasaApp {
                     !self.lib.selection.is_empty(),
                     &mut self.search_buf,
                     self.sort_menu_open,
+                    self.index_menu_open,
+                    self.failed_thumbs,
                 );
                 let sort_btn_rect = out.sort_button.as_ref().map(|r| r.rect);
+                let index_btn_rect = out.index_button.as_ref().map(|r| r.rect);
                 if let Some(new_search) = out.search_changed {
                     if let Err(e) = self.lib.set_search(new_search) {
                         tracing::warn!(error = %e, "搜索失败");
@@ -408,12 +518,19 @@ impl OpenPicasaApp {
                 if let Some(rect) = sort_btn_rect {
                     self.sort_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
                 }
+                if let Some(rect) = index_btn_rect {
+                    self.index_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
+                }
                 for action in out.actions {
                     match action {
                         ToolbarAction::AddFolder => self.add_folder(),
                         ToolbarAction::RevealCurrent => self.reveal_selected(),
                         ToolbarAction::ToggleSortMenu => {
                             self.sort_menu_open = !self.sort_menu_open;
+                            self.index_menu_open = false; // 两个二级菜单不同时开
+                            if self.sort_menu_open {
+                                self.sort_menu_frame = ctx.cumulative_frame_nr();
+                            }
                         }
                         ToolbarAction::PickSort(key) => {
                             self.pick_sort(key);
@@ -435,6 +552,15 @@ impl OpenPicasaApp {
                         ToolbarAction::ToggleFullscreen => {
                             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
+                        }
+                        ToolbarAction::ToggleIndexMenu => {
+                            self.index_menu_open = !self.index_menu_open;
+                            self.sort_menu_open = false; // 两个二级菜单不同时开
+                            if self.index_menu_open {
+                                self.index_menu_frame = ctx.cumulative_frame_nr();
+                                // 打开时重取一次：角标可能是几小时前算的
+                                self.refresh_failed_thumbs();
+                            }
                         }
                     }
                 }
@@ -544,7 +670,7 @@ impl OpenPicasaApp {
             });
     }
 
-    fn apply_sidebar_action(&mut self, action: SidebarAction, _ctx: &egui::Context) {
+    fn apply_sidebar_action(&mut self, action: SidebarAction, ctx: &egui::Context) {
         match action {
             SidebarAction::ShowView(view) => {
                 if let Err(e) = self.lib.set_view(view) {
@@ -580,6 +706,8 @@ impl OpenPicasaApp {
             }
             SidebarAction::FolderContext(path, pos) => {
                 self.folder_ctx = Some((path, pos));
+                // 记下打开帧，供 `draw_overlays` 的「点别处就关」豁免（原因见字段注释）
+                self.folder_ctx_frame = ctx.cumulative_frame_nr();
             }
         }
     }
@@ -751,8 +879,10 @@ impl OpenPicasaApp {
                 }
                 self.sort_menu_open = false;
             }
-            // 点空白处关掉
-            if ctx.input(|i| i.pointer.any_click()) {
+            // 点空白处关掉（本帧刚由按钮打开则豁免，理由同文件夹右键菜单）
+            if self.sort_menu_frame != ctx.cumulative_frame_nr()
+                && ctx.input(|i| i.pointer.any_click())
+            {
                 let pos = ctx.input(|i| i.pointer.interact_pos());
                 if let Some(p) = pos
                     && !Rect::from_min_size(self.sort_menu_pos, vec2(180.0, 200.0)).contains(p)
@@ -762,10 +892,41 @@ impl OpenPicasaApp {
             }
         }
 
+        // 索引管理二级菜单
+        //
+        // 关闭规则与排序菜单同款（三条，顺序不能改）：点了菜单项 → 关；
+        // 本帧刚由按钮打开 → 豁免（按钮的 click 与「点别处」同帧为真）；
+        // 点击落在实测矩形外 → 关。矩形用 `Area` 返回值，不猜尺寸。
+        if self.index_menu_open && self.viewer.is_none() {
+            let (action, menu_rect) =
+                toolbar::index_menu(ui, self.index_menu_pos, self.failed_thumbs);
+            if let Some(action) = action {
+                self.index_menu_open = false;
+                match action {
+                    toolbar::IndexMenuAction::RebuildFailed => {
+                        self.confirm_rebuild_failed = Some(self.failed_thumbs);
+                    }
+                    toolbar::IndexMenuAction::OpenProgress => self.progress.open_panel(),
+                }
+            }
+            if self.index_menu_frame != ctx.cumulative_frame_nr()
+                && ctx.input(|i| i.pointer.any_click())
+            {
+                let pos = ctx.input(|i| i.pointer.interact_pos());
+                if let Some(p) = pos
+                    && !menu_rect.contains(p)
+                {
+                    self.index_menu_open = false;
+                }
+            }
+        }
+
         // 文件夹右键菜单
         if let Some((path, pos)) = self.folder_ctx.clone() {
             let mut close = false;
-            egui::Area::new(ui.scope_id().with("folder-ctx"))
+            // 固定 id：`ui.scope_id()` 是 ui 层的哈希，菜单不该随调用点上下的
+            // 嵌套层数变化而换身份（换身份会让 Area 每帧重建）
+            let area = egui::Area::new(egui::Id::unique("picasa.folder-ctx"))
                 .fixed_pos(pos)
                 .order(egui::Order::Foreground)
                 .show(&ctx, |ui| {
@@ -873,8 +1034,21 @@ impl OpenPicasaApp {
                             }
                         });
                 });
-            if close || ctx.input(|i| i.pointer.any_click()) {
-                self.folder_ctx = None;
+            // 关闭规则（三条），顺序与时序都不能改：
+            //   1. 点了菜单项 → 关
+            //   2. 本帧刚打开 → **豁免**。右键释放的那一帧 `secondary_clicked()` 与
+            //      `pointer.any_click()` 同时为真，不豁免就会「刚画出来就被自己关掉」
+            //   3. 点击落在菜单矩形外 → 关。用 Area 实测矩形，不猜尺寸
+            let opened_this_frame = self.folder_ctx_frame == ctx.cumulative_frame_nr();
+            if !opened_this_frame {
+                let menu_rect = area.response.rect;
+                let clicked_outside = ctx.input(|i| i.pointer.any_click())
+                    && ctx
+                        .input(|i| i.pointer.interact_pos())
+                        .is_some_and(|p| !menu_rect.contains(p));
+                if close || clicked_outside {
+                    self.folder_ctx = None;
+                }
             }
         }
 
@@ -997,16 +1171,199 @@ impl OpenPicasaApp {
         // ---- M2 索引进度：右下角弹框 + 进度面板（都是浮层，不参与布局、不抢焦点）----
         let mut action = self.progress.show_toast(&ctx, &self.theme);
         if action.is_none() {
-            action = self.progress.show_panel(&ctx, &self.theme);
+            action = self
+                .progress
+                .show_panel(&ctx, &self.theme, self.index.is_paused());
         }
         match action {
             Some(ProgressAction::AddFolder) => self.add_folder(),
             Some(ProgressAction::Retry(path)) => self.retry_folder(&path),
             Some(ProgressAction::RetryAll) => self.retry_all(),
+            Some(ProgressAction::PauseIndex) => {
+                self.index.pause();
+                self.lib.toast = Some(("索引已暂停（已建索引保留，可继续）".into(), 3.0));
+            }
+            Some(ProgressAction::ResumeIndex) => {
+                self.index.resume();
+                self.lib.toast = Some(("索引已继续".into(), 2.0));
+            }
+            Some(ProgressAction::DeleteIndex) => self.confirm_delete_index = true,
             Some(ProgressAction::ClosePanel) | None => {}
         }
 
+        if self.confirm_delete_index {
+            self.draw_delete_index_confirm(&ctx);
+        }
+
+        if let Some(n) = self.confirm_rebuild_failed {
+            self.draw_rebuild_failed_confirm(&ctx, n);
+        }
+
         let _ = theme;
+    }
+
+    /// 「删除索引」的二次确认。
+    ///
+    /// 为什么必须二次确认：这是**唯一**会让用户觉得"照片被删了"的操作。
+    /// 事实上只删索引（磁盘上的照片一张不动），但界面上看起来就是图库空了，
+    /// 所以文案必须无条件说清"不动磁盘文件"，按钮必须默认不执行。
+    fn draw_delete_index_confirm(&mut self, ctx: &egui::Context) {
+        let mut go = false;
+        let mut cancel = false;
+        egui::Window::new("删除索引")
+            .id(egui::Id::unique("delete-index-confirm"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_width(360.0);
+                ui.label(
+                    RichText::new("将删除已建立的照片索引与缩略图。")
+                        .size(12.5)
+                        .color(self.theme.text_primary),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "磁盘上的照片文件不会被删除；关注文件夹与「关闭此文件夹」的规则会保留。",
+                    )
+                    .size(11.0)
+                    .color(self.theme.text_secondary),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("删除索引").clicked() {
+                        go = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if go {
+            self.confirm_delete_index = false;
+            if self.index.delete_index() {
+                self.lib.toast = Some(("开始删除索引…".into(), 3.0));
+            } else {
+                self.lib.toast = Some(("已在删除中，请稍候".into(), 3.0));
+            }
+        }
+        if cancel {
+            self.confirm_delete_index = false;
+        }
+    }
+
+    /// 「重建失败索引」的二次确认。
+    ///
+    /// 为什么值得一次确认：它不是零成本的。970 张按实测 111 ms/张、2 线程算约 1 分钟，
+    /// 但用户看不到这个数字，只会看到"CPU 一直在跑"。先把数量和耗时说清楚，
+    /// 免得他以为程序又卡死了（这轮修的就是"卡死"的第一印象）。
+    fn draw_rebuild_failed_confirm(&mut self, ctx: &egui::Context, n: u64) {
+        let mut go = false;
+        let mut cancel = false;
+        // 单张 111 ms / 2 线程 ≈ 每 18 张 1 秒；向上取整到分钟
+        let secs = (n as f64 * 0.111 / 2.0).max(1.0);
+        let eta = if secs < 90.0 {
+            format!("约 {:.0} 秒", secs)
+        } else {
+            format!("约 {:.0} 分钟", (secs / 60.0).ceil())
+        };
+        egui::Window::new("重建失败索引")
+            .id(egui::Id::unique("rebuild-failed-confirm"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.label(
+                    RichText::new(format!("将重新解码 {n} 张缩略图失败的照片。"))
+                        .size(12.5)
+                        .color(self.theme.text_primary),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "只需 {eta}。已成功的缩略图不受影响，其他「待生成」的照片也不会被顺带处理。\
+                         期间可以用「暂停索引」随时中止。"
+                    ))
+                    .size(11.0)
+                    .color(self.theme.text_secondary),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("开始重建").clicked() {
+                        go = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if go {
+            self.confirm_rebuild_failed = None;
+            self.rebuild_failed_index();
+        }
+        if cancel {
+            self.confirm_rebuild_failed = None;
+        }
+    }
+
+    /// 「重建失败索引」：只重置并重做**失败的那些**，一张历史欠账都不碰。
+    ///
+    /// 关键顺序：**先按关注根分组，再只重置要入队的那些 id**。
+    /// 反过来（先全库重置再分组）会让"没匹配到任何关注根"的失败项变成「待生成」，
+    /// 而启动扫描只补新增、永远不管待生成——那批照片就此变成永久灰格子，
+    /// 比留着失败状态还糟（失败至少能在明细里查到）。
+    fn rebuild_failed_index(&mut self) {
+        let rows = match self.lib.db() {
+            Ok(db) => db.failed_photos(None).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        if rows.is_empty() {
+            self.lib.toast = Some(("没有失败项，无需重建".into(), 3.0));
+            self.refresh_failed_thumbs();
+            return;
+        }
+
+        let roots = self.lib.root_paths();
+        let mut total_reset = 0u64;
+        let mut queued = 0u64;
+        for root in roots {
+            let prefix = root.to_string_lossy().to_string();
+            let ids: Vec<i64> = rows
+                .iter()
+                .filter(|r| {
+                    r.folder_path == prefix || r.folder_path.starts_with(&format!("{prefix}/"))
+                })
+                .map(|r| r.id)
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let reset = match self.lib.db() {
+                Ok(db) => db.reset_failed_thumbs_by_ids(&ids).unwrap_or(0),
+                Err(_) => 0,
+            };
+            if reset == 0 {
+                continue;
+            }
+            total_reset += reset;
+            self.index.enqueue_rebuild_failed(ids, &root);
+            queued += 1;
+        }
+
+        if total_reset == 0 {
+            self.lib.toast = Some(("失败项都不在关注文件夹内，无法重建".into(), 4.0));
+        } else {
+            self.lib.toast = Some((
+                format!("开始重建 {total_reset} 张失败缩略图（{queued} 个任务）"),
+                4.0,
+            ));
+            // 角标立即反映新状态：这批已经不是失败了
+            self.failed_thumbs = self.failed_thumbs.saturating_sub(total_reset);
+            self.progress.open_panel();
+        }
+        tracing::info!(reset = total_reset, tasks = queued, "重建失败索引");
     }
 
     /// 重试一个关注文件夹的失败项：库里只把失败项重置为待生成，然后入队新批次。
@@ -1121,6 +1478,7 @@ impl eframe::App for OpenPicasaApp {
         self.theme = Theme::picasa();
 
         self.pump_events(&ctx);
+        self.flush_reload(&ctx);
         self.handle_keys(&ctx);
         // 索引进度：按 250 ms 节流取快照（不在 UI 线程做任何索引工作）
         self.progress.tick(&ctx, &self.board);

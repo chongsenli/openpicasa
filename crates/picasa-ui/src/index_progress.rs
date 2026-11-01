@@ -19,8 +19,8 @@
 use std::collections::HashSet;
 
 use eframe::egui::{
-    self, Align, Align2, Color32, Context, FontId, Layout, Rect, RichText, Sense, Stroke, StrokeKind,
-    Ui, pos2, vec2,
+    self, Align, Align2, Color32, Context, FontId, Layout, Rect, RichText, Sense, Stroke,
+    StrokeKind, Ui, pos2, vec2,
 };
 use picasa_core::{IndexBoard, IndexSnapshot, IndexState, index::now_secs};
 
@@ -48,6 +48,12 @@ pub enum ProgressAction {
     Retry(String),
     /// 全部重试（有失败项时才可用）
     RetryAll,
+    /// 暂停索引（在目录边界停下，已建的索引全部保留）
+    PauseIndex,
+    /// 继续索引（从暂停处接着跑，不重扫）
+    ResumeIndex,
+    /// 删除索引数据（界面上需要二次确认，这里只负责"用户点了"）
+    DeleteIndex,
     /// 面板被用户关闭
     ClosePanel,
 }
@@ -211,7 +217,9 @@ impl IndexProgressUi {
             }
         } else if !self.snapshot.running() {
             // 结束：有失败/不可访问 → 保持显示（降级为异常摘要），否则 1 s 内收起
-            if self.snapshot.has_failures() || self.snapshot.has_unreachable() || self.snapshot.paused()
+            if self.snapshot.has_failures()
+                || self.snapshot.has_unreachable()
+                || self.snapshot.paused()
             {
                 self.hide_at = None;
             } else if self.hide_at.is_none() {
@@ -242,7 +250,10 @@ impl IndexProgressUi {
         let time = ctx.input(|i| i.time);
 
         egui::Area::new(egui::Id::unique("index-toast"))
-            .anchor(Align2::RIGHT_BOTTOM, vec2(-12.0, -(Metrics::STATUS_H + 12.0)))
+            .anchor(
+                Align2::RIGHT_BOTTOM,
+                vec2(-12.0, -(Metrics::STATUS_H + 12.0)),
+            )
             .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
@@ -262,14 +273,20 @@ impl IndexProgressUi {
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui
-                                    .add(egui::Button::new(RichText::new("×").size(12.0)).frame(false))
+                                    .add(
+                                        egui::Button::new(RichText::new("×").size(12.0))
+                                            .frame(false),
+                                    )
                                     .on_hover_text("关闭（索引会继续）")
                                     .clicked()
                                 {
                                     close = true;
                                 }
                                 if ui
-                                    .add(egui::Button::new(RichText::new("收起").size(11.0)).frame(false))
+                                    .add(
+                                        egui::Button::new(RichText::new("收起").size(11.0))
+                                            .frame(false),
+                                    )
                                     .clicked()
                                 {
                                     minimize = true;
@@ -290,7 +307,10 @@ impl IndexProgressUi {
                                     .color(theme.text_secondary),
                                 );
                                 if ui
-                                    .add(egui::Button::new(RichText::new("展开").size(11.0)).frame(false))
+                                    .add(
+                                        egui::Button::new(RichText::new("展开").size(11.0))
+                                            .frame(false),
+                                    )
                                     .clicked()
                                 {
                                     minimize = false;
@@ -305,13 +325,15 @@ impl IndexProgressUi {
                             .map(|t| t.name.clone())
                             .unwrap_or_else(|| "—".into());
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(ellipsize(&folder, 16)).size(11.0).color(theme.text_primary));
+                            ui.label(
+                                RichText::new(ellipsize(&folder, 16))
+                                    .size(11.0)
+                                    .color(theme.text_primary),
+                            );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if let Some(label) = snap.batch_label() {
                                     ui.label(
-                                        RichText::new(label)
-                                            .size(10.0)
-                                            .color(theme.text_secondary),
+                                        RichText::new(label).size(10.0).color(theme.text_secondary),
                                     );
                                 }
                                 ui.label(
@@ -379,7 +401,12 @@ impl IndexProgressUi {
     }
 
     /// 进度面板（浮层，不是模态对话框；打开时仍可滚动栅格）。
-    pub fn show_panel(&mut self, ctx: &Context, theme: &Theme) -> Option<ProgressAction> {
+    pub fn show_panel(
+        &mut self,
+        ctx: &Context,
+        theme: &Theme,
+        paused: bool,
+    ) -> Option<ProgressAction> {
         if !self.panel_open {
             return None;
         }
@@ -389,6 +416,7 @@ impl IndexProgressUi {
         let now = now_secs();
         let mut retry_all = false;
         let mut add_folder = false;
+        let mut ask_delete = false;
 
         egui::Window::new("索引进度")
             .id(egui::Id::unique("index-progress-panel"))
@@ -419,6 +447,16 @@ impl IndexProgressUi {
                     ui.add_space(8.0);
                     if ui.button("添加关注文件夹").clicked() {
                         add_folder = true;
+                    }
+                    // 没有任务 ≠ 没有索引数据：上次扫完、任务被清空之后，
+                    // 库里可能仍然躺着几十万行。所以这里也得给「删除索引」的入口。
+                    ui.add_space(4.0);
+                    if ui
+                        .add(egui::Button::new(RichText::new("删除索引").size(11.0)).frame(false))
+                        .on_hover_text("删除已建立的照片索引与缩略图，关注文件夹保留")
+                        .clicked()
+                    {
+                        ask_delete = true;
                     }
                     return;
                 }
@@ -602,12 +640,37 @@ impl IndexProgressUi {
 
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
+                    // 暂停/继续：只有真的在跑（或有任务）时才给，空闲时按了没意义
+                    if paused {
+                        if ui.button("继续索引").clicked() {
+                            action = Some(ProgressAction::ResumeIndex);
+                        }
+                    } else if (snap.running() || !snap.tasks.is_empty())
+                        && ui.button("暂停索引").clicked()
+                    {
+                        action = Some(ProgressAction::PauseIndex);
+                    }
                     if snap.has_failures() && ui.button("全部重试").clicked() {
                         retry_all = true;
                     }
-                    if ui.button("关闭").clicked() {
-                        self.panel_open = false;
-                    }
+                    // 放最右：破坏性操作不跟常用按钮挨着
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("删除索引").size(11.0).color(theme.warn),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text("删除照片索引与缩略图，关注文件夹保留")
+                            .clicked()
+                        {
+                            ask_delete = true;
+                        }
+                        if ui.button("关闭").clicked() {
+                            self.panel_open = false;
+                        }
+                    });
                 });
             });
 
@@ -621,6 +684,9 @@ impl IndexProgressUi {
         if retry_all {
             return Some(ProgressAction::RetryAll);
         }
+        if ask_delete {
+            return Some(ProgressAction::DeleteIndex);
+        }
         action
     }
 
@@ -630,7 +696,11 @@ impl IndexProgressUi {
     pub fn status_button(ui: &mut Ui, theme: &Theme, snap: &IndexSnapshot, rect: Rect) -> bool {
         let state = ButtonState::from_snapshot(snap);
         let painter = ui.painter_at(rect);
-        let resp = ui.interact(rect, ui.scope_id().with("index-status-button"), Sense::click());
+        let resp = ui.interact(
+            rect,
+            ui.scope_id().with("index-status-button"),
+            Sense::click(),
+        );
         let hot = resp.hovered();
         if hot {
             painter.rect_filled(rect, 2.0, theme.cell_hover);
@@ -642,10 +712,8 @@ impl IndexProgressUi {
             ButtonState::Paused => theme.warn,
             ButtonState::Running => theme.status_text,
         };
-        let icon_rect = Rect::from_center_size(
-            pos2(rect.left() + 9.0, rect.center().y),
-            vec2(11.0, 11.0),
-        );
+        let icon_rect =
+            Rect::from_center_size(pos2(rect.left() + 9.0, rect.center().y), vec2(11.0, 11.0));
         icons::draw(&painter, Icon::Index, icon_rect, color, 1.2);
         painter.text(
             pos2(rect.left() + 18.0, rect.center().y),
@@ -738,20 +806,26 @@ fn progress_bar(ui: &mut Ui, frac: Option<f32>, theme: &Theme, time: f64) {
                     theme.progress,
                 );
             }
-            ui.ctx().request_repaint();
+            // ⚠️ 这里是**不定态动画**，必须持续重绘，但绝不能 `request_repaint()` 不设间隔：
+            // 那等于「下一帧立刻再画一遍」，在走 llvmpipe 软件光栅（沙箱无 `/dev/dri` 时
+            // 必然如此）的机器上是 2 个核持续 100%，UI 反而更卡。
+            // 100 ms = 10 fps，一个来回扫动的块看不出来是 10 fps，但 CPU 降到 1/6。
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 }
 
 /// 面板里给「状态点」用的小圆（左栏与面板共用同一颜色语义）。
-pub fn draw_state_dot(painter: &egui::Painter, center: egui::Pos2, state: IndexState, theme: &Theme) {
+pub fn draw_state_dot(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    state: IndexState,
+    theme: &Theme,
+) {
     let color = state_color(state, theme);
     if state == IndexState::Paused {
-        painter.rect_filled(
-            Rect::from_center_size(center, vec2(6.0, 2.0)),
-            0.5,
-            color,
-        );
+        painter.rect_filled(Rect::from_center_size(center, vec2(6.0, 2.0)), 0.5, color);
     } else {
         painter.circle_filled(center, 3.0, color);
     }
