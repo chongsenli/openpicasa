@@ -76,9 +76,7 @@ pub fn probe_dims(path: &Path) -> Result<Dims, DimsError> {
     let file = File::open(path).map_err(DimsError::Unreachable)?;
     let mut reader = BufReader::new(file);
 
-    let exif = exif::Reader::new()
-        .read_from_container(&mut reader)
-        .ok();
+    let exif = exif::Reader::new().read_from_container(&mut reader).ok();
 
     let mut orientation = 1u32;
     if let Some(exif) = exif.as_ref() {
@@ -90,14 +88,16 @@ pub fn probe_dims(path: &Path) -> Result<Dims, DimsError> {
 
         // EXIF 的 PixelXDimension / PixelYDimension：绝大多数相机与手机都会写，
         // 读到就不必再碰文件头。
-        let exif_dims = exif.get_field(Tag::PixelXDimension, In::PRIMARY).and_then(|f| {
-            let w = f.value.get_uint(0)?;
-            let h = exif
-                .get_field(Tag::PixelYDimension, In::PRIMARY)?
-                .value
-                .get_uint(0)?;
-            (w > 0 && h > 0).then_some((w, h))
-        });
+        let exif_dims = exif
+            .get_field(Tag::PixelXDimension, In::PRIMARY)
+            .and_then(|f| {
+                let w = f.value.get_uint(0)?;
+                let h = exif
+                    .get_field(Tag::PixelYDimension, In::PRIMARY)?
+                    .value
+                    .get_uint(0)?;
+                (w > 0 && h > 0).then_some((w, h))
+            });
         if let Some((width, height)) = exif_dims {
             return Ok(Dims {
                 width,

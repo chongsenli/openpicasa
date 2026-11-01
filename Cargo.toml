@@ -93,3 +93,12 @@ strip = "symbols"   # 控制 .app 体积（M1-P11 ≤ 30MB）
 # 图像处理是计算密集型，debug 下也要跑得动
 [profile.dev.package."*"]
 opt-level = 2
+
+# ⚠️ 上面那条**不覆盖本工作区的成员 crate**，而 `imageops::resize` 是泛型函数，
+# 会以**调用方 crate 的 opt-level** 在调用方里实例化——picasa-imaging 停在 O0 时，
+# 一次 155 万像素 → 512 的重采样要 800 ms（实测占单张缩略图耗时的 95%，
+# 而真正的解码只有 40 ms）。25.9 万张的库按这个速度要 58 小时，
+# 用户看到的现象就是「缩略图永远补不完」。
+# 这里只把像素热路径这个 crate 抬到 O3，其余仍是 O0（保留快速编译与完整调试信息）。
+[profile.dev.package.picasa-imaging]
+opt-level = 3

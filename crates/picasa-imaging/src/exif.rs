@@ -94,9 +94,15 @@ pub fn probe(path: &Path) -> Result<Probe> {
     Ok(p)
 }
 
-/// 只读 Orientation（缩略图路径只需要它，读 EXIF 比全解码便宜得多）。
-pub fn read_orientation(path: &Path) -> Option<u32> {
-    let exif = read_exif(path)?;
+/// 只读 Orientation。
+///
+/// 走**内存字节**而不是路径：缩略图主路径已经把整个文件读进内存用于解码，
+/// 再按路径 `open` 一次等于把 I/O 翻倍（USB 移动硬盘上这是小时级的差别）。
+/// 需要按路径读的场景先 `std::fs::read` 再调本函数即可。
+pub fn orientation_from_bytes(bytes: &[u8]) -> Option<u32> {
+    let exif = exif::Reader::new()
+        .read_from_container(&mut std::io::Cursor::new(bytes))
+        .ok()?;
     exif.get_field(Tag::Orientation, In::PRIMARY)
         .and_then(|f| f.value.get_uint(0))
         .filter(|o| (1..=8).contains(o))

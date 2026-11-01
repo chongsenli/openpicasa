@@ -38,18 +38,35 @@ pub fn resize_to_fit(img: &RgbaImage, max_edge: u32) -> RgbaImage {
 }
 
 /// 把 alpha 合到白底，输出 RGB8（JPEG 没有 alpha 通道）。
+///
+/// 实现上**不用 `put_pixel`**：那是「每像素一次边界检查 + 一次元组解构」，
+/// 在 debug 构建里比线性扫一遍慢一个数量级，而缩略图每条像素都要过一次。
+/// 这里直接走原始切片，全不透明（绝大多数 JPEG）时连混合都不用算。
 pub fn flatten_on_white(img: &RgbaImage) -> image::RgbImage {
-    let mut out = image::RgbImage::new(img.width(), img.height());
-    for (x, y, px) in img.enumerate_pixels() {
-        let a = px[3] as u32;
-        if a == 255 {
-            out.put_pixel(x, y, image::Rgb([px[0], px[1], px[2]]));
-        } else {
-            let blend = |c: u8| -> u8 { (((c as u32) * a + 255 * (255 - a)) / 255) as u8 };
-            out.put_pixel(x, y, image::Rgb([blend(px[0]), blend(px[1]), blend(px[2])]));
+    let (w, h) = (img.width(), img.height());
+    let src = img.as_raw();
+    let mut out: Vec<u8> = Vec::with_capacity(src.len() / 4 * 3);
+    let (pxs, _) = src.as_chunks::<4>();
+    let opaque = pxs.iter().all(|px| px[3] == 255);
+    if opaque {
+        for px in pxs {
+            out.extend_from_slice(&px[..3]);
+        }
+    } else {
+        for px in pxs {
+            let a = px[3] as u32;
+            if a == 255 {
+                out.extend_from_slice(&px[..3]);
+            } else {
+                for c in &px[..3] {
+                    let v = ((*c as u32) * a + 255 * (255 - a)) / 255;
+                    out.push(v as u8);
+                }
+            }
         }
     }
-    out
+    // 尺寸与容量都对齐了，`from_raw` 不会返回 None
+    image::RgbImage::from_raw(w, h, out).unwrap_or_else(|| image::RgbImage::new(w, h))
 }
 
 /// JPEG 编码（质量 82：缩略图看的是密度与速度，不是无损）。
@@ -68,13 +85,20 @@ pub fn encode_jpeg(img: &RgbaImage, quality: u8) -> Result<Vec<u8>> {
 
 /// 从文件直接产出 T0 缩略图字节（扫描/补图的主路径）。
 ///
-/// 走「解码 → 摆正 → 缩放 → 合白底 → 编码」五步，**中间不落盘**。
+/// 走「解码 → 摆正 → 缩放 → 合白底 → 编码」五步，**中间不落盘**；
+/// 文件只读一次（解码与 EXIF Orientation 共用同一份字节）。
 pub fn thumb_from_file(path: &Path, max_edge: u32) -> Result<(Vec<u8>, u32, u32)> {
-    let img = decode::decode_oriented(path)?;
+    let bytes = std::fs::read(path)?;
+    thumb_from_bytes(&bytes, max_edge)
+}
+
+/// 同 [`thumb_from_file`]，但字节已在内存里。
+pub fn thumb_from_bytes(bytes: &[u8], max_edge: u32) -> Result<(Vec<u8>, u32, u32)> {
+    let img = decode::decode_oriented_bytes(bytes)?;
     let small = resize_to_fit(&img, max_edge);
     let (w, h) = (small.width(), small.height());
-    let bytes = encode_jpeg(&small, 82)?;
-    Ok((bytes, w, h))
+    let out = encode_jpeg(&small, 82)?;
+    Ok((out, w, h))
 }
 
 /// T0 档的便捷入口。
