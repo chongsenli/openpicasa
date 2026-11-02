@@ -1069,7 +1069,50 @@ fn process_batch(
                 return;
             }
             let path = row.abs_path();
-            match picasa_imaging::thumb_t0(&path) {
+            // ---- R-M3-10 解码隔离：**任何解码器对任何输入都不得崩进程**
+            //
+            // `catch_unwind` 不是防御性编程的装饰——`image` crate 的几个解码器
+            // 在畸形输入上**确实会 panic**（越界索引、除零、`unwrap` 一个 None）。
+            // 不罩住它，一个坏文件就带走整个进程，用户看到「软件崩了」而毫无线索。
+            //
+            // `AssertUnwindSafe` 在这里是成立的：解码只读文件、不碰共享状态，
+            // panic 后我们**不继续用**任何中间结果，直接把这张标成失败。
+            let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                picasa_imaging::thumb_t0(&path)
+            }));
+            let decoded = match decoded {
+                Ok(r) => r,
+                Err(payload) => {
+                    // panic → `Corrupt(DecoderPanic)` 可见失败 + 计一次熔断
+                    let fmt = format_name(&path);
+                    let msg = panic_text(&payload);
+                    tracing::warn!(
+                        path = %path.display(),
+                        format = fmt,
+                        panic = %msg,
+                        "★ 解码器 panic，已隔离（R-M3-10）"
+                    );
+                    picasa_imaging::format::global_guard().note_panic(fmt);
+                    if let Ok(guard) = inner.db.lock() {
+                        let _ = guard.set_thumb_state(row.id, ThumbState::Corrupt);
+                        progressed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    inner.board.note_thumb_failed(
+                        key,
+                        FailureItem {
+                            photo_id: row.id,
+                            name: row.name.clone(),
+                            reason: format!("解码器异常（{msg}）"),
+                        },
+                    );
+                    let _ = inner.tx.send(CoreEvent::ThumbFailed {
+                        photo_id: row.id,
+                        reason: format!("解码器异常（{fmt}）"),
+                    });
+                    return;
+                }
+            };
+            match decoded {
                 Ok((jpeg, w, h)) => {
                     if let Ok(guard) = inner.db.lock() {
                         let buf = picasa_db::ThumbBuf {
@@ -1185,6 +1228,45 @@ fn generate_thumbs(inner: &Arc<Inner>, folder_id: i64, key: &str, root: &Path) {
 }
 
 /// 失败原因分类。**面板要显示的是人话，不是 `Decode(DecodingError)`。**
+/// 取格式名（用于熔断计数）。按**魔数**而不是扩展名——熔断的粒度是
+/// 「哪个解析器崩了」，而一个叫 `.jpg` 的 PNG 崩的是 PNG 解析器。
+///
+/// 读不到文件头时回落扩展名，再不行就是 `"未知"`：宁可熔断一个不精确的名字，
+/// 也不要因为取不到名字就完全不计数（那样熔断永远触发不了）。
+fn format_name(path: &Path) -> &'static str {
+    let head = read_head(path, 32);
+    let sniffed = picasa_imaging::sniff(&head);
+    if sniffed != picasa_imaging::SniffedFormat::Unknown {
+        return sniffed.label();
+    }
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "PNG",
+        Some("gif") => "GIF",
+        Some("bmp") | Some("dib") => "BMP",
+        Some("tif") | Some("tiff") => "TIFF",
+        Some("webp") => "WebP",
+        Some("jpg") | Some("jpeg") | Some("jpe") | Some("jfif") => "JPEG",
+        Some("svg") | Some("svgz") => "SVG",
+        _ => "未知",
+    }
+}
+
+/// 从 panic 负载里提取可读信息（`Box<dyn Any>` 只有两种常见类型）。
+fn panic_text(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "不可读的 panic 负载".to_string()
+    }
+}
+
 fn classify(e: &ImageError) -> &'static str {
     match e {
         ImageError::Io(io) => match io.kind() {

@@ -9,6 +9,9 @@
 mod decode;
 mod dims;
 mod exif;
+// `fixtures` 只在测试与基准里用；公开它是为了让 `picasa-core` 的集成用例
+// 也能拿到同一批畸形样本（避免两处各造一套、各自漂移）。
+pub mod fixtures;
 pub mod format;
 mod orient;
 mod scaled;
