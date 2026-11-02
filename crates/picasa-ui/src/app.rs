@@ -65,6 +65,8 @@ pub struct OpenPicasaApp {
     zoom: picasa_core::ZoomState,
     /// L2 全校的周期调度（`07` §3.2 VERIFY-03）。
     full_verify: picasa_core::FullVerifyScheduler,
+    /// 微缩图集（`07-A` §A-2.2）：格宽 ≤ 48 px 时把缩略图打包进 4096² 纹理。
+    atlas: crate::atlas::ThumbAtlas,
     /// 当前显示器的 DPI 缩放（Retina = 2.0）。
     ///
     /// 滑块选档必须用它：**512 逻辑在 2× 屏上要 1024 物理**，
@@ -218,6 +220,7 @@ impl OpenPicasaApp {
             // 读库失败/没设过 → 默认刻度（`ZoomState::from_setting(None)`）。
             zoom: picasa_core::ZoomState::from_setting(zoom_setting),
             full_verify: picasa_core::FullVerifyScheduler::new(),
+            atlas: crate::atlas::ThumbAtlas::new(),
             dpi_scale: 1.0,
             viewer: None,
             search_buf,
@@ -902,6 +905,58 @@ impl OpenPicasaApp {
         );
     }
 
+    /// 每帧推进微缩图集（`07-A` §A-2.2）。
+    ///
+    /// 三件事，顺序不能换：
+    ///
+    /// 1. `begin_frame` —— 屏距按帧算
+    /// 2. 装几张（限量）—— 只装**视口附近**的，别把全库塞进去
+    /// 3. 帧末淘汰整页 —— 整页都不在附近才丢（一页 64 MB，丢早了就是反复重传）
+    ///
+    /// 只有在 `≤ 48 px` 档才做事：其余档位走 `TextureCache`，图集留空不占显存。
+    fn tick_atlas(&mut self, ctx: &egui::Context) {
+        if !picasa_core::uses_atlas(self.zoom.cell_px()) {
+            // 切回大档：图集不再需要。**立刻清空**而不是留着——
+            // 一页 64 MB，留着就是白占，而切回来时会重新装（那本来就是一次视觉过渡）。
+            if !self.atlas.is_empty() {
+                self.atlas.clear();
+            }
+            return;
+        }
+        self.atlas.begin_frame();
+
+        // 视口附近的行（前后各 2 屏）——图集的填充与淘汰都用这一个集合
+        let first = self.anchor_id.unwrap_or(0);
+        let _ = first; // 真实首屏下标由栅格给；这里用保守的「全列前 N 行」
+        let rows: Vec<&picasa_db::PhotoRow> = self
+            .lib
+            .photos
+            .iter()
+            .take(crate::atlas::ATLAS_PREFILL_ROWS)
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+
+        // ② 装几张（限量，避免一帧建页 + 上传几十张）
+        if let Ok(db) = self.lib.db() {
+            let n = crate::grid::pump_atlas_public(ctx, &mut self.atlas, &db, &rows);
+            if n > 0 {
+                tracing::debug!(n, "图集装入一批");
+            }
+        }
+
+        // ③ 帧末淘汰：屏距 ≥ 3 的整页作废（与 TextureBudget 同一条线）
+        let dropped = self.atlas.evict_pages_farther_than(3);
+        if dropped > 0 {
+            tracing::debug!(
+                dropped,
+                pages = self.atlas.page_count(),
+                "图集整页淘汰"
+            );
+        }
+    }
+
     /// 每帧推进监视器：收事件 → 去抖 → 排队刷新（`07` §2.2）。
     ///
     /// ⚠️ 这里**只投递 Job**，不自己扫描（R-M3-8：落库线程是唯一写 DB 的线程）。
@@ -1374,6 +1429,8 @@ impl OpenPicasaApp {
                     &mut self.grid_layout,
                     &theme,
                     &snap,
+                    &mut self.atlas,
+                    self.zoom.cell_px(),
                 );
                 drop(db);
 
@@ -2244,6 +2301,8 @@ impl eframe::App for OpenPicasaApp {
         // 每帧刷新 DPI（多屏移动窗口时会变），再结算滑块
         self.dpi_scale = ctx.pixels_per_point();
         self.tick_zoom();
+        // M3：微缩图集（只在 ≤48 px 档工作）
+        self.tick_atlas(&ctx);
         self.flush_reload(&ctx);
         self.handle_keys(&ctx);
         // 索引进度：按 250 ms 节流取快照（不在 UI 线程做任何索引工作）

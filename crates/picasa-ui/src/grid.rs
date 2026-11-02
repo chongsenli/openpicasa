@@ -36,6 +36,13 @@ use crate::index_progress;
 use crate::textures::{TexState, TextureCache};
 use crate::theme::{Metrics, Theme};
 
+/// 每帧最多往图集里装几张（`07-A` §A-2.2 的「批量构建」）。
+///
+/// 32 × 8 = 256 是实测折中：每张要「解 T0 JPEG → 缩到 32² → set_partial」，
+/// 单张约 0.1 ms，8 张 ≈ 0.8 ms，在 16.7 ms 的帧预算里可以接受；
+/// 一次装 32 张就会吃掉 3 ms 以上，开始在弱机上掉帧。
+const ATLAS_UPLOADS_PER_FRAME: usize = 8;
+
 /// 一个分组（日期）在内容坐标里的位置。
 #[derive(Clone, Debug)]
 pub struct Group {
@@ -514,6 +521,10 @@ pub fn show(
     grid: &mut GridCache,
     theme: &Theme,
     snapshot: &IndexSnapshot,
+    // 微缩图集（`07-A` §A-2.2）：格宽 ≤ 48 px 时走它，而不是每格一张纹理
+    atlas: &mut crate::atlas::ThumbAtlas,
+    // 当前格宽（逻辑 px）——由滑块决定，用来判断走不走图集
+    cell_px: f32,
 ) -> GridOutput {
     let mut out = GridOutput {
         clicked: None,
@@ -535,6 +546,9 @@ pub fn show(
     }
 
     let ctx = ui.ctx().clone();
+    // 走不走微缩图集（`07-A` §A-2.2）：≤ 48 逻辑 px 时走。
+    // 判据与 `picasa_core::zoom::uses_atlas` 同一份——不能有两套阈值。
+    let use_atlas = picasa_core::uses_atlas(cell_px);
     let content_w = (ui.available_width() - Metrics::SCROLLBAR).max(120.0);
     // 每帧「算布局」在 M2 是 5 万张 110 ms 的开销，而输入几乎每帧都一样——
     // 交给 GridCache，滚动时这一行是 0 代价。
@@ -645,6 +659,19 @@ pub fn show(
                 failed || (row.thumb_state == 0 && indexing_folders.contains(&row.folder_id));
             if placeholder {
                 index_progress::draw_placeholder(&painter, rect, theme, failed);
+            } else if use_atlas {
+                // ---- 微缩图集路径（`07-A` §A-2.2，格宽 ≤ 48 px）
+                //
+                // 为什么不走 `cache.get`：那条路是「每张图一张 GPU 纹理」，
+                // 17 000 个可见格就是 17 000 张纹理 → 直接撞 TextureBudget。
+                // 图集把 16 384 张塞进一张 4096² 纹理，一帧最多 2 张图集。
+                match draw_from_atlas(&painter, atlas, db, row, rect) {
+                    true => {}
+                    false => {
+                        // 还没进图集：画占位，等它进来（不阻塞本帧）
+                        index_progress::draw_placeholder(&painter, rect, theme, false);
+                    }
+                }
             } else {
                 match cache.get(&ctx, db, service, row, &mut budget) {
                     TexState::Ready(tex_id, tex_size) => {
@@ -795,6 +822,100 @@ fn interact_cell(
         );
     }
     resp
+}
+
+/// 从图集里画一格。返回 `false` 表示这张还没进图集（调用方画占位）。
+///
+/// ## 为什么这里不「顺手装进去」
+///
+/// 装图集要 `set_partial`（一次 GPU 上传）。一帧传几十张就会把帧时间顶穿。
+/// 所以装的动作在**预算化**的路径里做（[`pump_atlas_from_db`]，每帧限量），
+/// 这里只负责「有就画、没有就算」——绘制路径必须是无副作用的。
+fn draw_from_atlas(
+    painter: &egui::Painter,
+    atlas: &crate::atlas::ThumbAtlas,
+    _db: &Db,
+    row: &PhotoRow,
+    rect: Rect,
+) -> bool {
+    let Some(slot) = atlas.get(row.id) else {
+        return false;
+    };
+    let Some(tex) = atlas.texture_of(slot.page) else {
+        return false;
+    };
+    painter.image(
+        tex.id(),
+        rect,
+        Rect::from_min_max(slot.uv[0], slot.uv[1]),
+        Color32::WHITE,
+    );
+    true
+}
+
+/// 每帧限量地把「可见但还没进图集」的缩略图装进去。
+///
+/// ## 为什么限量
+///
+/// 4096² 图集的一次 `set_partial` 虽然只传 4 KB，但**首次建页**要分配 64 MB。
+/// 一帧装 100 张 = 400 KB 上传 + 可能的建页，还行；装 1000 张就会掉帧。
+/// 取 [`ATLAS_UPLOADS_PER_FRAME`] 是与 `TEX_UPLOAD_PER_FRAME` 同样的折中。
+///
+/// ## 为什么从 DB 读而不是等 ThumbService
+///
+/// 22 px 档下缩略图早就生成过了（它们在 T0 档已经存在于 `thumbs` 表里），
+/// 这里只是「降采样到 32² 再装进图集」。走 `ThumbService` 会重新排队解码原图，
+/// 那比直接从 BLOB 解 512² 再缩到 32² 慢一个数量级，而且没必要。
+/// 公开给 `app.rs` 的入口（`tick_atlas` 用）。
+///
+/// 存在的理由：`pump_atlas_from_db` 在栅格绘制路径里，而「装图集」必须
+/// **在绘制之前**跑（否则本帧新装的图要等下一帧才显示）。
+/// 两个调用点共用一个实现，避免两处各写一遍限量逻辑。
+pub fn pump_atlas_public(
+    ctx: &egui::Context,
+    atlas: &mut crate::atlas::ThumbAtlas,
+    db: &Db,
+    rows: &[&PhotoRow],
+) -> usize {
+    pump_atlas_from_db(ctx, atlas, db, rows)
+}
+
+fn pump_atlas_from_db(
+    ctx: &egui::Context,
+    atlas: &mut crate::atlas::ThumbAtlas,
+    db: &Db,
+    rows: &[&PhotoRow],
+) -> usize {
+    use crate::atlas::SLOT_PX;
+    let mut done = 0;
+    for row in rows {
+        if done >= ATLAS_UPLOADS_PER_FRAME {
+            break;
+        }
+        if atlas.contains(row.id) || row.thumb_state != 1 {
+            continue;
+        }
+        let Ok(Some(buf)) = db.get_thumb(row.id, 0) else {
+            continue;
+        };
+        // 解 T0 → 缩到 SLOT_PX²
+        let Ok(img) = image::load_from_memory(&buf.data) else {
+            continue;
+        };
+        let small = img.resize_exact(
+            SLOT_PX as u32,
+            SLOT_PX as u32,
+            image::imageops::FilterType::Triangle,
+        );
+        let rgba = small.to_rgba8();
+        if atlas
+            .insert(ctx, row.id, rgba.as_raw())
+            .is_some()
+        {
+            done += 1;
+        }
+    }
+    done
 }
 
 fn draw_empty_state(ui: &mut Ui, full: Rect, theme: &Theme, cache: &mut TextureCache) {

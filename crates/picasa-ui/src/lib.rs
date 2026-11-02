@@ -19,6 +19,7 @@
 //! ```
 
 pub mod app;
+pub mod atlas;
 pub mod capture;
 pub mod diagnostics;
 pub mod grid;
