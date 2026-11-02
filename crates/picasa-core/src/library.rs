@@ -138,6 +138,14 @@ pub struct Library {
     pub search: String,
     pub tier: Tier,
     pub sort: SortSpec,
+    /// 「包含子文件夹」开关（`07-A` §3，P-28 裁决全局一份）。
+    ///
+    /// 关（默认）= 原版行为，只显示 F 的直接照片；
+    /// 开 = F 及**全部后代**目录，口径与 `07` §4.1 的 `total` 一致。
+    ///
+    /// ⚠️ 这是**全局**设置而不是按文件夹记（P-28）：按文件夹记要加一张表，
+    /// 而且「同一个开关在不同文件夹下是不同状态」会让用户彻底失去方向感。
+    pub recurse: bool,
 
     /// 树（未展开/折叠的完整结构）
     pub roots: Vec<FolderNode>,
@@ -220,6 +228,7 @@ impl Library {
             current: None,
             tray: Vec::new(),
             search: String::new(),
+            recurse: false, // 下面从 `settings.recurse_subfolders` 覆盖（P-28：全局一份）
             roots: Vec::new(),
             visible_folders: Vec::new(),
             root_paths,
@@ -237,6 +246,9 @@ impl Library {
         };
         lib.tray = lib.prefs.tray.clone();
         lib.prune_tray();
+        // `settings.recurse_subfolders`（`07-A` §6）。读失败就用默认关——
+        // 这个开关读不到只影响「一次多显示几张」，不该拦住启动。
+        lib.recurse = lib.db().map(|db| db.recurse_subfolders()).unwrap_or(Ok(false)).unwrap_or(false);
         lib.reload_tree()?;
         lib.reload_photos()?;
         Ok(lib)
@@ -370,9 +382,23 @@ impl Library {
 
     /// 视图内包含的 folder id（含子目录）。搜索与查询都用它划范围。
     pub fn view_folder_ids(&self) -> Option<Vec<i64>> {
+        self.scope_folder_ids(self.recurse)
+    }
+
+    /// 按指定的「含不含子目录」算视图范围（`07-A` §3.1）。
+    ///
+    /// 抽出来带参数而不是直接读 `self.recurse`，是为了让「切开关时保持锚点」
+    /// （RECURSE-02）能先算一眼新范围，而**不改动**当前状态。
+    pub fn scope_folder_ids(&self, recurse: bool) -> Option<Vec<i64>> {
         match self.view {
             View::All | View::Recent => None,
             View::Folder(id) => {
+                if !recurse {
+                    // 关闭：只有它自己。**不走树**——树里可能拿不到这个节点
+                    // （关闭的关注文件夹、尚未落库的新目录），那时返回 `vec![id]`
+                    // 而不是空，否则栅格会空掉。
+                    return Some(vec![id]);
+                }
                 let Some(node) = self.node_by_id(id) else {
                     return Some(vec![id]);
                 };
@@ -381,6 +407,39 @@ impl Library {
                 Some(ids)
             }
         }
+    }
+
+    /// 当前视图**在开关开/关两种状态下**各有多少张（RECURSE-02 的锚点判断用）。
+    pub fn count_both_scopes(&self) -> Result<(usize, usize)> {
+        let direct = self.db()?.count_photos_visible(self.scope_folder_ids(false).as_deref())?;
+        let subtree = self.db()?.count_photos_visible(self.scope_folder_ids(true).as_deref())?;
+        Ok((direct as usize, subtree as usize))
+    }
+
+    /// 切换「包含子文件夹」（`07-A` RECURSE-01/02）。
+    ///
+    /// 返回 `true` 表示范围真的变了（`View::All` / `Recent` 下这个开关没有意义）。
+    ///
+    /// ## 锚点处理（RECURSE-02）
+    ///
+    /// 切换时**保持当前选中文件夹**；顶部 `photo_id` 若仍在新视图内则对齐，
+    /// 否则回顶。这里只把「要不要回顶」的决定权交出去（返回是否变了），
+    /// 具体位置由栅格的 `anchor_id` 机制处理——它本来就有这个能力。
+    pub fn set_recurse(&mut self, on: bool) -> Result<bool> {
+        if self.recurse == on {
+            return Ok(false);
+        }
+        self.recurse = on;
+        let meaningful = matches!(self.view, View::Folder(_));
+        if meaningful {
+            self.reload_photos()?;
+        }
+        Ok(meaningful)
+    }
+
+    /// 「所有照片」视图下开关置灰（`07-A` RECURSE-09：语义重叠）。
+    pub fn recurse_available(&self) -> bool {
+        matches!(self.view, View::Folder(_))
     }
 
     fn node_by_id(&self, id: i64) -> Option<&FolderNode> {

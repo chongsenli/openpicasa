@@ -43,6 +43,8 @@ pub enum Icon {
     Index,
     /// 关闭
     Close,
+    /// 文件夹（M3 RECURSE-01：包含子文件夹开关）
+    Folder,
 }
 
 /// 在 `rect` 内绘制图标。线条宽度按 `stroke` 缩放（Retina 下自动变细）。
@@ -161,6 +163,19 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
         Icon::Close => {
             painter.line_segment([ip(0.15, 0.15), ip(0.85, 0.85)], s);
             painter.line_segment([ip(0.85, 0.15), ip(0.15, 0.85)], s);
+        }
+        // 文件夹：一个梯形口袋 + 一个标签页（16 px 下仍可辨认的最小形状）
+        Icon::Folder => {
+            painter.rect_stroke(
+                Rect::from_min_max(ip(0.12, 0.30), ip(0.88, 0.82)),
+                1.5,
+                s,
+                egui::StrokeKind::Middle,
+            );
+            // 标签页：左上角那一条
+            painter.line_segment([ip(0.12, 0.30), ip(0.12, 0.20)], s);
+            painter.line_segment([ip(0.12, 0.20), ip(0.40, 0.20)], s);
+            painter.line_segment([ip(0.40, 0.20), ip(0.46, 0.30)], s);
         }
     }
 }

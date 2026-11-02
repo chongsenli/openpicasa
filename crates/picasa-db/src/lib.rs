@@ -443,6 +443,16 @@ impl Db {
         self.setting_i64("grid_cell_px")
     }
 
+    /// `settings.recurse_subfolders`（`07-A` §6 预置为 `"0"`）。
+    pub fn recurse_subfolders(&self) -> Result<bool> {
+        self.setting_bool("recurse_subfolders", false)
+    }
+
+    /// 写 `settings.recurse_subfolders`。
+    pub fn set_recurse_subfolders(&self, on: bool) -> Result<()> {
+        self.set_setting_raw("recurse_subfolders", Some(if on { "1" } else { "0" }))
+    }
+
     /// 写 `settings.grid_cell_px`。
     pub fn set_grid_cell_px(&self, px: i64) -> Result<()> {
         self.set_setting_raw("grid_cell_px", Some(&px.to_string()))

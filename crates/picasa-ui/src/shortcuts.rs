@@ -31,6 +31,10 @@ pub enum KeyAction {
     ZoomActual,
     ToggleBackground,
     ToggleInfo,
+    /// 切换「包含子文件夹」（`07-A` RECURSE-01：`⌘⇧R`）
+    ToggleRecurse,
+    /// `⌘0`：缩略图滑块回默认刻度（`07-A` ZOOM-03）
+    ZoomReset,
 }
 
 /// 收集本帧的按键。`in_viewer` 决定用哪一套映射。
@@ -72,6 +76,16 @@ pub fn collect(ctx: &Context, in_viewer: bool) -> Vec<KeyAction> {
             }
             if cmd && i.key_pressed(Key::Num2) {
                 out.push(KeyAction::TierLarge);
+            }
+            // `⌘0`：滑块回默认刻度（`07-A` ZOOM-03）
+            if cmd && i.key_pressed(Key::Num0) {
+                out.push(KeyAction::ZoomReset);
+            }
+            // `⌘⇧R`：包含子文件夹（`07-A` RECURSE-01）。
+            // 用 `shift` 而不是另设 `⌘R`——后者在不少应用里是「刷新」，
+            // 而本视图里「刷新」是右键菜单的语义，冲突会让用户按错。
+            if cmd && shift && i.key_pressed(Key::R) {
+                out.push(KeyAction::ToggleRecurse);
             }
             if i.key_pressed(Key::F11) {
                 out.push(KeyAction::ToggleFullscreen);

@@ -722,6 +722,44 @@ impl OpenPicasaApp {
         self.index.enqueue_scan(&roots);
     }
 
+    /// 切换「包含子文件夹」（`07-A` RECURSE-01/02 / U-70）。
+    ///
+    /// 三处入口（工具栏、树右键、`⌘⇧R`）都走这一个方法——**状态只有一个**，
+    /// 三处各存一份必然不同步（RECURSE-01 的「三处状态同步」就是这条）。
+    fn toggle_recurse(&mut self) {
+        if !self.lib.recurse_available() {
+            return; // 「所有照片」视图下置灰（RECURSE-09）
+        }
+        let next = !self.lib.recurse;
+        // 先记住顶部照片：切换后若它仍在新视图里就要对它（RECURSE-02）
+        let top = self.anchor_id;
+        match self.lib.set_recurse(next) {
+            Ok(true) => {
+                if let Ok(db) = self.lib.db()
+                    && let Err(e) = db.set_recurse_subfolders(next)
+                {
+                    tracing::warn!(error = %e, "写 recurse_subfolders 失败");
+                }
+                // 锚点：能找回就对齐，找不回就回顶
+                self.pending_anchor = top;
+                if top.is_none() {
+                    self.restore_scroll = Some(0.0);
+                }
+                self.cache.clear();
+                self.lib.toast = Some((
+                    if next {
+                        "显示子文件夹".into()
+                    } else {
+                        "只看本文件夹".into()
+                    },
+                    1.2,
+                ));
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "切换包含子文件夹失败"),
+        }
+    }
+
     /// 跳到某个刻度点（`07-A` ZOOM-02：`⌘1` 小 / `⌘2` 大）。
     fn set_zoom_point(&mut self, index: usize) {
         let px = picasa_core::SNAP_POINTS[index.min(2)];
@@ -973,6 +1011,12 @@ impl OpenPicasaApp {
             // 连续滑块上的两个刻度点；`⌘0` 回默认刻度。
             KeyAction::TierSmall => self.set_zoom_point(0),
             KeyAction::TierLarge => self.set_zoom_point(2),
+            KeyAction::ZoomReset => {
+                self.zoom.reset();
+                self.zoom.end_drag(std::time::Instant::now());
+                self.persist_zoom();
+            }
+            KeyAction::ToggleRecurse => self.toggle_recurse(),
             KeyAction::ToggleFullscreen => {
                 let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
@@ -1095,6 +1139,8 @@ impl OpenPicasaApp {
                     !self.lib.selection.is_empty(),
                     &mut self.search_buf,
                     self.sort_menu_open,
+                    self.lib.recurse,
+                    self.lib.recurse_available(),
                 );
                 let sort_btn_rect = out.sort_button.as_ref().map(|r| r.rect);
                 if let Some(new_search) = out.search_changed {
@@ -1126,6 +1172,8 @@ impl OpenPicasaApp {
                             self.sort_menu_open = false;
                         }
                         // ZOOM-02：工具栏按钮保留为「循环三刻度」（零功能丢失）
+                        // RECURSE-01（U-70）：切换「包含子文件夹」
+                        ToolbarAction::ToggleRecurse => self.toggle_recurse(),
                         ToolbarAction::CycleTier => {
                             self.zoom.cycle_point();
                             self.persist_zoom();

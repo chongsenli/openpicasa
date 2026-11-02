@@ -23,6 +23,8 @@ pub enum ToolbarAction {
     PickSort(SortKey),
     ToggleSortDirection,
     CycleTier,
+    /// 切换「包含子文件夹」（`07-A` RECURSE-01 / U-70）
+    ToggleRecurse,
     ToggleFullscreen,
     /// 菜单「档案 → 退出」（Ctrl+Q 同款路径）
     Quit,
@@ -51,6 +53,9 @@ pub fn show(
     has_selection: bool,
     search: &mut String,
     sort_menu_open: bool,
+    // 「包含子文件夹」当前状态与可用性（`07-A` RECURSE-01/09）
+    recurse_on: bool,
+    recurse_available: bool,
 ) -> ToolbarOutput {
     let mut out = ToolbarOutput {
         actions: Vec::new(),
@@ -170,7 +175,31 @@ pub fn show(
     ) {
         out.actions.push(ToolbarAction::CycleTier);
     }
-    x = size_rect.right() + 6.0;
+    x = size_rect.right() + 4.0;
+
+    // M3 RECURSE-01（U-70）：工具栏「包含子文件夹」切换钮。
+    //
+    // 「所有照片」视图下置灰（RECURSE-09：语义重叠——它本来就是全库）。
+    let rec_rect = Rect::from_min_size(pos2(x, btn_y), vec2(86.0, btn_h));
+    let rec_resp = row_button_resp(
+        ui,
+        &painter,
+        rec_rect,
+        Icon::Folder,
+        "含子文件夹",
+        recurse_available,
+        if recurse_available {
+            "显示选中文件夹及其所有子文件夹里的照片（Ctrl+Shift+R）"
+        } else {
+            "「所有照片」视图下不适用"
+        },
+        theme,
+        recurse_on,
+    );
+    if rec_resp.clicked() && recurse_available {
+        out.actions.push(ToolbarAction::ToggleRecurse);
+    }
+    x = rec_rect.right() + 6.0;
     x = draw_sep(&painter, x, tr);
 
     // 组 4：全屏
