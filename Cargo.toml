@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0-beta.1"
+version = "0.3.0-beta.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -36,6 +36,11 @@ kamadak-exif = "0.6"
 # 而这正是 §3.4 写的「目标边长 ≤ 原图/8 用 1/8 …」。依赖树里现成的 `zune-jpeg`
 # （`image` 0.25 的 JPEG 后端）**没有**缩放 API，`turbojpeg`/`mozjpeg` 又要编 C。
 jpeg-decoder = { version = "0.3", default-features = false, features = ["platform_independent"] }
+# M4 用户功能 #3：HEIC/HEIF（iPhone）与 RAW 家族的**纯 Rust**解码。
+# 不用 libheif：C 库（要编 C + HEVC 专利池）；heic 0.1 纯 Rust、无 unsafe。
+heic = "0.1.6"
+rawler = { version = "0.8", default-features = false }
+# M4 用户功能 #3：HEIC/HEIF（iPhone）与 RAW 家族的**纯 Rust**解码。
 rusqlite = { version = "0.41", features = ["bundled"] }
 rayon = "1.12"
 notify = "8.2"
@@ -59,7 +64,11 @@ eframe = { version = "0.37", default-features = false, features = [
     "wgpu",
     "persistence",
     "default_fonts",
-    "system_fonts",
+    # ⚠️ system_fonts 已禁用（M4 现场问题）：macOS 26 上 egui 的系统字体枚举在
+    # CoreText fallback 探测中卡死主线程（日志止于 Using system:PingFang…，
+    # 主线程 mutex 等待，窗口永不出帧）。内置 default_fonts 覆盖中日韩基础字，
+    # 系统字体的观感回退留待 egui 修复后再启用。
+    # "system_fonts",
     # ---- Linux 后端（M1 只跑过 macOS，这里补齐；macOS 下这几个 feature 是空操作）----
     "x11",
     "wayland",
@@ -93,7 +102,7 @@ rfd = "0.17"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
-strip = "symbols"   # 控制 .app 体积（M1-P11 ≤ 30MB）
+strip = false   # 临时打开符号用于死锁定位（修复后改回 "symbols"）
 
 # 图像处理是计算密集型，debug 下也要跑得动
 [profile.dev.package."*"]
