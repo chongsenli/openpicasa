@@ -467,6 +467,303 @@ impl Db {
 
     // ------------------------------------------ v6 · 递归计数 / L1 / 格式（只读侧）
 
+    // ------------------------------------------------- v6/M3 · 键集分页与聚合
+
+    /// 键集分页取行（`07` §5.2 SCALE-03）。
+    ///
+    /// ## 为什么需要 `cursor` 参数
+    ///
+    /// 纯 `OFFSET` 的代价是 O(offset)：100 万张滚到底，每补一页要跳 90 万行。
+    /// 键集分页是 O(log n)：`WHERE (sort_key, id) < (?, ?)` 直接走索引定位。
+    ///
+    /// `cursor = Some((sort_value, id))` 表示「从这一行**之后**开始」；
+    /// `None` 表示从 `start` 位置起（用 OFFSET，只在跳转 / 首屏时发生）。
+    ///
+    /// ## ⚠️ 三个必须一起做对的事
+    ///
+    /// 1. **比较方向与排序方向一致**：`DESC` 排序要 `(k, id) < (?, ?)`，
+    ///    `ASC` 要 `>`。写反了会从错误的方向开始翻页。
+    /// 2. **元组比较必须带 id**：同一天拍的照片 `taken_at` 完全相同，
+    ///    只比 `taken_at` 会跳过整批。
+    /// 3. **名字排序的比较键是 `name_key` 不是 `name`**：与 `ORDER BY` 逐字一致。
+    pub fn range_keyset(
+        &self,
+        folder_ids: Option<&[i64]>,
+        sort: SortSpec,
+        start: usize,
+        n: usize,
+        cursor: Option<(i64, i64)>,
+    ) -> Result<Vec<PhotoRow>> {
+        // ⚠️ **只有「按拍摄时间」走键集**，其余排序老实走 OFFSET。
+        //
+        // 判据是「有没有一条以排序键打头的复合索引」：
+        //
+        // | 排序键 | 可用索引 | 键集可走？ |
+        // | --- | --- | --- |
+        // | `TakenAt` | `idx_photos_taken_id (taken_at, id)` | ✅ |
+        // | `Size` | 只有 `idx_photos_size_mtime (folder_id, …)` —— 前导列是 folder_id | ❌ |
+        // | `ModifiedAt` | 只有 `mtime_ns DESC` 单列，没有 `(mtime_ns, id)` | ❌ |
+        // | `Name` / `Dimensions` | 键是 TEXT / 表达式 | ❌ |
+        //
+        // 硬走键集但索引不匹配的后果是 SQLite 退化成「全表扫描 + 临时 B 树排序」，
+        // 那比 OFFSET 更慢，而且**结果依然完全正确**——这种退化只有执行计划能发现
+        // （`TC-M3-SCALE-003` 就是为此存在的）。
+        //
+        // 补齐其余排序键的索引是 M4 排序功能的事（`08` §3.5 的 `idx_photos_size_id` 等），
+        // 本版只承诺「所有照片」与「按日期」这条主路径。
+        let use_keyset = cursor.is_some() && matches!(sort.key, SortKey::TakenAt);
+
+        let mut sql = format!(
+            "SELECT {} FROM photos p JOIN folders f ON f.id = p.folder_id",
+            self.photo_cols()
+        );
+        let mut where_sql: Vec<String> = Vec::new();
+        if let Some(ids) = folder_ids {
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let list = ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            where_sql.push(format!("p.folder_id IN ({list})"));
+        }
+        where_sql.push(self.active_root_clause().to_string());
+
+        if use_keyset {
+            let (k, id) = cursor.expect("use_keyset 时 cursor 必然存在");
+            let col = self.keyset_col(sort.key);
+            let op = if sort.descending { "<" } else { ">" };
+            // 元组比较：`(k < ?) OR (k = ? AND id < ?)`
+            // 为什么不用 SQLite 的 `(a, b) < (?, ?)` 行值语法：那需要 SQLite 3.15+，
+            // 而且在这种「列已在索引里有序」的场合反而让优化器犹豫。
+            // 展开成 OR 形式能稳定命中 `idx_photos_taken_id` 这类复合索引。
+            where_sql.push(format!(
+                "({col} {op} {k} OR ({col} = {k} AND p.id {op} {id}))"
+            ));
+        }
+
+        sql.push_str(&format!(" WHERE {}", where_sql.join(" AND ")));
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&sort.order_by(self.eff_col()));
+        sql.push_str(&format!(" LIMIT {n}"));
+        if !use_keyset && start > 0 {
+            sql.push_str(&format!(" OFFSET {start}"));
+        }
+
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], map_photo)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 键集分页用的「排序键列」表达式（必须与 [`SortSpec::order_by`] 一致）。
+    fn keyset_col(&self, key: SortKey) -> String {
+        match key {
+            SortKey::TakenAt => self.eff_col().to_string(),
+            SortKey::ModifiedAt => "p.mtime_ns".to_string(),
+            SortKey::Size => "p.size_bytes".to_string(),
+            // 其余走 OFFSET（见 `range_keyset` 的注释），这里给个不会用到的占位
+            SortKey::Name | SortKey::Dimensions => "p.id".to_string(),
+        }
+    }
+
+    /// 一张照片在整列里的下标（锚点恢复，`07` §9.3）。
+    ///
+    /// 用 `COUNT(*)` 而不是「取全表在 Rust 里数」：走索引的计数是 O(log n)，
+    /// 而数行要读全表——100 万张时前者亚毫秒、后者几秒。
+    pub fn index_of_photo(
+        &self,
+        folder_ids: Option<&[i64]>,
+        sort: SortSpec,
+        photo_id: i64,
+    ) -> Result<Option<usize>> {
+        if matches!(sort.key, SortKey::Name) {
+            // 文件名排序：键是 TEXT，复合索引 `(folder_id, name_key)` 已能接受 OFFSET；
+            // 这里用一条计数查询，比较键与 ORDER BY 逐字一致。
+            let target: Option<(String, i64)> = self
+                .conn
+                .query_row(
+                    "SELECT name_key, id FROM photos WHERE id = ?1",
+                    params![photo_id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .optional()?;
+            let Some((name_key, id)) = target else {
+                return Ok(None);
+            };
+            let mut where_sql = vec![self.active_root_clause().to_string()];
+            if let Some(ids) = folder_ids {
+                if ids.is_empty() {
+                    return Ok(None);
+                }
+                let list = ids
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                where_sql.push(format!("p.folder_id IN ({list})"));
+            }
+            let op = if sort.descending { ">" } else { "<" };
+            let sql = format!(
+                "SELECT COUNT(*) FROM photos p JOIN folders f ON f.id = p.folder_id
+                  WHERE {} AND (p.name_key {op} '{}' OR (p.name_key = '{}' AND p.id {op} {}))",
+                where_sql.join(" AND "),
+                escape_like(&name_key),
+                escape_like(&name_key),
+                id
+            );
+            let before: i64 = self.conn.query_row(&sql, [], |r| r.get(0))?;
+            return Ok(Some(before.max(0) as usize));
+        }
+
+        let col = self.keyset_col(sort.key);
+        let target: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                &format!("SELECT {col}, p.id FROM photos p WHERE p.id = ?1"),
+                params![photo_id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        let Some((k, id)) = target else {
+            return Ok(None);
+        };
+
+        let mut where_sql = vec![self.active_root_clause().to_string()];
+        if let Some(ids) = folder_ids {
+            if ids.is_empty() {
+                return Ok(None);
+            }
+            let list = ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            where_sql.push(format!("p.folder_id IN ({list})"));
+        }
+        let op = if sort.descending { ">" } else { "<" };
+        let sql = format!(
+            "SELECT COUNT(*) FROM photos p JOIN folders f ON f.id = p.folder_id
+              WHERE {} AND ({col} {op} {k} OR ({col} = {k} AND p.id {op} {id}))",
+            where_sql.join(" AND ")
+        );
+        let before: i64 = self.conn.query_row(&sql, [], |r| r.get(0))?;
+        Ok(Some(before.max(0) as usize))
+    }
+
+    /// 按天分组的行数（`07` §5.2 SCALE-02）。
+    ///
+    /// 返回 `(当天 00:00 的 Unix 秒, 张数)`，按日期**倒序**。
+    ///
+    /// ⚠️ 时区口径必须与 UI 的分组一致（`chrono::Local`）。SQL 里用 `'localtime'`
+    /// 让 SQLite 按本机时区切天——若这里用 UTC 而 UI 用本地，
+    /// 组头会与栅格错开一整天（跨时区用户尤其明显）。
+    pub fn date_group_counts(&self, folder_ids: Option<&[i64]>) -> Result<Vec<(i64, u64)>> {
+        let mut where_sql = vec![self.active_root_clause().to_string()];
+        if let Some(ids) = folder_ids {
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let list = ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            where_sql.push(format!("p.folder_id IN ({list})"));
+        }
+        // `date(x, 'unixepoch', 'localtime')` 把「墙上时间」还原成用户看到的那一天；
+        // 再 `strftime('%s', ...)` 折回 Unix 秒（本地时区零点），供 UI 直接格式化。
+        // ⚠️ `strftime('%s', …)` 返回的是**文本**（SQLite 里 `%s` 是字符串格式），
+        // 直接 `get::<i64>` 会得到 `InvalidColumnType`。
+        // 用 `CAST(... AS INTEGER)` 才拿到整数——这条在测试里撞到过一次，
+        // 表现是「建数据源就报错」，很容易被误判成迁移问题。
+        let sql = format!(
+            "SELECT CAST(strftime('%s', date({eff}, 'unixepoch', 'localtime')) AS INTEGER) AS day,
+                    COUNT(*)
+               FROM photos p JOIN folders f ON f.id = p.folder_id
+              WHERE {where_clause}
+              GROUP BY day
+              ORDER BY day DESC",
+            eff = self.eff_col(),
+            where_clause = where_sql.join(" AND ")
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (day, n) = row?;
+            out.push((day, n.max(0) as u64));
+        }
+        Ok(out)
+    }
+
+    /// 目录 id → 规范化路径（组头文案与诊断用）。找不到返回 `Err`。
+    pub fn folder_path(&self, folder_id: i64) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT path FROM folders WHERE id = ?1",
+                params![folder_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    /// 一次取 `thumbs` 的 BLOB（`07` §5.2 SCALE-05：首屏只取可见的）。
+    ///
+    /// `ids` 由调用方限长在 [`crate::datasource::IN_LIST_MAX`]。
+    pub fn thumbs_for(&self, ids: &[i64], tier: i64) -> Result<std::collections::HashMap<i64, ThumbBuf>> {
+        let mut out = std::collections::HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let list = ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT photo_id, w, h, format, data FROM thumbs
+              WHERE tier = {tier} AND photo_id IN ({list})"
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let id: i64 = r.get(0)?;
+            out.insert(
+                id,
+                ThumbBuf {
+                    w: r.get(1)?,
+                    h: r.get(2)?,
+                    format: r.get(3)?,
+                    data: r.get(4)?,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// 键集查询的执行计划（`07` §12.2 `TC-M3-SCALE-003`：**必须无 `SCAN TABLE photos`**）。
+    ///
+    /// 把「查询能走索引」变成可断言的字符串，而不是靠跑基准看耗时——
+    /// 耗时随机器负载飘，执行计划不飘。
+    pub fn explain_keyset_plan(&self, sort: SortSpec) -> Result<Vec<String>> {
+        let col = self.keyset_col(sort.key);
+        let op = if sort.descending { "<" } else { ">" };
+        let sql = format!(
+            "EXPLAIN QUERY PLAN
+             SELECT p.id FROM photos p JOIN folders f ON f.id = p.folder_id
+              WHERE {active} AND ({col} {op} 0 OR ({col} = 0 AND p.id {op} 0))
+              ORDER BY {order} LIMIT 200",
+            active = self.active_root_clause(),
+            order = sort.order_by(self.eff_col())
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], |r| r.get::<_, String>(3))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// 每个目录的**递归**照片数（`folders.total_count`）。
     ///
     /// ⚠️ UI **不该读这个**（`07` §4.1：这一列只写不读，界面用快照里的

@@ -12,6 +12,7 @@
 //! 3. 唯一的例外是「删除到废纸篓」（F2-08），它在 [`trash`] 里，独立成模块，
 //!    **只能由用户的显式动作触发**，且目标是系统回收站而不是原地 unlink。
 
+pub mod datasource;
 pub mod dims;
 pub mod filters;
 pub mod index;
@@ -28,6 +29,9 @@ pub mod trash;
 pub mod verify;
 pub mod watcher;
 
+pub use datasource::{
+    Cursor, DataSource, GroupBound, IN_LIST_MAX, RANGE_MAX, ROW_WINDOW_SCREENS, Scope,
+};
 pub use dims::{DimsProgress, DimsService};
 pub use index::{FailureItem, IndexBoard, IndexSnapshot, IndexState, TaskSnapshot};
 pub use library::{Library, View};
