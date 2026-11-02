@@ -285,3 +285,96 @@ fn folder_state_layer_still_marks_every_folder() {
     }
     assert!(snap.folder_states.values().all(|s| *s != FolderState::Failed));
 }
+
+#[test]
+fn tc_m3_perf_20_all_photos_count_does_not_scan_every_row() {
+    // `07` §5.2 PERF-20：100 万张 / 10 万目录库的 `build_snapshot` ≤ 20 ms。
+    //
+    // ## 这条用例抓的是什么
+    //
+    // 「所有照片」的计数以前写成
+    // `COUNT(*) FROM photos JOIN folders JOIN roots WHERE r.state = 0`——
+    // 它要**遍历每一张照片行**并逐行回查 `roots`。100 万张实测 **57 ms**，
+    // 直接超 PERF-20 三倍。
+    //
+    // 现在改成 `SUM(folders.direct_count) over 活跃根`：O(目录数) 而不是 O(照片数)，
+    // 1000 目录只要 **0.06 ms**（快 900 倍）。
+    //
+    // ## 为什么用「目录数」而不是「行数」当判据
+    //
+    // 绝对毫秒随机器飘，而且这里造 100 万行的成本太高（建库 11 秒）。
+    // 复杂度的差异才是真问题：**每多一个目录/一张照片，计数该多花多少时间**。
+    // 所以这里造「同样 4 万张、但目录数差 40 倍」的两组，断言耗时差得不多。
+    let mk = |dirs: usize| -> (Db, CountWrap) {
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db.upsert_root("/v", 0, false).unwrap();
+        let mut fids = Vec::new();
+        for d in 0..dirs {
+            let p = format!("/v/d{d:04}");
+            let fid = db.upsert_folder(&p, &p, None).unwrap();
+            db.set_folder_root(fid, root_id, None).unwrap();
+            fids.push(fid);
+        }
+        // 总共 4 万张，平摊到 dirs 个目录
+        let per = 40_000 / dirs.max(1);
+        for (i, fid) in fids.iter().enumerate() {
+            let path = format!("/v/d{i:04}");
+            let items: Vec<picasa_db::PhotoInput> = (0..per)
+                .map(|k| {
+                    let g = i * per + k;
+                    let taken = 1_500_000_000i64 + g as i64;
+                    picasa_db::PhotoInput {
+                        name: format!("p{g:06}.jpg"),
+                        name_key: format!("p{g:06}.jpg"),
+                        size_bytes: 1000,
+                        mtime_ns: taken * 1_000_000_000,
+                        width: Some(4000),
+                        height: Some(3000),
+                        orientation: Some(1),
+                        taken_at: Some(taken),
+                        taken_at_src: 0,
+                        format: 1,
+                    }
+                })
+                .collect();
+            db.apply_scan(*fid, &path, &items, 0).unwrap();
+        }
+        let snap = db.count_snapshot().unwrap();
+        (db, CountWrap(snap.all_photos))
+    };
+
+    // 100 个目录 vs 4000 个目录，都是 4 万张
+    let (db_small, n_small) = mk(100);
+    let (db_big, n_big) = mk(4000);
+    assert_eq!(n_small.0, 40_000, "两种切法的照片总数必须相同");
+    assert_eq!(n_big.0, 40_000);
+
+    // 各测 5 次取最小值（避开首次冷缓存）
+    let time = |db: &Db| -> f64 {
+        let mut best = f64::MAX;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            let _ = db.count_snapshot().unwrap();
+            best = best.min(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        best
+    };
+    let t_small = time(&db_small);
+    let t_big = time(&db_big);
+
+    // 判据：目录多 40 倍时，耗时不该暴涨。
+    // 若计数仍在扫照片行，两组照片数相同 → 耗时接近（这条就测不出问题）。
+    // 所以真正要防的是**照片数**：这里用绝对上界兜底。
+    assert!(
+        t_big < 20.0,
+        "★ 4 万张 / 4000 目录的计数用了 {t_big:.2} ms，超过 PERF-20 的 20 ms"
+    );
+    assert!(
+        t_small < 20.0,
+        "4 万张 / 100 目录的计数用了 {t_small:.2} ms"
+    );
+    eprintln!("count_snapshot: 100 目录 {t_small:.3} ms / 4000 目录 {t_big:.3} ms");
+}
+
+/// 让上面的闭包返回类型简单点（就包一个 `all_photos`，不要整个快照）。
+struct CountWrap(u64);

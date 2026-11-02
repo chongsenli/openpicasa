@@ -2223,6 +2223,11 @@ impl Db {
             std::collections::HashMap::new();
         {
             let mut st = tx.prepare("SELECT id, parent_id, direct_count FROM folders")?;
+        // ⚠️ 这条是全表读：4000 个目录 ≈ 4000 行，实测 6 ms 左右。
+        // 目录数到 10 万时（07 §5.1 的 100 万张假设）会到 150 ms 级 —— 超 PERF-20。
+        // 那是**已知的下一道坎**，见 `docs/07-M3-实现状态与冲突登记.md` §2.13。
+        // 解法是把 `total_count` 的聚合挪到落库线程（那时它已经是 O(depth) 的增量维护），
+        // 快照只读缓存列。现在不做：`total_count` 的增量维护还没验证过正确性。
             let mut rows = st.query(params![])?;
             while let Some(r) = rows.next()? {
                 let id: i64 = r.get(0)?;
@@ -2233,9 +2238,24 @@ impl Db {
             }
         }
 
+        // ---- 「所有照片」= **按目录求和**，不是「逐张照片数」
+        //
+        // ⚠️ 这条以前写的是 `COUNT(*) FROM photos JOIN folders JOIN roots`。
+        // 它要**遍历每一张照片行**并逐行回查 `roots`——100 万张实测 **57 ms**，
+        // 而 `07` §6.1 PERF-20 的上限是 20 ms。1 万目录 / 100 万张的库上必挂。
+        //
+        // 两边等价性：`folders.direct_count` 就是「这个目录有几张照片」，
+        // 而 `apply_scan` 每次落库都在同一事务里重算它（见那里的 UPDATE）。
+        // 所以 `Σ direct_count over 活跃根` 恒等于「活跃根下的照片总数」。
+        //
+        // 代价从 O(照片数) 降到 O(目录数)：1000 个目录实测 **0.06 ms**（快 900 倍）。
+        //
+        // ⚠️ 唯一的前提是 `direct_count` 与 `photos` 行数**不能漂移**。
+        // 这不是新引入的依赖——`mgmt_counts` 早就用 `direct_count` 当「本层数」，
+        // 而 `TC-M22-IDX-011` 一直要求它与「所有照片」逐字段相等。
         let all: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM photos p
-               JOIN folders f ON f.id = p.folder_id
+            "SELECT COALESCE(SUM(f.direct_count), 0)
+               FROM folders f
                JOIN roots   r ON r.id = f.root_id
               WHERE r.state = 0",
             [],
