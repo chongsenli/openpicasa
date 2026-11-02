@@ -48,6 +48,7 @@ fn fixture(root: &Path, dirs: &[&str], files_per_dir: usize) -> (Vec<i64>, Db) {
                     orientation: Some(1),
                     taken_at: Some(1_600_000_000),
                     taken_at_src: 0,
+                    format: 0,
                 }
             })
             .collect();
@@ -117,6 +118,7 @@ fn reseed_fingerprints(db: &Db, _root: &Path) {
                 orientation: Some(1),
                 taken_at: Some(1_600_000_000),
                 taken_at_src: 0,
+                format: 0,
             });
         }
         db.apply_scan(f.id, &f.path, &items, 0).unwrap();

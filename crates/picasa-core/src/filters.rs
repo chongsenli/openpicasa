@@ -7,9 +7,33 @@ use std::path::Path;
 
 /// 支持解码的扩展名（**小写比较**，`.jpeg` 与 `.jpg` 等价）。
 ///
-/// M1 不含 RAW（`rawler` 是 LGPL-2.1，M2 才引入；见 02 §11）。
+/// ## M3 FORMAT：从「只认 JPEG + 少数」扩到 `07-A` §4.1 / `08` §1 的全集
+///
+/// 注意这是**候选**，不是结论：真正按什么解码由魔数嗅探决定
+/// （`picasa_imaging::sniff`），一个叫 `.jpg` 的 PNG 会按 PNG 解（FORMAT-01）。
+///
+/// 分级（`08` §1 终版）：
+///
+/// | 级 | 扩展名 |
+/// | --- | --- |
+/// | 已有 | `jpg jpeg jpe jfif` |
+/// | A | `png gif bmp dib tif tiff webp` |
+/// | A+ | `svg svgz` |
+/// | B | `heic heif hif avif`（需 `heif` feature，未编译时进可见失败） |
+/// | C | `dng cr2 cr3 nef arw raf rwl rw2`（只提取内嵌预览） |
+///
+/// ⚠️ **扩展名白名单放宽不等于「都能解」**：B/C 级没编译进来时，
+/// 文件照样入库（用户能看见「有这个文件」），缩略图进**可见失败**队列——
+/// 静默丢弃才是缺陷（R-M2-4）。
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "jpe", "png", "gif", "bmp", "tif", "tiff", "webp",
+    // 已有 / A 级：真正能解码
+    "jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "dib", "tif", "tiff", "webp",
+    // A+ 级：SVG（矢量，按档位栅格化）
+    "svg", "svgz",
+    // B 级：HEIC / AVIF
+    "heic", "heif", "hif", "avif",
+    // C 级：RAW（只取内嵌预览）
+    "dng", "cr2", "cr3", "nef", "arw", "raf", "rwl", "rw2",
 ];
 
 /// 系统/构建产物目录：即使不以 `.` 开头也要跳过。
@@ -77,9 +101,24 @@ mod tests {
     }
 
     #[test]
-    fn raw_and_video_are_not_supported_in_m1() {
-        for ext in ["a.cr2", "a.nef", "a.mp4", "a.mov", "a.psd"] {
+    fn video_and_psd_stay_out_of_scope() {
+        // `07-A` §10：视频要 ffmpeg，PSD/TGA/ICO/JXL 不做。
+        for ext in ["a.mp4", "a.mov", "a.psd", "a.tga", "a.ico", "a.jxl"] {
             assert!(!is_supported_image(&PathBuf::from(ext)), "{ext}");
+        }
+    }
+
+    #[test]
+    fn m3_adds_every_format_in_the_decided_list() {
+        // `08` §1 终版清单：一个都不能漏（漏了就是「用户看到文件但软件不认」）。
+        for ext in [
+            "a.jpg", "a.jpeg", "a.jpe", "a.jfif", // 已有
+            "a.png", "a.gif", "a.bmp", "a.dib", "a.tif", "a.tiff", "a.webp", // A
+            "a.svg", "a.svgz", // A+
+            "a.heic", "a.heif", "a.hif", "a.avif", // B
+            "a.dng", "a.cr2", "a.cr3", "a.nef", "a.arw", "a.raf", "a.rwl", "a.rw2", // C
+        ] {
+            assert!(is_supported_image(&PathBuf::from(ext)), "{ext} 应当在清单里");
         }
     }
 

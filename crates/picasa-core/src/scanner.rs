@@ -895,8 +895,51 @@ fn walk_and_store(
                     orientation: c.orientation,
                     taken_at: c.taken_at,
                     taken_at_src: c.taken_at_src,
+                    // 缓存命中不重读文件头：格式沿用库里的值（`PhotoInput::format`
+                    // 为 0 时落库侧保持不变，不会把已知格式打回未知）
+                    format: 0,
                 }
             } else {
+                // ---- M3 FORMAT-01/03：解码前守门（R-M3-10）
+                //
+                // 读 32 字节文件头：判**实际**格式（不看扩展名），并做尺寸预检。
+                // 这一步是唯一能挡住「30000×30000 的 PNG」的地方——等交给解码器，
+                // 它已经按声称的尺寸分配好 3.6 GB 了。
+                //
+                // ⚠️ 预检失败**不阻止入库**：文件照样出现在栅格里（用户可以看见
+                // 「有这个文件」），只是缩略图进可见失败队列。静默丢弃才是缺陷。
+                let head = read_head(&path, picasa_imaging::HEAD_SNIFF_BYTES);
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                // `admit` 记录的格式写回 `photos.format`（FORMAT-02：按实际格式筛）
+                let (admitted, sniffed) =
+                    picasa_imaging::format::global_guard().admit(&ext, &head);
+                // 实际格式写进 `photos.format`（FORMAT-02：M4 的类型筛选按它，
+                // 而不是按扩展名——一个叫 .jpg 的 PNG 要归到 PNG 组）
+                let actual_format = format_code(&ext, sniffed);
+                if let picasa_imaging::Admit::Reject(reason) = &admitted {
+                    // 不解析 EXIF 了（那要读整个文件），但仍要入库
+                    tracing::debug!(
+                        path = %path.display(),
+                        reason = %reason.label(),
+                        "解码前守门拦下，进可见失败队列"
+                    );
+                    PhotoInput {
+                        name,
+                        name_key,
+                        size_bytes,
+                        mtime_ns,
+                        width: None,
+                        height: None,
+                        orientation: Some(1),
+                        taken_at: (mtime_ns > 0).then_some(mtime_ns / 1_000_000_000),
+                        taken_at_src: 2,
+                        format: actual_format,
+                    }
+                } else {
                 let probe = picasa_imaging::probe(&path).unwrap_or_default();
                 let (taken_at, taken_at_src) = match probe.exif_taken_at {
                     Some(ts) => (Some(ts), 0i64),
@@ -916,6 +959,8 @@ fn walk_and_store(
                     orientation: Some(probe.orientation as i64),
                     taken_at,
                     taken_at_src,
+                    format: actual_format,
+                }
                 }
             };
             items.push(input);
@@ -1244,6 +1289,54 @@ fn heartbeat_loop(inner: Arc<Inner>) {
 
 /// 墙钟毫秒。**故意用墙钟**：系统休眠时单调时钟（`Instant`）也会停，
 /// 只有墙钟能看出"时间跳过了 6 秒"——这正是识别挂起的唯一依据。
+/// 把嗅探结果转成 `photos.format` 的编码（`07-A` §6 的枚举）。
+///
+/// 为什么不用扩展名：扩展名是**候选**，魔数才是结论。一个叫 `.jpg` 的 PNG
+/// 要记成 PNG，否则 M4 的类型筛选会把它归错组。
+///
+/// RAW 容器（TIFF 变体 / ISOBMFF）光看文件头分不出厂商，这时**回落扩展名**——
+/// 那不是猜，而是「容器相同、扩展名是唯一区分线索」，属于 `08` §1 的既定做法。
+fn format_code(ext: &str, fmt: picasa_imaging::SniffedFormat) -> i64 {
+    use picasa_db::PhotoFormat as F;
+    use picasa_imaging::SniffedFormat as S;
+    let by_magic = match fmt {
+        S::Jpeg => Some(F::Jpeg),
+        S::Png => Some(F::Png),
+        S::Gif => Some(F::Gif),
+        S::Bmp => Some(F::Bmp),
+        S::Tiff => None, // TIFF 容器也可能是 DNG/CR2/…，交给扩展名
+        S::Webp => Some(F::Webp),
+        S::Heic => Some(F::Heic),
+        S::Avif => Some(F::Avif),
+        S::Svg => Some(F::Svg),
+        S::RawContainer => None,
+        S::Unknown => None,
+    };
+    let chosen = by_magic
+        .or_else(|| F::from_extension(ext))
+        .unwrap_or(F::Unknown);
+    chosen.code()
+}
+
+/// 读文件头（最多 `n` 字节）。**只读打开**（R-1）。
+///
+/// 读不到（权限、文件消失、空文件）返回空切片——守门器会把它判成 `Unknown`，
+/// 也就是「进可见失败」。这比 panic 或跳过好：跳过等于静默丢弃。
+fn read_head(path: &Path, n: usize) -> Vec<u8> {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut buf = vec![0u8; n];
+    match f.read(&mut buf) {
+        Ok(got) => {
+            buf.truncate(got);
+            buf
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 fn wall_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -1461,6 +1554,7 @@ mod tests {
             orientation: None,
             taken_at: None,
             taken_at_src: 2,
+            format: 0,
         };
         db.apply_scan(fid, "/tmp/a", &[a.clone()], 0).unwrap();
         a.name = "a.JPG".into();

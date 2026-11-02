@@ -9,6 +9,7 @@
 mod decode;
 mod dims;
 mod exif;
+pub mod format;
 mod orient;
 mod scaled;
 mod thumb;
@@ -16,6 +17,10 @@ mod thumb;
 pub use decode::{decode, decode_oriented, probe_dimensions};
 pub use dims::{Dims, DimsError, probe_dims};
 pub use exif::{ExifSummary, probe};
+pub use format::{
+    Admit, DECODE_MAX_PIXELS, DecodeGuard, HEAD_SNIFF_BYTES, RejectReason, SniffedFormat, sniff,
+    sniff_dimensions,
+};
 pub use orient::{apply_orientation, orientation_swaps_axes};
 pub use scaled::{
     SCALED_STATS, ScaledStats, dct_scale_for, decode_jpeg_scaled, mean_abs_error, psnr,

@@ -66,6 +66,7 @@ fn fixture() -> Fixture {
                 orientation: Some(1),
                 taken_at: Some(1_600_000_000 + i as i64),
                 taken_at_src: 0,
+                format: 0,
             })
             .collect();
         db.apply_scan(fid, &path, &items, 0).unwrap();

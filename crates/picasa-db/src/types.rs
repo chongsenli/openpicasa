@@ -27,6 +27,12 @@ pub struct PhotoInput {
     pub orientation: Option<i64>,
     pub taken_at: Option<i64>,
     pub taken_at_src: i64,
+    /// **实际**格式编码（`photos.format`，`07-A` FORMAT-02）。
+    ///
+    /// `0`（`PhotoFormat::Unknown`）= 「这次没判」——落库侧会**保留库里已有的值**，
+    /// 不会把已知格式打回未知。缓存命中的路径就靠这个语义：它不重读文件头，
+    /// 但也不该把上次嗅探到的格式抹掉。
+    pub format: i64,
 }
 
 /// 一首照片记录（含它所在文件夹的路径，省一次 join 查询）。

@@ -1061,6 +1061,9 @@ impl Db {
                     self.conn.execute(
                         "UPDATE photos SET width = ?2, height = ?3, orientation = ?4,
                                            taken_at = ?5, taken_at_src = ?6,
+                                           -- `format = 0` 表示「这次没判」→ 保留库里的值。
+                                           -- 缓存命中的路径不重读文件头，它不该把已知格式抹掉。
+                                           format = CASE WHEN ?7 = 0 THEN format ELSE ?7 END,
                                            dims_status = CASE
                                                WHEN ?2 IS NOT NULL AND ?3 IS NOT NULL THEN 1
                                                WHEN dims_status = 2 THEN 2
@@ -1072,7 +1075,8 @@ impl Db {
                             it.height,
                             it.orientation,
                             it.taken_at,
-                            it.taken_at_src
+                            it.taken_at_src,
+                            it.format
                         ],
                     )?;
                     out.unchanged += 1;
@@ -1083,6 +1087,7 @@ impl Db {
                         "UPDATE photos SET size_bytes = ?2, mtime_ns = ?3, width = ?4,
                                            height = ?5, orientation = ?6, taken_at = ?7,
                                            taken_at_src = ?8, decoder_ver = ?9, thumb_state = 0,
+                                           format = CASE WHEN ?10 = 0 THEN format ELSE ?10 END,
                                            dims_status = CASE
                                                WHEN ?4 IS NOT NULL AND ?5 IS NOT NULL THEN 1
                                                ELSE 0 END
@@ -1096,7 +1101,8 @@ impl Db {
                             it.orientation,
                             it.taken_at,
                             it.taken_at_src,
-                            decoder_ver
+                            decoder_ver,
+                            it.format
                         ],
                     )?;
                     self.conn
@@ -1109,9 +1115,10 @@ impl Db {
                         "INSERT INTO photos
                            (folder_id, name, name_key, size_bytes, mtime_ns, width, height,
                             orientation, taken_at, taken_at_src, thumb_state, decoder_ver,
-                            dims_status)
+                            dims_status, format)
                          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0,?11,
-                                 CASE WHEN ?6 IS NOT NULL AND ?7 IS NOT NULL THEN 1 ELSE 0 END)",
+                                 CASE WHEN ?6 IS NOT NULL AND ?7 IS NOT NULL THEN 1 ELSE 0 END,
+                                 ?12)",
                         params![
                             folder_id,
                             it.name,
@@ -1123,7 +1130,8 @@ impl Db {
                             it.orientation,
                             it.taken_at,
                             it.taken_at_src,
-                            decoder_ver
+                            decoder_ver,
+                            it.format
                         ],
                     )?;
                     out.added += 1;
@@ -1148,6 +1156,31 @@ impl Db {
             "UPDATE folders SET last_scan_at = strftime('%s','now'), is_online = 1,
                                 direct_count = (SELECT COUNT(*) FROM photos WHERE folder_id = ?1)
              WHERE id = ?1",
+            params![folder_id],
+        )?;
+
+        // ---- 递归计数缓存（`07` §4.1：同一事务维护 `total_count`）
+        //
+        // 只沿 parent 链往上走：一个目录的增删只影响它的祖先，不影响兄弟或子孙。
+        // 4330 个目录、平均深 4 层 → 约 4 次 UPDATE，可以忽略。
+        //
+        // ⚠️ 与 `folder_counts()` 的关系：后者读 `direct_count`（本层），
+        // 快照里的 `folder_totals` 由**同事务内存聚合**算出（见 `count_snapshot`）。
+        // 这一列只是缓存，给 M4+ 的查询用；**UI 不读它**。
+        self.conn.execute(
+            "WITH RECURSIVE up(id) AS (
+                 SELECT parent_id FROM folders WHERE id = ?1 AND parent_id IS NOT NULL
+                  UNION ALL
+                 SELECT f.parent_id FROM folders f JOIN up ON f.id = up.id
+                  WHERE f.parent_id IS NOT NULL
+             )
+             UPDATE folders SET total_count = COALESCE(
+                 (SELECT SUM(direct_count) FROM folders c
+                   WHERE c.id = folders.id
+                      OR c.parent_id = folders.id
+                      OR c.parent_id IN (SELECT id FROM folders WHERE parent_id = folders.id))
+             , 0)
+             WHERE id IN (SELECT id FROM up)",
             params![folder_id],
         )?;
         Ok(())
@@ -2292,6 +2325,7 @@ mod tests {
             orientation: Some(1),
             taken_at: taken,
             taken_at_src: if taken.is_some() { 0 } else { 2 },
+            format: 0,
         }
     }
 

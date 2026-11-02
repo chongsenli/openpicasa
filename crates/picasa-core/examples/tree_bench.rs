@@ -47,6 +47,7 @@ fn run_case(n_dirs: usize, per_dir: usize) -> (f64, f64) {
                     orientation: Some(1),
                     taken_at: Some(1_700_000_000 + (i * per_dir + j) as i64),
                     taken_at_src: 0,
+                    format: 0,
                 })
                 .collect();
             db.apply_scan(fid, &dir, &items, 1).unwrap();

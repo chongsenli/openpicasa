@@ -38,6 +38,7 @@ fn input(name: &str) -> PhotoInput {
         orientation: Some(1),
         taken_at: Some(1_300_000_000),
         taken_at_src: 0,
+        format: 0,
     }
 }
 

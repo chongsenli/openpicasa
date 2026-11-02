@@ -134,6 +134,7 @@ fn main() {
                 // 每天 27 张，均匀铺开
                 taken_at: Some(base_ts + (global as i64 / 27) * 86_400),
                 taken_at_src: 0,
+                format: 0,
             });
         }
         db.apply_scan(*fid, &format!("/bench/album-{fi}"), &items, 0)
