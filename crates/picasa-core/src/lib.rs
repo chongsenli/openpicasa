@@ -98,9 +98,20 @@ impl Tier {
         }
     }
 
-    /// 该档是否显示文件名（U-26 待核对，暂定「只在大档显示」）。
+    /// 该档是否显示文件名（U-26）。
+    ///
+    /// **三档全显示**。`01` U-26 的原文是「缩略图**下方**居中显示文件名，单行、
+    /// 超出省略号」，当时只有「哪几档显示」标了 `⚠️待核对`，实现先按
+    /// 「只在大档显示」落地。用户明确要求「图片预览下面要展示图片的名字」，
+    /// 即三档都要有——这也更接近原版 Picasa 3.9 的观感：
+    /// 文件名是**辨认照片的主要线索**，只在大档出现等于默认视图里没有。
+    ///
+    /// ⚠️ 改这个返回值会改变 `GridLayout::cell_h`，进而改变**每屏格数**。
+    /// 虚拟化按行号切分（ADR-0005），行高变化是安全的；但 `grid_scroll` 的
+    /// 像素记忆在**切换档位后**会落到略微不同的位置——换档本来就会重排，
+    /// 不是本改动引入的。
     pub fn shows_filename(self) -> bool {
-        matches!(self, Tier::Large)
+        true
     }
 
     pub fn next_bigger(self) -> Self {
@@ -115,5 +126,33 @@ impl Tier {
             Tier::Large => Tier::Medium,
             Tier::Medium | Tier::Small => Tier::Small,
         }
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::Tier;
+
+    /// U-26：文件名**三档都要显示**。
+    ///
+    /// 这条曾经是 `matches!(self, Tier::Large)`（只在大档显示），而
+    /// `GridLayout::cell_h` 是靠这个返回值算出来的——把它改回「只有大档」，
+    /// 中档/小档的文件名会立刻消失，且**布局仍然是对的**（不会报错、不会错位），
+    /// 所以只有用例能拦住。
+    #[test]
+    fn every_tier_shows_the_filename() {
+        for tier in [Tier::Small, Tier::Medium, Tier::Large] {
+            assert!(
+                tier.shows_filename(),
+                "{tier:?} 档没有显示文件名——U-26 要求缩略图下方始终显示"
+            );
+        }
+    }
+
+    /// 三档的缩略图边长必须严格递增（布局的列数是按 `cell_size` 算出来的）。
+    #[test]
+    fn cell_size_grows_with_tier() {
+        assert!(Tier::Small.cell_size() < Tier::Medium.cell_size());
+        assert!(Tier::Medium.cell_size() < Tier::Large.cell_size());
     }
 }

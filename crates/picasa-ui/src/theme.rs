@@ -196,8 +196,15 @@ impl Metrics {
     pub const GRID_PAD: f32 = 12.0;
     /// U-30：日期分组头高度
     pub const GROUP_HEADER_H: f32 = 26.0;
-    /// U-26：文件名行高（大档才显示）
+    /// U-26：文件名行高（三档都显示，见 `Tier::shows_filename`）
     pub const FILENAME_H: f32 = 16.0;
+    /// U-26：文件名字号。
+    ///
+    /// 11px 对中档（144px 格）偏大——16px 行高里塞 11px 字只剩 5px 余量，
+    /// Windows 上原版 Picasa 的文件名行也明显小于图标下方留白。取 11 是与
+    /// 侧栏行高一致；这里提成常量是为了让「字号」和「行高」能分开调，
+    /// 回填 U-26 时不必再去 grid.rs 里挖魔法数字。
+    pub const FILENAME_FONT_SIZE: f32 = 11.0;
 
     /// 滚动条宽度（U-20：细滚动条，不占内容宽度）
     pub const SCROLLBAR: f32 = 8.0;

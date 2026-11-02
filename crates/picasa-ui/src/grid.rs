@@ -712,12 +712,14 @@ pub fn show(
                 }
             }
 
-            // ---- 文件名（U-26：大档才显示，单行省略）----
+            // ---- 文件名（U-26：缩略图下方居中、单行、超出省略）----
             if let Some(fr) = layout.filename_rect(index) {
                 let fr = fr.translate(origin.to_vec2());
-                let font = FontId::new(11.0, egui::FontFamily::Proportional);
-                let max_chars = ((fr.width() / 6.4).floor() as usize).max(4);
-                let text = ellipsize(&row.name, max_chars);
+                let font = FontId::new(Metrics::FILENAME_FONT_SIZE, egui::FontFamily::Proportional);
+                // 宽度不能按「字符数 × 平均字宽」估：中文一个字约 11px、拉丁约 6px，
+                // 用固定 6.4 会让「苏州行_2011年5月13日.jpg」这种名字在格子里溢出，
+                // 反过来又让全是 ASCII 的名字被截得太短。这里用真实字形宽度量。
+                let text = ellipsize_to_width(ui, &row.name, &font, fr.width());
                 painter.text(
                     fr.center(),
                     Align2::CENTER_CENTER,
@@ -835,6 +837,44 @@ pub fn ellipsize(s: &str, max_chars: usize) -> String {
     out
 }
 
+/// 按**真实字形宽度**截断，超出则加省略号（U-26 的「单行、超出省略号」）。
+///
+/// 为什么不复用 [`ellipsize`]：那个按字符数截，而这个名字行是**混排**的——
+/// 中文一个字约等于 11px、拉丁字母约 6px、数字更窄。按字符数估会出现两种错：
+/// 全中文的名字溢出格子（压到右边邻居），全 ASCII 的名字被截得莫名其妙地短。
+/// 这里直接问 egui 要字形的实际宽度，代价是每个可见格子一次 `layout_no_wrap`，
+/// 但**只有可见的几十个**（虚拟化已经把视口外的都裁掉了），实测可忽略。
+pub fn ellipsize_to_width(ui: &Ui, s: &str, font: &FontId, max_w: f32) -> String {
+    let measure = |t: &str| -> f32 {
+        // `layout_no_wrap` 是 `&mut self`（会往字形缓存里插条目），
+        // 所以走 `fonts_mut` 而不是 `fonts`。这不影响并发：egui 的字体是
+        // 单线程 UI 内共享的，`fonts_mut` 只是把它标成可变借用。
+        ui.fonts_mut(|f| f.layout_no_wrap(t.to_owned(), font.clone(), Color32::WHITE).rect.width())
+    };
+    if measure(s) <= max_w {
+        return s.to_string();
+    }
+    // 二分找「加上省略号后仍放得下」的最长前缀。
+    // 线性往回一个字符一个字符试在最坏情况下要 layout 几十次，这里 log2 次就够。
+    let chars: Vec<char> = s.chars().collect();
+    let mut lo = 0usize;
+    let mut hi = chars.len();
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        let mut probe: String = chars[..mid].iter().collect();
+        probe.push('…');
+        if measure(&probe) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let mut out: String = chars[..lo].iter().collect();
+    // 连一个字符都放不下时，至少留省略号，别返回空串（空串会让格子看起来是坏的）
+    out.push('…');
+    out
+}
+
 /// 工具栏/侧栏共用的「分隔线」。
 pub fn separator_v(painter: &egui::Painter, x: f32, top: f32, bottom: f32, theme: &Theme) {
     painter.line_segment(
@@ -930,10 +970,12 @@ mod tests {
         // 第 cols 张必然是第二行的第一格
         let second_row = layout.thumb_rect(cols).unwrap();
         assert_eq!(second_row.left(), r0.left());
+        // 行距 = 单元格边长 + 文件名行（U-26：三档都显示）+ 间距。
+        // 这里用 `cell_h` 而不是硬写边长，否则以后调文件名行高又会静默错位。
         assert_eq!(
             second_row.top(),
-            r0.top() + Metrics::CELL_SIZES[0] + Metrics::CELL_GAP,
-            "第二行应正好下移一个行距（小档不显示文件名）"
+            r0.top() + layout.cell_h + Metrics::CELL_GAP,
+            "第二行应正好下移一个行距（cell_h 含文件名行）"
         );
     }
 
@@ -1053,5 +1095,46 @@ mod tests {
         let long = ellipsize("苏州行_2011年5月13日_非常长的文件名.jpg", 10);
         assert_eq!(long.chars().count(), 10);
         assert!(long.ends_with('…'));
+    }
+
+    /// 文件名行在所有档位都占位（U-26：三档都显示）。
+    ///
+    /// 守的是**布局**：`cell_h` 少算 `FILENAME_H` 的话，文件名会压到下一行的
+    /// 缩略图上；多算的话每行多一条空带。两种都不报错，只会「看起来怪」，
+    /// 所以只能靠用例拦。
+    #[test]
+    fn filename_row_reserves_height_in_every_tier() {
+        for tier in [Tier::Small, Tier::Medium, Tier::Large] {
+            let layout = GridLayout::build(&[], 1280.0, tier, true);
+            assert!(layout.show_filename, "{tier:?} 档应显示文件名");
+            assert_eq!(
+                layout.cell_h,
+                tier.cell_size() + crate::theme::Metrics::FILENAME_H,
+                "{tier:?} 档的单元格总高没算上文件名行"
+            );
+        }
+    }
+
+    /// 文件名 rect 必须在缩略图**正下方**、同宽、高度正确。
+    #[test]
+    fn filename_rect_sits_below_the_thumbnail() {
+        let photos: Vec<PhotoRow> = (0..3)
+            .map(|i| photo(i, 1_600_000_000 + i as i64))
+            .collect();
+        let layout = GridLayout::build(&photos, 1280.0, Tier::Medium, false);
+        for i in 0..3 {
+            let thumb = layout.thumb_rect(i).unwrap();
+            let name = layout.filename_rect(i).unwrap();
+            assert!(
+                name.top() >= thumb.bottom(),
+                "文件名压到缩略图上了：thumb={thumb:?} name={name:?}"
+            );
+            assert_eq!(name.width(), thumb.width(), "文件名行应与缩略图同宽");
+            assert_eq!(
+                name.height(),
+                crate::theme::Metrics::FILENAME_H,
+                "文件名行高不对"
+            );
+        }
     }
 }
