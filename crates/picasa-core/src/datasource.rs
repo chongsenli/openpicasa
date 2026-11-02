@@ -559,6 +559,7 @@ mod tests {
                 thumb_state: ThumbState::Ok as i64,
                 decoder_ver: 0,
                 eff_taken_at: 1,
+                starred: false,
             })
             .collect();
         assert_eq!(thumb_ids_in(&rows).len(), IN_LIST_MAX);
@@ -583,6 +584,7 @@ mod tests {
                 thumb_state: ThumbState::Ok as i64,
                 decoder_ver: 0,
                 eff_taken_at: 1,
+                starred: false,
             })
             .collect();
         rows[0].thumb_state = ThumbState::Pending as i64;

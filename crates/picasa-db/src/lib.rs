@@ -28,6 +28,7 @@ pub use schema::{
 pub use types::{
     aggregate_totals,
     CacheStats, CachedMeta, CountSnapshot, DimsStats, ExclusionRow, FailureGroup, FailureKind,
+    PhotoFilter, SizeClass,
     FolderFingerprint, FolderRow, FolderTreeRow, PhotoFormat, PhotoInput, PhotoRow, RootRow,
     RootSeed, RootStat, RootWatchRow, ScanApply, TakenFrom, TaskOutcome, TaskRow, ThumbBuf, ThumbState,
     ThumbStats, UPSERT_UNCHANGED, UpgradeReport, V2DataReport, classify_failure,
@@ -78,6 +79,8 @@ pub struct Db {
     /// （`docs/05` §1.4 的降级路径），此时版本号停在 2，但代码已经写成「按 3 查」。
     /// 直接查 `PRAGMA table_xinfo` 一次，是唯一可靠的判据（也顺带覆盖「用户手动改过库」）。
     has_eff_col: bool,
+    /// photos 是否已有 starred 列（v7+）。降级库 / 回退库为 false，查询走常量 0。
+    has_starred_col: bool,
 }
 
 impl Db {
@@ -106,6 +109,7 @@ impl Db {
             path: Some(path),
             upgrade: None,
             has_eff_col: false,
+            has_starred_col: false,
         };
         if report.error.is_none() {
             db.migrate()?;
@@ -118,6 +122,7 @@ impl Db {
         }
         // 必须在 migrate 之后探测：新建的库到这一步才把列建出来。
         db.has_eff_col = Self::detect_eff_col(&db.conn);
+        db.has_starred_col = Self::detect_starred_col(&db.conn);
         let mut report = report;
         report.to = db.schema_version()?;
         db.upgrade = Some(report.clone());
@@ -132,9 +137,11 @@ impl Db {
             path: None,
             upgrade: None,
             has_eff_col: false,
+            has_starred_col: false,
         };
         db.migrate()?;
         db.has_eff_col = Self::detect_eff_col(&db.conn);
+        db.has_starred_col = Self::detect_starred_col(&db.conn);
         Ok(db)
     }
 
@@ -146,6 +153,16 @@ impl Db {
     /// 降级分支——库明明在 v3、索引明明建了，排序却每次全表扫。
     /// 这条是用 `tests/photo_columns.rs` 的执行计划断言抓出来的：同一条 SQL
     /// 拿 sqlite3 直连走 `idx_photos_eff_taken`，经 `Db` 却是 `USE TEMP B-TREE`。
+    fn detect_starred_col(conn: &Connection) -> bool {
+        let Ok(mut st) = conn.prepare("PRAGMA table_xinfo(photos)") else {
+            return false;
+        };
+        let Ok(rows) = st.query_map([], |r| r.get::<_, String>(1)) else {
+            return false;
+        };
+        rows.flatten().any(|name| name == "starred")
+    }
+
     fn detect_eff_col(conn: &Connection) -> bool {
         let Ok(mut st) = conn.prepare("PRAGMA table_xinfo(photos)") else {
             return false;
@@ -180,8 +197,11 @@ impl Db {
         format!(
             "p.id, p.folder_id, f.path, p.name, p.size_bytes, p.mtime_ns,
              p.width, p.height, p.orientation, p.taken_at, p.taken_at_src,
-             p.thumb_state, p.decoder_ver, {} AS eff_taken_at",
-            self.eff_col()
+             p.thumb_state, p.decoder_ver, {} AS eff_taken_at, {}",
+            self.eff_col(),
+            // v7 之前的库（迁移失败回退场景）没有 starred 列：给常量 0，
+            // 让降级路径「能用」而不是一点开就 no such column 崩掉。
+            if self.has_starred_col { "p.starred" } else { "0 AS starred" }
         )
     }
 
@@ -1363,6 +1383,99 @@ impl Db {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// 时间轴（用户功能 #7）：按「有效拍摄时间」的年份分组计数。
+    /// 只统计可见根；年份取 `strftime('%Y', eff, 'unixepoch')`，eff 是秒。
+    pub fn timeline_years(&self) -> Result<Vec<(i32, i64)>> {
+        let eff = self.eff_col();
+        let sql = format!(
+            "SELECT CAST(strftime('%Y', {eff}, 'unixepoch') AS INTEGER) AS y, COUNT(*) AS n
+             FROM photos p JOIN folders f ON f.id = p.folder_id
+             {}
+             GROUP BY y ORDER BY y DESC",
+            self.active_root_clause(),
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i32>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 筛选 + 排序 + 分页的一站式查询（用户功能 #5/#9/#10）。
+    ///
+    /// `filter` 为空（全 None / 空集）时等价于 [`Db::photos_from_visible`]；
+    /// 带 `filter` 时按「与」关系拼条件：日期范围、格式集、尺寸类、收藏、标签。
+    /// `folder_ids` 沿用 `photos_from_visible` 的口径（`None` = 全库）。
+    pub fn photos_filtered(
+        &self,
+        folder_ids: Option<&[i64]>,
+        filter: &PhotoFilter,
+        sort: SortSpec,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<PhotoRow>> {
+        let is_empty = filter.taken_range.is_none()
+            && filter.formats.is_empty()
+            && filter.size_class.is_none()
+            && !filter.starred_only
+            && filter.tag.is_none();
+        if is_empty {
+            return self.photos_from_visible(folder_ids, sort, limit, offset);
+        }
+
+        let mut sql = format!(
+            "SELECT {} FROM photos p JOIN folders f ON f.id = p.folder_id",
+            self.photo_cols()
+        );
+        let mut where_sql = self.build_scope(folder_ids, true).unwrap_or_default();
+        if !where_sql.contains("WHERE") {
+            where_sql.push_str(" WHERE 1=1");
+        }
+        if let Some((from, to)) = filter.taken_range {
+            // 走「有效拍摄时间」（缺失回退 mtime），与排序同口径
+            where_sql.push_str(&format!(
+                " AND {} BETWEEN {from} AND {to}",
+                self.eff_col()
+            ));
+        }
+        if !filter.formats.is_empty() {
+            // 格式名 → 数字编码。RAW 家族合并不进单个数字，用 IN 列表。
+            let codes: Vec<i64> = filter
+                .formats
+                .iter()
+                .filter_map(|f| PhotoFormat::from_slug(f))
+                .map(|pf| pf as i64)
+                .collect();
+            if codes.is_empty() {
+                // 未知格式名：条件恒假，返回空（防拼出非法 SQL）
+                return Ok(Vec::new());
+            }
+            let list = codes.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",");
+            where_sql.push_str(&format!(" AND p.format IN ({list})"));
+        }
+        if let Some(sc) = filter.size_class {
+            where_sql.push_str(&format!(" AND {}", sc.sql_cond()));
+        }
+        if filter.starred_only {
+            where_sql.push_str(" AND p.starred = 1");
+        }
+        if let Some(tag) = &filter.tag {
+            where_sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM tags t WHERE t.photo_id = p.id AND t.label = '{}')",
+                sql_text_literal(tag)
+            ));
+        }
+        sql.push_str(&where_sql);
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&sort.order_by(self.eff_col()));
+        sql.push_str(&format!(" LIMIT {limit}"));
+        if offset > 0 {
+            sql.push_str(&format!(" OFFSET {offset}"));
+        }
+
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], map_photo)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// 拼 `WHERE` 子句（含前导 ` WHERE `）。返回 `None` 表示不加条件（物理全库）。
     ///
     /// `folder_ids == Some(&[])` 是「视图里一个目录都没有」，必须**短路成恒假**，
@@ -1738,6 +1851,20 @@ impl Db {
         let mut st = self.conn.prepare(&sql)?;
         let rows = st.query_map([], map_photo)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 是否存在「用旧版解码器解过」或「一直没人补图」的照片行（`thumb_state=0`）。
+    ///
+    /// M4 启动补全的判据。两种情况都要补：
+    /// ① `decoder_ver < 当前`（版本 bump 后旧失败/旧缓存必须重做）；
+    /// ② ver 相同但仍 `thumb_state=0`（上一轮补图被中断 / 启动扫描只补新增的历史欠账）。
+    pub fn has_rows_with_decoder_ver_before(&self, ver: i64) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM photos WHERE decoder_ver < ?1 OR thumb_state = 0)",
+            [ver],
+            |r| r.get(0),
+        )?;
+        Ok(n != 0)
     }
 
     /// 把失败项重置为「待生成」，返回重置条数。
@@ -2374,7 +2501,126 @@ pub(crate) fn map_photo(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
         thumb_state: r.get(11)?,
         decoder_ver: r.get(12)?,
         eff_taken_at: r.get(13)?,
+        starred: r.get::<_, Option<i64>>(14)?.map(|v| v != 0).unwrap_or(false),
     })
+}
+
+// ============================================================ 收藏 / 标签 / 说明 (v7)
+//
+// 数据边界（产品定义）：只写应用数据库，不写照片文件 / IPTC / XMP。
+
+impl Db {
+    /// 设置 / 取消一批照片的收藏。批量走一个事务：多选 1000 张也是一次落盘。
+    pub fn set_starred(&self, photo_ids: &[i64], on: bool) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut st = tx.prepare("UPDATE photos SET starred = ?1 WHERE id = ?2")?;
+            for id in photo_ids {
+                st.execute(rusqlite::params![if on { 1 } else { 0 }, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 给一批照片打一个标签（幂等：已有的不会重复插）。
+    pub fn add_tag(&self, photo_ids: &[i64], label: &str) -> Result<()> {
+        let label = label.trim();
+        if label.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut st = tx.prepare("INSERT OR IGNORE INTO tags(photo_id, label) VALUES (?1, ?2)")?;
+            for id in photo_ids {
+                st.execute(rusqlite::params![id, label])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 从一批照片上摘掉一个标签。
+    pub fn remove_tag(&self, photo_ids: &[i64], label: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut st = tx.prepare("DELETE FROM tags WHERE photo_id = ?1 AND label = ?2")?;
+            for id in photo_ids {
+                st.execute(rusqlite::params![id, label])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 一批照片各自的标签（多选面板展示用）。只查命中的 id。
+    pub fn tags_of(&self, photo_id: i64) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT label FROM tags WHERE photo_id = ?1 ORDER BY label")?;
+        let rows = st.query_map([photo_id], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 全库标签清单（筛选面板用）：标签名 + 用它多少次，按次数降序。
+    pub fn all_tags(&self) -> Result<Vec<(String, i64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT label, COUNT(*) AS n FROM tags GROUP BY label ORDER BY n DESC, label",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 写说明（一张照片一段；空串 = 删除说明行，不留空壳）。
+    pub fn set_caption(&self, photo_id: i64, text: &str) -> Result<()> {
+        let text = text.trim();
+        if text.is_empty() {
+            self.conn
+                .execute("DELETE FROM captions WHERE photo_id = ?1", [photo_id])?;
+        } else {
+            self.conn.execute(
+                "INSERT INTO captions(photo_id, text) VALUES (?1, ?2)
+                 ON CONFLICT(photo_id) DO UPDATE SET text = excluded.text",
+                rusqlite::params![photo_id, text],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 读说明。没有说明行 = 空串。
+    pub fn caption_of(&self, photo_id: i64) -> Result<String> {
+        let v: Option<String> = self
+            .conn
+            .query_row("SELECT text FROM captions WHERE photo_id = ?1", [photo_id], |r| {
+                r.get(0)
+            })
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        Ok(v.unwrap_or_default())
+    }
+
+    /// 筛选：只收藏。返回收藏的 photo_id 集合（查询侧用它拼 IN 子句太重，
+    /// 直接返回 id 让调用方走 `photos_page` 的 folder_ids 通道不合适——
+    /// 这里提供独立分页查询，见 `starred_page`）。
+    pub fn starred_ids(&self) -> Result<Vec<i64>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT id FROM photos WHERE starred = 1 ORDER BY id")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 筛选：打某标签的照片 id。
+    pub fn ids_with_tag(&self, label: &str) -> Result<Vec<i64>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT photo_id FROM tags WHERE label = ?1 ORDER BY photo_id")?;
+        let rows = st.query_map([label], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
 }
 
 /// `LIKE` 转义，避免用户输入的 `%` / `_` 变成通配符。

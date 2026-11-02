@@ -10,6 +10,8 @@ description = "OpenPicasa M1 · 解码 / EXIF Orientation / 缩略图（无任�
 [dependencies]
 image = { workspace = true }
 jpeg-decoder = { workspace = true }
+heic = { workspace = true }
+rawler = { workspace = true }
 kamadak-exif = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }

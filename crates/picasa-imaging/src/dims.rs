@@ -112,6 +112,35 @@ pub fn probe_dims(path: &Path) -> Result<Dims, DimsError> {
     reader
         .seek(SeekFrom::Start(0))
         .map_err(DimsError::Unreachable)?;
+
+    // M4：HEIF/RAW 的头 `image` 读不了，走新解码器（一次全解码拿尺寸）。
+    // HEIC 单张 0.5～1 s：宽高回填线程本来就是后台的，可接受；
+    // EXIF PixelXDimension 那条快路对 iPhone HEIC 常常已经命中（上面的 if）。
+    {
+        let mut head = [0u8; 32];
+        if reader.seek(SeekFrom::Start(0)).is_ok()
+            && std::io::Read::read_exact(&mut reader, &mut head).is_ok()
+        {
+            match crate::format::sniff(&head) {
+                crate::format::SniffedFormat::Heic
+                | crate::format::SniffedFormat::Avif
+                | crate::format::SniffedFormat::RawContainer => {
+                    return crate::decode(path)
+                        .map(|img| Dims {
+                            width: img.width(),
+                            height: img.height(),
+                            orientation,
+                        })
+                        .map_err(|_| DimsError::Unknown);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(DimsError::Unreachable)?;
     let reader = image::ImageReader::new(reader)
         .with_guessed_format()
         .map_err(|_| DimsError::Unknown)?;

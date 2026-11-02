@@ -66,7 +66,7 @@ fn upgrade_to_v2_keeps_a_brand_new_backup() {
     // v4 是「取待补缩略图」的复合索引，v5 是 M2.2 索引管理（失败分类/任务历史），
     // v6 是 M3 规模与实时性（L1 快筛/递归计数/监视配置/多格式）——
     // 对「v1 库升级」来说都该一口气跑完，最终落在 SCHEMA_VERSION。
-    assert_eq!(SCHEMA_VERSION, 6, "v6 加 L1 快筛列后版本必须是 6");
+    assert_eq!(SCHEMA_VERSION, 7, "M4 加收藏/标签/说明后版本必须是 7");
 
     let report = db.last_upgrade_note().expect("升级现场应被记录");
     assert_eq!(report.from, 1);

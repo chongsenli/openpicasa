@@ -35,8 +35,58 @@ pub struct PhotoInput {
     pub format: i64,
 }
 
+/// 照片筛选条件（用户功能 #5/#9：按日期/类型/尺寸/收藏/标签筛选）。
+///
+/// 各字段是**与**关系；`None` = 不过滤该维度。设计成一个结构而不是 N 个参数：
+/// 筛选面板一次传一份，新增维度不用改全链路签名。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PhotoFilter {
+    /// 拍摄日期范围（epoch 秒，含端点）。
+    pub taken_range: Option<(i64, i64)>,
+    /// 格式类：`jpeg` / `png` / `gif` / `webp` / `bmp` / `tiff` / `svg` / `heic` / `raw`。
+    /// 空集 = 不过滤。RAW 与 JPEG 扩展名混在 `.JPG` 里靠 `photos.format` 列区分。
+    pub formats: Vec<String>,
+    /// 尺寸段（长边像素）：`Small` ≤640 / `Medium` ≤1920 / `Large` >1920。
+    pub size_class: Option<SizeClass>,
+    /// 只看收藏。
+    pub starred_only: bool,
+    /// 只看打这个标签的。
+    pub tag: Option<String>,
+}
+
+/// 尺寸分类（按长边）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SizeClass {
+    /// 长边 ≤ 640
+    #[default]
+    Small,
+    /// 640 < 长边 ≤ 1920
+    Medium,
+    /// 长边 > 1920
+    Large,
+}
+
+impl SizeClass {
+    pub fn label(self) -> &'static str {
+        match self {
+            SizeClass::Small => "小图 (≤640px)",
+            SizeClass::Medium => "中图 (640–1920px)",
+            SizeClass::Large => "大图 (>1920px)",
+        }
+    }
+
+    /// 该类的 SQL 长边条件（`MAX(width,height)`）。
+    pub fn sql_cond(self) -> &'static str {
+        match self {
+            SizeClass::Small => "MAX(COALESCE(p.width,0), COALESCE(p.height,0)) BETWEEN 1 AND 640",
+            SizeClass::Medium => "MAX(COALESCE(p.width,0), COALESCE(p.height,0)) > 640 AND MAX(COALESCE(p.width,0), COALESCE(p.height,0)) <= 1920",
+            SizeClass::Large => "MAX(COALESCE(p.width,0), COALESCE(p.height,0)) > 1920",
+        }
+    }
+}
+
 /// 一首照片记录（含它所在文件夹的路径，省一次 join 查询）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PhotoRow {
     pub id: i64,
     pub folder_id: i64,
@@ -56,6 +106,8 @@ pub struct PhotoRow {
     /// 重复保留了 `taken_at` 是**有意**的：界面要区分「EXIF 拍摄时间」与「回退值」
     /// （`taken_at_src` 决定标签怎么写），而排序与分组只认这一个口径。
     pub eff_taken_at: i64,
+    /// 收藏（星标）。只存应用数据库（v7），不写照片文件。
+    pub starred: bool,
 }
 
 impl PhotoRow {
@@ -595,6 +647,29 @@ impl PhotoFormat {
     pub fn code(self) -> i64 {
         self as i64
     }
+
+    /// 筛选面板的格式名 → 编码。`raw` 展开成 RAW 家族全体。
+    /// （`photos_filtered` 的 `formats` 集合用小写 slug。）
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        Some(match slug {
+            "jpeg" => Self::Jpeg,
+            "png" => Self::Png,
+            "gif" => Self::Gif,
+            "bmp" => Self::Bmp,
+            "tiff" => Self::Tiff,
+            "webp" => Self::Webp,
+            "svg" => Self::Svg,
+            "heic" => Self::Heic,
+            "avif" => Self::Avif,
+            "dng" => Self::Dng,
+            "cr2" => Self::Cr2,
+            "nef" => Self::Nef,
+            "arw" => Self::Arw,
+            "cr3" => Self::Cr3,
+            _ => return None,
+        })
+    }
+
 
     /// 从库里的整数还原。**不猜**：未知编码返回 `Unknown` 而不是随便归一，
     /// 这样「库比程序新」时会显示成未知格式，而不是错误地当成 JPEG。

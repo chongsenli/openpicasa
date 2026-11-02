@@ -27,7 +27,7 @@ pub struct Migration {
 /// 因为它成文时代码停在 v2；本仓库在 M2.1 收尾时又落了 v3（`eff_taken_at`）与
 /// v4（待补缩略图索引）。**内容按规格做，版本号以代码为准 = 5**，
 /// 已登记进 `docs/06` §12.1 冲突表。
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// v1 · M1 最小集（02 §5.3）。
 ///
@@ -364,6 +364,33 @@ INSERT OR IGNORE INTO settings(key, value) VALUES ('grid_cell_px', NULL);
 INSERT OR IGNORE INTO settings(key, value) VALUES ('recurse_subfolders', '0');
 "#;
 
+pub const V7: &str = r#"
+-- ============================================================== v7：收藏 / 标签 / 说明
+-- 用户功能清单 #8/#9：收藏（星标）、标签、说明。数据边界（产品定义）：
+-- **只存应用数据库**，不写照片文件、不写 IPTC/XMP；是否写回留到以后单独决策。
+--
+-- 设计取舍：
+-- - `starred` 放 photos 列（高频布尔，筛选/排序都要走它，JOIN 一张表不值）；
+-- - 标签与说明是「用户创作数据」，独立成表，`idx_rebuild` 之类重建索引的操作
+--   **绝不能碰**（文档承诺「索引库可随时删掉重建」只对派生数据成立）；
+-- - 标签 (photo_id, label) 主键去重，一张照片多标签、一个标签多照片。
+ALTER TABLE photos ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS captions (
+    photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+    text     TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS tags (
+    photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    label    TEXT NOT NULL,
+    PRIMARY KEY (photo_id, label)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_tags_label ON tags(label);
+CREATE INDEX IF NOT EXISTS idx_photos_starred ON photos(starred) WHERE starred = 1;
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -394,6 +421,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 6,
         name: "m3_scale_realtime_formats",
         sql: V6,
+    },
+    Migration {
+        version: 7,
+        name: "m4_favorites_tags_captions",
+        sql: V7,
     },
 ];
 

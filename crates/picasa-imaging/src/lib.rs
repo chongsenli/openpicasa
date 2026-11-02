@@ -13,6 +13,7 @@ mod exif;
 // 也能拿到同一批畸形样本（避免两处各造一套、各自漂移）。
 pub mod fixtures;
 pub mod format;
+pub mod histogram;
 mod orient;
 mod scaled;
 mod thumb;
@@ -20,6 +21,7 @@ mod thumb;
 pub use decode::{decode, decode_oriented, probe_dimensions};
 pub use dims::{Dims, DimsError, probe_dims};
 pub use exif::{ExifSummary, probe};
+pub use histogram::{Histogram, histogram};
 pub use format::{
     Admit, DECODE_MAX_PIXELS, DecodeGuard, HEAD_SNIFF_BYTES, RejectReason, SniffedFormat, sniff,
     sniff_dimensions,
@@ -34,7 +36,11 @@ pub use thumb::{
 };
 
 /// 解码器版本。**任何影响像素输出的改动都必须 +1**，否则 10 万张的旧缓存不会失效（02 §5.3）。
-pub const DECODER_VER: i64 = 1;
+///
+/// M4 = 2：新增 HEIC/HEIF/AVIF 与 RAW 的解码路径（`decode.rs` 的魔数分流）。
+/// 之前这些格式全部落在 `thumb_state=2`（解码失败）——版本号不 bump 的话，
+/// L2 校验会认为「旧失败与现在无关」，用户的 HEIC 永远停在失败列表。
+pub const DECODER_VER: i64 = 2;
 
 /// T0（栅格档）缩略图长边。取 512：三档单元格最大 200pt，2x Retina 下需要 400px，
 /// 留出余量给「大档 + 用户放大系统缩放」的情况，同时保证一张缩略图 < 40KB。
