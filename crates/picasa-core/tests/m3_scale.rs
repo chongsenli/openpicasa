@@ -177,6 +177,82 @@ fn tc_m3_scale_003b_paging_does_not_skip_photos_in_the_same_second() {
     assert_eq!(seen.len(), 500, "翻页必须不重不漏（实际 {} 张）", seen.len());
 }
 
+/// 键集游标的**平局决胜键**必须与 `ORDER BY` 一致。
+///
+/// ## 这条用例抓的是什么
+///
+/// `ORDER BY eff_taken_at DESC, name_key ASC` —— 同一时刻的照片按**文件名**排。
+/// 而键集游标如果写成 `(eff = ? AND id > ?)`，就会跳过「同一时刻、name_key 更大
+/// 但 id 更小」的照片。它不报错、不崩溃，只是**滚到底少几张**。
+///
+/// ## 为什么造假数据要这么造
+///
+/// 名字顺序必须是「与 id 顺序无关的置换」。若名字按 `i` 顺序生成（或完全倒序），
+/// 两种顺序同构，用 id 当平局键也能过——**用例就白写了**。
+#[test]
+fn keyset_tiebreak_follows_name_key_not_id() {
+    use picasa_db::PhotoInput;
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Db::open(tmp.path().join("tie.sqlite")).unwrap();
+    let dir = tmp.path().join("p");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.to_string_lossy().to_string();
+    let root_id = db.upsert_root(&path, 0, false).unwrap();
+    let fid = db.upsert_folder(&path, &path.to_lowercase(), None).unwrap();
+    db.set_folder_root(fid, root_id, None).unwrap();
+
+    // 名字用置换 → 与 id 顺序无关；全部同一秒（强制走平局路径）
+    let n = 400usize;
+    let perm: Vec<usize> = (0..n).map(|i| (i * 137 + 41) % n).collect();
+    let items: Vec<PhotoInput> = (0..n)
+        .map(|i| {
+            let name = format!("zz{:04}.jpg", perm[i]);
+            PhotoInput {
+                name: name.clone(),
+                name_key: name.to_lowercase(),
+                size_bytes: 100,
+                mtime_ns: 1_600_000_000_000_000_000,
+                width: Some(800),
+                height: Some(600),
+                orientation: Some(1),
+                taken_at: Some(1_600_000_000),
+                taken_at_src: 0,
+                format: 1,
+            }
+        })
+        .collect();
+    db.apply_scan(fid, &path, &items, 0).unwrap();
+
+    // 直接走键集：从游标之后取，重复直到取空
+    let mut cursor: Option<(i64, i64)> = None;
+    let mut ids: Vec<i64> = Vec::new();
+    loop {
+        let rows = db
+            .range_keyset(Some(&[fid]), SortSpec::default(), 0, 37, cursor)
+            .unwrap();
+        if rows.is_empty() {
+            break;
+        }
+        // 用最后一行做下一个游标（排序键 + id）
+        let last = rows.last().unwrap();
+        cursor = Some((last.effective_taken_at(), last.id));
+        ids.extend(rows.iter().map(|r| r.id));
+        if ids.len() > n + 10 {
+            panic!("翻页没有收敛（{} 行），说明平局条件不前进", ids.len());
+        }
+    }
+    let before = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        n,
+        "★ 键集翻页漏了照片：抓 {before} 行、去重 {} 行，期望 {n} 行。\
+         典型原因是游标平局键（id）与 ORDER BY 的平局键（name_key）不一致",
+        ids.len()
+    );
+}
+
 #[test]
 fn tc_m3_scale_004_window_stays_bounded_while_dragging_the_scrollbar() {
     // 「快速拖动滚动条」是最坏情况：每一步都 miss。
@@ -262,4 +338,79 @@ fn subtree_scope_lists_its_ordered_folders() {
     assert_eq!(scope.folders(), Some(&ordered[..]));
     assert_eq!(Scope::Folder(7).folders(), Some(&[7i64][..]));
     assert_eq!(Scope::AllPhotos.folders(), None);
+}
+/// 键集分页的**平局决胜**必须与 `ORDER BY` 一致（`07` §5.2 SCALE-03）。
+///
+/// ## 这条用例是怎么被抓出来的
+///
+/// 早先只测了「同一秒拍的 500 张」——但那个用例里文件名是顺序生成的，
+/// `name_key` 顺序与 `id` 顺序**同构**，于是「键集游标用 id、ORDER BY 用 name_key」
+/// 这个错配被完全掩盖了：两种顺序一致时，用哪个都不会漏。
+///
+/// 这里的名字顺序与 id 顺序**无关**（固定置换 `(i*137+41) % n`），
+/// 一旦平局决胜口径不一致，翻页就会漏行或重行。
+#[test]
+fn keyset_tiebreak_matches_the_order_by_clause() {
+    // 造一批「同一秒拍摄、文件名乱序」的照片：
+    // ORDER BY 用 name_key 做 tiebreak，而键集游标用 id —— 两者不一致时会漏/重。
+    use picasa_core::datasource::{DataSource, Scope};
+    use picasa_db::{Db, PhotoInput, SortSpec};
+    use std::sync::{Arc, Mutex};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Db::open(tmp.path().join("t.sqlite")).unwrap();
+    let dir = tmp.path().join("p");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.to_string_lossy().to_string();
+    let root_id = db.upsert_root(&path, 0, false).unwrap();
+    let fid = db.upsert_folder(&path, &path.to_lowercase(), None).unwrap();
+    db.set_folder_root(fid, root_id, None).unwrap();
+
+    // 名字顺序与 id 顺序**故意无关**（用一个固定的乱序排列）。
+    // ⚠️ 早先用「完全倒序」测过，它恰好通过——因为 name_key 倒序与 id 倒序同构，
+    // 掩盖了「键集游标用 id 而 ORDER BY 用 name_key」的错配。
+    // 2000 行：足够让窗口（247 行）翻出去，真正走到键集查询
+    let n_total = 2000usize;
+    let perm: Vec<usize> = (0..n_total).map(|i| (i * 137 + 41) % n_total).collect();
+    let items: Vec<PhotoInput> = (0..n_total)
+        .map(|i| {
+            let name = format!("zz{:04}.jpg", perm[i]);
+            PhotoInput {
+                name: name.clone(),
+                name_key: name.to_lowercase(),
+                size_bytes: 100,
+                mtime_ns: 1_000_000_000_000_000_000,
+                width: Some(800),
+                height: Some(600),
+                orientation: Some(1),
+                taken_at: Some(1_600_000_000), // 全部同一秒
+                taken_at_src: 0,
+                format: 1,
+            }
+        })
+        .collect();
+    db.apply_scan(fid, &path, &items, 0).unwrap();
+    let counts = db.count_snapshot().unwrap();
+    let db = Arc::new(Mutex::new(db));
+
+    let mut ds = DataSource::new(db.clone(), Scope::Folder(fid), SortSpec::default(), 1, &counts).unwrap();
+    let mut seen = Vec::new();
+    let mut start = 0;
+    while start < ds.len() {
+        let n = 7.min(ds.len() - start);
+        let rows = ds.range(start, n).unwrap();
+        seen.extend(rows.iter().map(|r| r.id));
+        start += n;
+    }
+    let before = seen.len();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(
+        seen.len(),
+        ds.len(),
+        "★ 翻页漏了照片：抓 {before} 行、去重后 {} 行，期望 {} 行。\
+         这类缺陷不会报错，只会让用户「滚到底少了几张」",
+        seen.len(),
+        ds.len()
+    );
 }

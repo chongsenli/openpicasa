@@ -555,13 +555,42 @@ impl Db {
             let (k, id) = cursor.expect("use_keyset 时 cursor 必然存在");
             let col = self.keyset_col(sort.key);
             let op = if sort.descending { "<" } else { ">" };
-            // 元组比较：`(k < ?) OR (k = ? AND id < ?)`
-            // 为什么不用 SQLite 的 `(a, b) < (?, ?)` 行值语法：那需要 SQLite 3.15+，
-            // 而且在这种「列已在索引里有序」的场合反而让优化器犹豫。
-            // 展开成 OR 形式能稳定命中 `idx_photos_taken_id` 这类复合索引。
-            where_sql.push(format!(
-                "({col} {op} {k} OR ({col} = {k} AND p.id {op} {id}))"
-            ));
+            // ⚠️ **平局决胜必须与 `ORDER BY` 逐字一致**。
+            //
+            // `SortSpec::order_by(TakenAt)` 是 `<eff> DESC, name_key ASC`
+            // （见 `order_by` 的实现）——也就是说同一时刻的照片按**文件名**排，
+            // 而主排序键相同时的游标必须用 `name_key`，**不能用 `id`**。
+            //
+            // 细节：这仍然是「正确但可能重复/遗漏」的经典陷阱——
+            // 若平局条件写成 `eff = ? AND id < ?`，而实际顺序是 `eff, name_key`，
+            // 那么一次翻页会跳过所有「同一时刻且 name_key 更小但 id 更大」的照片。
+            // 它不会报错，只会让用户滚到底少几张（`keyset_tiebreak_matches_the_order_by_clause` 守着）。
+            //
+            // 取游标那一行的 `name_key` 作为平局键。
+            let tie: (Option<String>, i64) = self
+                .conn
+                .query_row(
+                    "SELECT name_key, id FROM photos p WHERE p.id = ?1",
+                    params![id],
+                    |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .optional()?
+                .unwrap_or((None, id));
+            // 注意 `sort.descending` 只管**主键**；`order_by` 里平局键永远是 `name_key ASC`
+            // （见 `SortSpec::order_by`）。所以平局比较一律用 `>`（「名字比游标大」才排在后面）。
+            match tie.0 {
+                Some(name_key) => {
+                    let escaped = sql_text_literal(&name_key);
+                    where_sql.push(format!(
+                        "({col} {op} {k} OR ({col} = {k} AND p.name_key > '{escaped}'))"
+                    ));
+                }
+                None => {
+                    where_sql.push(format!(
+                        "({col} {op} {k} OR ({col} = {k} AND p.id {op} {id}))"
+                    ));
+                }
+            }
         }
 
         sql.push_str(&format!(" WHERE {}", where_sql.join(" AND ")));
@@ -849,6 +878,20 @@ impl Db {
             .conn
             .query_row(&sql, params![key], map_photo)
             .optional()?)
+    }
+
+    /// 全库按格式分组的张数（迁移验收与诊断用）。
+    pub fn format_histogram(&self) -> Result<Vec<(i64, u64)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT format, COUNT(*) FROM photos GROUP BY format ORDER BY 2 DESC")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (f, n) = row?;
+            out.push((f, n.max(0) as u64));
+        }
+        Ok(out)
     }
 
     /// 一张照片的 `format` 编码。
@@ -2240,6 +2283,15 @@ pub(crate) fn map_photo(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
 }
 
 /// `LIKE` 转义，避免用户输入的 `%` / `_` 变成通配符。
+/// 把字符串转义成 SQL 单引号字面量的内容（只处理 `'` 与 `\0`）。
+///
+/// ⚠️ 这是**唯一**该用来拼字符串字面量的函数。`escape_like` 是给 `LIKE` 用的
+/// （它转义 `%` `_` `\`），两者不能混用——把 LIKE 转义喂给普通等值比较，
+/// 会让文件名里的 `%` 被当成字面量反斜杠加百分号，于是「查不到」。
+fn sql_text_literal(s: &str) -> String {
+    s.replace('\'', "''").replace('\0', "")
+}
+
 fn escape_like(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for c in s.chars() {
