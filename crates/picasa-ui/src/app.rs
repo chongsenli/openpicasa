@@ -61,6 +61,14 @@ pub struct OpenPicasaApp {
     progress: IndexProgressUi,
     /// 文件系统监视管理器（`07` §2）。每根一个 Watcher，集中管生命周期与降级状态。
     watch: picasa_core::WatchManager,
+    /// 缩略图滑块状态机（`07-A` §2 ZOOM）。连续尺寸 + 回滞 + 拖动中不换纹理。
+    zoom: picasa_core::ZoomState,
+    /// 当前显示器的 DPI 缩放（Retina = 2.0）。
+    ///
+    /// 滑块选档必须用它：**512 逻辑在 2× 屏上要 1024 物理**，
+    /// 按逻辑 px 选档会让所有 Retina 机器的缩略图糊一半（`07-A` §2.2）。
+    /// 每帧从 egui 读一次（多屏拖动窗口时它会变）。
+    dpi_scale: f32,
 
     viewer: Option<Viewer>,
 
@@ -187,6 +195,9 @@ impl OpenPicasaApp {
         // 回填和索引共用一把 DB 锁与同一块进度板：它自己会看板子决定要不要让路
         let dims = DimsService::new(lib.db.clone(), board.clone());
 
+        // 读滑块设置要在 `lib` 被移进结构体之前（它是全局一份，不随视图变）
+        let zoom_setting = load_zoom_setting(&lib);
+
         let mut app = Self {
             lib,
             paths,
@@ -201,6 +212,10 @@ impl OpenPicasaApp {
             board,
             progress: IndexProgressUi::new(),
             watch: picasa_core::WatchManager::new(),
+            // `settings.grid_cell_px`（`07-A` ZOOM-06）：全局一份，不按文件夹记忆（P-28）。
+            // 读库失败/没设过 → 默认刻度（`ZoomState::from_setting(None)`）。
+            zoom: picasa_core::ZoomState::from_setting(zoom_setting),
+            dpi_scale: 1.0,
             viewer: None,
             search_buf,
             sort_menu_open: false,
@@ -707,6 +722,43 @@ impl OpenPicasaApp {
         self.index.enqueue_scan(&roots);
     }
 
+    /// 跳到某个刻度点（`07-A` ZOOM-02：`⌘1` 小 / `⌘2` 大）。
+    fn set_zoom_point(&mut self, index: usize) {
+        let px = picasa_core::SNAP_POINTS[index.min(2)];
+        self.zoom.drag_to(px, std::time::Instant::now());
+        self.zoom.end_drag(std::time::Instant::now());
+        self.persist_zoom();
+    }
+
+    /// 把滑块值写进 `settings.grid_cell_px`（`07-A` ZOOM-06：全局一份，重启恢复）。
+    ///
+    /// 写入是**低频**的（只在松手 / 刻度变化时），不会每帧写一次库。
+    fn persist_zoom(&mut self) {
+        if let Ok(db) = self.lib.db() {
+            let _ = db.set_grid_cell_px(self.zoom.to_setting());
+        }
+    }
+
+    /// 结算滑块：150 ms 静默之后决定要不要换纹理档位（`07-A` ZOOM-04）。
+    fn tick_zoom(&mut self) {
+        let now = std::time::Instant::now();
+        if self.zoom.pending_settle(now) {
+            // 还在拖动 / 还在结算窗口：只改布局，**不请求任何纹理**。
+            // 这就是 ZOOM-04 的「拖动期间零解码投递」。
+            return;
+        }
+        let dpi = self.dpi_scale;
+        if self.zoom.settle(now, dpi).is_some() {
+            // 档位真的变了：清掉纹理缓存里不再适配的旧档。
+            //
+            // 为什么整片清而不是逐张判断：三档并存时「哪张是哪档」要额外记一张表，
+            // 而换档本来就是低频动作（一次拖动最多一次），整片清然后按新档重传
+            // 比维护第二份账本简单得多。`TextureBudget` 会立刻把已释放的字节销账。
+            self.cache.clear();
+            self.persist_zoom();
+        }
+    }
+
     /// 同步监视器到当前的根集合（`07` WATCH-01）。
     ///
     /// 调用的时机有三个：启动、根增删、设置页拨开关。
@@ -916,8 +968,11 @@ impl OpenPicasaApp {
                     self.lib.toast = Some((format!("已放入托盘 {n} 张"), 2.5));
                 }
             }
-            KeyAction::TierSmall => self.lib.set_tier(Tier::Small),
-            KeyAction::TierLarge => self.lib.set_tier(Tier::Large),
+            // M3 ZOOM：`⌘1` / `⌘2` 从「三档」改成「滑块刻度点」。
+            // 功能没丢（R-M22-5）：它们仍然改变缩略图尺寸，只是从离散三档变成
+            // 连续滑块上的两个刻度点；`⌘0` 回默认刻度。
+            KeyAction::TierSmall => self.set_zoom_point(0),
+            KeyAction::TierLarge => self.set_zoom_point(2),
             KeyAction::ToggleFullscreen => {
                 let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
@@ -1070,7 +1125,10 @@ impl OpenPicasaApp {
                             self.pick_sort(key);
                             self.sort_menu_open = false;
                         }
+                        // ZOOM-02：工具栏按钮保留为「循环三刻度」（零功能丢失）
                         ToolbarAction::CycleTier => {
+                            self.zoom.cycle_point();
+                            self.persist_zoom();
                             let next = match self.lib.tier {
                                 Tier::Small => Tier::Medium,
                                 Tier::Medium => Tier::Large,
@@ -1104,8 +1162,24 @@ impl OpenPicasaApp {
             .exact_size(Metrics::STATUS_H)
             .frame(egui::Frame::new().fill(theme.chrome_bg))
             .show(ui, |ui| {
-                let out =
-                    statusbar::show(ui, &self.lib, &theme, &snap, &self.mgmt, &self.verify_text);
+                let out = statusbar::show(
+                    ui,
+                    &self.lib,
+                    &theme,
+                    &snap,
+                    &self.mgmt,
+                    &self.verify_text,
+                    self.zoom.cell_px(),
+                );
+                // 拖动中只改布局、**不换纹理**（ZOOM-04）。
+                // 松手后交给 `settle`：它在 150 ms 静默之后才决定要不要换档。
+                if let Some(px) = out.zoom_drag {
+                    let now = std::time::Instant::now();
+                    self.zoom.drag_to(px, now);
+                }
+                if out.zoom_released {
+                    self.zoom.end_drag(std::time::Instant::now());
+                }
                 if out.index_clicked {
                     // M2.2 §2.6：唯一入口 → 索引管理页（并自动定位到有问题的标签）。
                     // 旧的 `progress.open_panel()` 不再挂在这里——右下角弹框仍然自己出现
@@ -2026,6 +2100,16 @@ impl OpenPicasaApp {
     }
 }
 
+/// 从 `settings.grid_cell_px` 读滑块值（`07-A` ZOOM-06）。
+///
+/// 读不到（库没建好 / 值坏）就返回 `None` → 用默认刻度。
+/// **不在这里报警**：滑块位置读不到不影响任何功能，只为它写一条日志反而是噪音。
+fn load_zoom_setting(lib: &Library) -> Option<f32> {
+    let db = lib.db().ok()?;
+    let v = db.grid_cell_px().ok()??;
+    Some(v as f32)
+}
+
 impl eframe::App for OpenPicasaApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -2037,6 +2121,9 @@ impl eframe::App for OpenPicasaApp {
             self.sync_watchers();
         }
         self.tick_watchers();
+        // 每帧刷新 DPI（多屏移动窗口时会变），再结算滑块
+        self.dpi_scale = ctx.pixels_per_point();
+        self.tick_zoom();
         self.flush_reload(&ctx);
         self.handle_keys(&ctx);
         // 索引进度：按 250 ms 节流取快照（不在 UI 线程做任何索引工作）

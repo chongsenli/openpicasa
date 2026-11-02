@@ -34,13 +34,17 @@ use picasa_core::{IndexEntryState, IndexSnapshot, Library, MgmtSnapshot, View};
 use crate::theme::{Metrics, Theme};
 
 /// 状态栏的一帧输出（只有「入口被点」需要上层处理）。
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct StatusbarOut {
     /// 索引入口被点（打开索引管理页）
     pub index_clicked: bool,
     /// 「诊断」入口被点（F 加固）。**过渡期保留**，见文件头注释。
     pub diag_clicked: bool,
     pub button_rect: Option<Rect>,
+    /// 滑块被拖到的值（`None` = 本帧没动）
+    pub zoom_drag: Option<f32>,
+    /// 滑块松手（`07-A` ZOOM-01：松手才结算档位）
+    pub zoom_released: bool,
 }
 
 /// 索引入口按钮宽度（图标 + 文案 + 角标）。定值，避免文字长度影响布局。
@@ -50,6 +54,7 @@ const DIAG_BTN_W: f32 = 52.0;
 /// 角标圆点直径
 const BADGE_D: f32 = 14.0;
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     lib: &Library,
@@ -58,6 +63,8 @@ pub fn show(
     mgmt: &MgmtSnapshot,
     // §4.8 启动校验的进度文案（空 = 没在跑）
     verify_text: &str,
+    // 缩略图滑块当前值（`07-A` ZOOM-01：底部状态栏右侧，原版位置）
+    zoom_px: f32,
 ) -> StatusbarOut {
     let mut out = StatusbarOut::default();
     let rect = Rect::from_min_size(
@@ -119,9 +126,38 @@ pub fn show(
     );
     out.diag_clicked = dresp.clicked();
 
+    // ---- M3-UI-01 / ZOOM-01：缩略图尺寸滑块（底部状态栏右侧，原版位置 ⚠️ 待 PM 量图）
+    //
+    // 为什么放在状态栏而不是工具栏：原版 Picasa 就在这里，而且它不占栅格宽度
+    // （与索引入口同一个理由：`04` §2.2 的「不重新排版整个界面」）。
+    let slider_w = 132.0;
+    let slider_h = (Metrics::STATUS_H - 8.0).max(10.0);
+    let slider = Rect::from_center_size(
+        pos2(diag.left() - 12.0 - slider_w / 2.0, rect.center().y),
+        vec2(slider_w, slider_h),
+    );
+    let mut v = zoom_px;
+    let resp = ui.put(
+        slider,
+        egui::Slider::new(
+            &mut v,
+            picasa_core::CELL_MIN_PX..=picasa_core::CELL_MAX_PX,
+        )
+        .show_value(false)
+        .trailing_fill(true),
+    );
+    if resp.changed() {
+        out.zoom_drag = Some(v);
+    }
+    if resp.drag_stopped() || (resp.clicked() && !resp.dragged()) {
+        out.zoom_released = true;
+    }
+    // tooltip 显示具体像素（`07-A` ZOOM-10：tooltip「N px」）
+    resp.clone().on_hover_text(format!("{} px", v.round() as i32));
+
     if lib.selected_count() > 0 {
         painter.text(
-            pos2(diag.left() - 10.0, rect.center().y),
+            pos2(slider.left() - 10.0, rect.center().y),
             Align2::RIGHT_CENTER,
             format!("已选 {} 张", lib.selected_count()),
             font,

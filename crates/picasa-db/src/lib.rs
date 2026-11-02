@@ -438,6 +438,16 @@ impl Db {
             .is_some())
     }
 
+    /// `settings.grid_cell_px`（`07-A` ZOOM-06）。`None` = 用默认刻度。
+    pub fn grid_cell_px(&self) -> Result<Option<i64>> {
+        self.setting_i64("grid_cell_px")
+    }
+
+    /// 写 `settings.grid_cell_px`。
+    pub fn set_grid_cell_px(&self, px: i64) -> Result<()> {
+        self.set_setting_raw("grid_cell_px", Some(&px.to_string()))
+    }
+
     /// 整数设置项。`None` = 用默认值（行不存在或值为 NULL 都算）。
     pub fn setting_i64(&self, key: &str) -> Result<Option<i64>> {
         Ok(self
