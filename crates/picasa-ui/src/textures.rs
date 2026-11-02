@@ -19,6 +19,7 @@ use picasa_db::{Db, PhotoRow};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::theme::Metrics;
+use picasa_core::texbudget::TextureBudget;
 
 /// 一张缩略图在本帧的可用性。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +33,15 @@ pub enum TexState {
 }
 
 pub struct TextureCache {
+    /// 字节账本（`07` §6.1 PERF-08）。与 `textures` 一一对应，但**分开存**：
+    /// 账本要能被单测直接构造，而 `TextureHandle` 离不开 `egui::Context`。
+    pub budget: TextureBudget,
+    /// 本帧待释放的纹理（帧末统一 drop）。
+    ///
+    /// 为什么不在 [`TextureCache::evict_if_needed`] 里直接 drop：
+    /// 帧中 drop 会让本帧剩下的绘制拿到失效的 `TextureId`（画面上是若干灰块闪一下）。
+    /// 攒到帧末统一释放，那一帧的绘制已经结束。
+    pending_evict: Vec<i64>,
     textures: HashMap<i64, TextureHandle>,
     /// 每张纹理的像素尺寸（egui 没有反查接口，只能自己记）
     sizes: HashMap<i64, egui::Vec2>,
@@ -50,7 +60,14 @@ impl Default for TextureCache {
 
 impl TextureCache {
     pub fn new() -> Self {
+        Self::with_budget(TextureBudget::from_physical_memory(physical_memory_mb()))
+    }
+
+    /// 指定预算（测试与诊断用：真机上按物理内存算，测试里给固定值）。
+    pub fn with_budget(budget: TextureBudget) -> Self {
         Self {
+            budget,
+            pending_evict: Vec::new(),
             textures: HashMap::new(),
             sizes: HashMap::new(),
             bytes: HashMap::new(),
@@ -61,6 +78,8 @@ impl TextureCache {
     }
 
     pub fn clear(&mut self) {
+        self.budget.clear();
+        self.pending_evict.clear();
         self.textures.clear();
         self.sizes.clear();
         self.bytes.clear();
@@ -184,9 +203,13 @@ impl TextureCache {
 
     fn upload(&mut self, ctx: &Context, id: i64, img: egui::ColorImage) {
         let size = egui::vec2(img.size[0] as f32, img.size[1] as f32);
+        // 字节数按 RGBA8 算：`w * h * 4`。这是 GPU 上真实占用的下限
+        // （驱动可能还有对齐填充与 mipmap，`07` §6.1 只要求登记这个下限）。
+        let bytes = (img.size[0] * img.size[1] * 4) as u32;
         let tex = ctx.load_texture(format!("thumb-{id}"), img, TextureOptions::LINEAR);
         self.textures.insert(id, tex);
         self.sizes.insert(id, size);
+        self.budget.register(id, bytes, 0);
         self.touch(id);
         self.evict_if_needed();
     }
@@ -198,16 +221,56 @@ impl TextureCache {
         self.lru.push_back(id);
     }
 
+    /// 上传后的回收：**张数上限**与**字节预算**两条线都要看。
+    ///
+    /// - 张数上限（[`Metrics::TEX_CACHE_CAP`]）是 M2.1 的老规则，防「一堆小图占满头」；
+    /// - 字节预算（[`TextureBudget`]）是 M3 的新规则，防「少量大图吃光显存」——
+    ///   缩放滑块拉到 512 px 时，一张纹理就 1 MB，120 张 = 120 MB，远超 384 MB 之外的实际可用量。
+    ///
+    /// 真正的 drop 推迟到 [`TextureCache::flush_evictions`]（帧末）。
     fn evict_if_needed(&mut self) {
         while self.textures.len() > Metrics::TEX_CACHE_CAP {
             let Some(oldest) = self.lru.pop_front() else {
                 break;
             };
-            if let Some(tex) = self.textures.remove(&oldest) {
+            if self.textures.contains_key(&oldest) {
+                self.pending_evict.push(oldest);
+            }
+        }
+        // 字节预算：只把「该走的」排进队列，真正的 drop 在帧末
+        for id in self.budget.evict_end_of_frame() {
+            if self.textures.contains_key(&id) && !self.pending_evict.contains(&id) {
+                self.pending_evict.push(id);
+            }
+        }
+    }
+
+    /// 帧末执行真正的 `drop`（`07` §6.1 PERF-08 的「帧末释放」）。
+    ///
+    /// 返回本帧释放了多少张——诊断浮层会显示它，让「预算真的在起作用」可观察。
+    pub fn flush_evictions(&mut self) -> usize {
+        let ids = std::mem::take(&mut self.pending_evict);
+        let n = ids.len();
+        for id in ids {
+            if let Some(tex) = self.textures.remove(&id) {
                 drop(tex); // 立刻释放 GPU 纹理，不等 egui 的延迟回收
             }
-            self.sizes.remove(&oldest);
+            self.sizes.remove(&id);
+            if let Some(pos) = self.lru.iter().position(|x| *x == id) {
+                self.lru.remove(pos);
+            }
+            self.budget.forget(id);
         }
+        n
+    }
+
+    /// 告知本帧哪些照片在视口内、离视口多少屏（`TextureBudget` 依赖它判断谁能淘汰）。
+    ///
+    /// 每帧**只调一次**（不是每张纹理一次）：调用方先把视口映射成下标区间，
+    /// 再一次性把区间内外的屏距算好。
+    pub fn note_viewport(&mut self, distances: impl IntoIterator<Item = (i64, u32)>) {
+        self.budget.begin_frame();
+        self.budget.note_visible(distances);
     }
 
     /// 预取：把即将进入视口的照片提前请求（扫描后补图用）。
@@ -225,6 +288,56 @@ impl TextureCache {
             }
         }
     }
+}
+
+/// 物理内存（MB）。取不到时给一个保守值（4 GB → 128 MB 纹理预算）。
+///
+/// ## 为什么不用 `sysinfo` 这类 crate
+///
+/// 整个项目只需要**一个整数**，为此拉一棵依赖树（还要跟着平台升级维护）不划算。
+/// 三个平台各一行系统调用就够：
+///
+/// - Linux：`sysconf(_SC_PHYS_PAGES) × _SC_PAGESIZE`
+/// - macOS：`sysctl hw.memsize`
+/// - 其他：返回 0 → 调用方用兜底值
+///
+/// 而且**只读**、不涉及照片目录（R-1 无关）。
+fn physical_memory_mb() -> u64 {
+    let bytes = physical_memory_bytes().unwrap_or(4 * 1024 * 1024 * 1024);
+    (bytes / (1024 * 1024)).max(1024)
+}
+
+#[cfg(target_os = "macos")]
+fn physical_memory_bytes() -> Option<u64> {
+    // `libc::sysctl` 又要拉 libc 依赖；`std::process::Command` 调 `sysctl` 更简单，
+    // 但每次启动 fork 一个进程不值。改用 `std::env` 拿不到，所以这里退一步：
+    // 读 `/usr/bin/sysctl` 的成本（≈3 ms）只在**构造一次**时付，可接受。
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    std::str::from_utf8(&out.stdout)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+#[cfg(target_os = "linux")]
+fn physical_memory_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb = rest.trim().trim_end_matches(" kB").trim().parse::<u64>().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn physical_memory_bytes() -> Option<u64> {
+    None
 }
 
 fn decode_jpeg(bytes: &[u8]) -> Option<egui::ColorImage> {

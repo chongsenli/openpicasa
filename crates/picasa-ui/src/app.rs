@@ -438,6 +438,41 @@ impl OpenPicasaApp {
         }
     }
 
+    /// 把「本帧视口里有哪些照片、离屏多远」告诉纹理账本（`07` §6.1 PERF-08）。
+    ///
+    /// 屏距按**行**折算：一屏 ≈ `ROWS_PER_SCREEN_ESTIMATE` 行，
+    /// 于是「离视口 180 行」≈ 3 屏，正好落在淘汰线附近。
+    /// 用行数而不是像素，是因为行数在滚动时是整数、不会逐帧抖动。
+    fn note_texture_viewport(&mut self, out: &crate::grid::GridOutput) {
+        use picasa_core::datasource::ROWS_PER_SCREEN_ESTIMATE;
+        let first = out.top_index;
+        let last = first.saturating_add(out.visible);
+        let rows_per_screen = ROWS_PER_SCREEN_ESTIMATE.max(1);
+
+        // 只登记「已经在账本里」的那些（`note_visible` 对未登记的 id 是空操作），
+        // 所以这里可以放心把视口前后各 3 屏都列进去。
+        let from = first.saturating_sub(rows_per_screen * 3);
+        let to = last.saturating_add(rows_per_screen * 3);
+        let distances = self
+            .lib
+            .photos
+            .iter()
+            .enumerate()
+            .skip(from)
+            .take(to.saturating_sub(from))
+            .map(|(i, p)| {
+                let d = if i < first {
+                    (first - i) / rows_per_screen
+                } else if i >= last {
+                    (i - last) / rows_per_screen
+                } else {
+                    0
+                };
+                (p.id, d as u32)
+            });
+        self.cache.note_viewport(distances);
+    }
+
     /// 索引管理页点出的动作。
     ///
     /// 本方法**只调已有能力**，不在这里写 SQL——与 `diagnostics` 一样，
@@ -1086,6 +1121,20 @@ impl OpenPicasaApp {
                     &snap,
                 );
                 drop(db);
+
+                // ---- M3 PERF-08：纹理预算的每帧两步
+                //
+                // ① 告知视口：哪些照片在屏内、离屏多远。`TextureBudget` 靠它决定谁能淘汰，
+                //    并且**屏距 0 永不淘汰**——正在看的图被自己丢掉是最难查的「闪灰块」。
+                // ② 帧末释放：本帧攒下的淘汰候选在这里真正 drop。
+                //    帧中 drop 会让本帧剩余绘制拿到失效的 TextureId。
+                //
+                // 两步都在栅格绘制**之后**，顺序不能换：先 drop 再画等于把格子擦干净。
+                self.note_texture_viewport(&out);
+                let freed = self.cache.flush_evictions();
+                if freed > 0 {
+                    tracing::debug!(freed, used_mb = self.cache.budget.used_mb(), "纹理预算释放");
+                }
 
                 self.restore_scroll = None;
                 // 记住这一帧视口顶部在看哪张：下次重载（扫描出新照片、切排序）时用它锚回来。

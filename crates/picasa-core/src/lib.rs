@@ -24,6 +24,7 @@ pub mod perf;
 pub mod pipeline;
 pub mod prefs;
 pub mod scanner;
+pub mod texbudget;
 pub mod thumbs;
 pub mod trash;
 pub mod verify;
@@ -33,6 +34,10 @@ pub use datasource::{
     Cursor, DataSource, GroupBound, IN_LIST_MAX, RANGE_MAX, ROW_WINDOW_SCREENS, Scope,
 };
 pub use dims::{DimsProgress, DimsService};
+pub use texbudget::{
+    MEM_HARD_LIMIT_MB, MEM_SOFT_LIMIT_MB, MemGuard, MemPressure, TextureBudget,
+    texture_cache_budget_mb,
+};
 pub use index::{FailureItem, IndexBoard, IndexSnapshot, IndexState, TaskSnapshot};
 pub use library::{Library, View};
 pub use mgmt::{
