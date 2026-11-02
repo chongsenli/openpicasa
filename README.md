@@ -6,48 +6,33 @@
 视觉布局、栅格密度、操作手感、快捷键向 3.9 靠拢；而照片库用什么格式记，是我们自己的事。
 
 - **界面基准**：Picasa 3.9（Windows 最终版）——仅作视觉与交互参照，不追求数据互通。
-- **当前阶段目标（M1）**：**在 Apple Silicon（M 系列）Mac 上安装一个能跑起来的 OpenPicasa，用于浏览照片。**
-- **M1 目标平台**：仅 macOS 14+ / arm64。Windows / Intel Mac 在 M3 之后。
-  **Linux x86_64 已提前打通**（0.1.0 起可直接构建并产出 .deb，见「快速开始」），
-  但只在 Ubuntu 26.10 上验证过，不作为 M1 的交付承诺。
-
-> ### 📌 先读这条：产品定位与三层承诺
->
-> | | 内容 |
-> | --- | --- |
-> | ✅ **承诺** | 界面布局、栅格密度、交互手感、快捷键与 Picasa 3.9 对齐 |
-> | ✅ **承诺** | **照片目录零写入**——不创建、不修改、不删除、不改权限、不改 mtime 任何文件 |
-> | ❌ **不承诺** | `.picasa.ini` 兼容、与原版数据互通、读取原版的编辑/星标/说明 |
->
-> 第三行不是「暂时没做」，是**产品定义本身**。如果有人期待「装上就能看到我原来的星标」，那是对本项目的误解。
-
-> ### 📌 M1 分期策略
->
-> **M1 = 界面复刻 + 浏览；M2 = 编辑内核；M3 = 长尾与跨平台。**
->
-> 这不是「砍功能」，是**刻意的排序**：用户判断一个复刻品「像不像」只花 3 秒，而这 3 秒里他能看到的只有界面。所以先把「看起来是 Picasa」做出来，再把「用起来是 Picasa」补上。详见 `docs/01` §11.5.0。
->
-> **M1 交付物是一个 `.app`**，不是「一堆能跑的功能」。这意味着打包、签名、TCC 授权这些「能不能装上去」的问题，在 M1 里的优先级高于任何算法。
-
-### M1 的三条红线（不可协商）
-
-| 红线 | 含义 |
-| --- | --- |
-| **R-1** | **照片目录零写入**。v3.0 起**不再读写 `.picasa.ini`**（用户决策：「做一个新的程序」）——不是「小心不写」，而是**根本没有 ini 代码**（crate 已删除）。数据只落自家 `Application Support` 与 `Preferences`。 |
-| **R-2** | **编辑室入口不存在**（不是置灰）。M1 的 `picasa-edit` crate 不创建。 |
-| **R-3** | **装得上、打得开、首次授权走得通**。干净 Mac 上双击可运行、拖进「应用程序」可运行、TCC 授权流程正确。 |
-
-> R-1 的产品含义：「你可以把任何照片目录直接拿进来试，**我们只读、不改**。退出后你的文件、文件夹、任何隐藏文件都不会有任何变化。」详见 `docs/02` §5.2、`docs/01` §11.5.3。
->
-> **v3.0 的额外收益**：不再需要为「字节级 ini 往返保真」写任何代码。02 §0.1.4 有完整的「风险下降」说明（可直接对外汇报）。
-
-> 文档状态：四份设计文档已冻结（01 v3.2 / 02 v3.0 / 03 v2.5 / 04 v1.5）+ M2.1 规划（05 v1.3），**M1 代码已落地并可打包**，
-> **M2 A 线（索引底座）代码已落地**，**M2.1 七个工作包（A 数据层迁移 v1→v2、B 宽高回填、C 性能、D 流式展示、E 导航、F 加固、G 测试）已全部落地**（见进度表）。
-> 「还差什么」放在文末的进度表里，不在这里重复。
+- **支持平台**：macOS 14+ / Apple Silicon（arm64）为主要目标；Linux x86_64 可构建并产出 `.deb`。
 
 ---
 
-## 当前界面（M1 实机渲染，1280×820）
+## 产品定位与三层承诺
+
+| | 内容 |
+| --- | --- |
+| ✅ **承诺** | 界面布局、栅格密度、交互手感、快捷键与 Picasa 3.9 对齐 |
+| ✅ **承诺** | **照片目录零写入**——不创建、不修改、不删除、不改权限、不改 mtime 任何文件 |
+| ❌ **不承诺** | `.picasa.ini` 兼容、与原版数据互通、读取原版的编辑/星标/说明 |
+
+第三行不是「暂时没做」，是**产品定义本身**。如果有人期待「装上就能看到我原来的星标」，那是对本项目的误解。
+
+### 三条设计红线（不可协商）
+
+| 红线 | 含义 |
+| --- | --- |
+| **R-1** | **照片目录零写入**。不读不写 `.picasa.ini`——不是「小心不写」，而是**根本没有 ini 代码**。数据只落自家 `Application Support` 与 `Preferences`。 |
+| **R-2** | **编辑室入口不存在**（不是置灰）。依赖图里没有 `picasa-edit` crate。 |
+| **R-3** | **装得上、打得开、首次授权走得通**。干净 Mac 上双击可运行、拖进「应用程序」可运行、TCC 授权流程正确。 |
+
+> R-1 的产品含义：「你可以把任何照片目录直接拿进来试，**我们只读、不改**。退出后你的文件、文件夹、任何隐藏文件都不会有任何变化。」
+
+---
+
+## 当前界面
 
 下面两张不是设计稿，是**本程序自己窗口帧缓冲的导出**（`crates/picasa-ui/src/capture.rs`），
 所以有排版问题就会直接暴露出来，不能靠「示意图」蒙混。
@@ -56,429 +41,46 @@
 
 <img src="docs/ui-baseline/m1-viewer-1280x820.png" width="720" alt="查看器：暗底、等比缩放、EXIF 面板、上下自动隐藏信息条">
 
-更多基线（含空库首屏）与**实测几何数值表**见 [`docs/ui-baseline/`](docs/ui-baseline/README.md)。
-注意其中区分：**本程序自渲染的截图入库**，**原版 Picasa 的对照截图永远不入库**（版权，走内部渠道，见 03 §5A）。
+更多基线（含空库首屏）见 [`docs/ui-baseline/`](docs/ui-baseline/README.md)。
 
 ---
 
-## 索引进度的可见性（M2 A 线已落地）
+## 已经能做什么
 
-M2 拆成双主线（`docs/01` §11、`docs/04` §0.3）：**A 线＝索引底座**（本轮已实现）、**B 线＝编辑内核 + 组织 + 输出**（下一轮）。
-A 线的判据全部来自 [`docs/04`](docs/04-M2-需求说明书-关注文件夹与索引.md)，**只做「把索引正在发生什么如实呈现出来」，不改索引算法、不改缩略图档位、不改落库结构**。
+### 浏览
 
-### 三块新界面 + 两处已有界面，读同一份快照
+- 添加任意照片目录作为**关注文件夹**，多根目录并列；子目录树懒加载、带计数与状态点
+- 日期分组栅格（吸顶分组头）、三档缩略图尺寸、按行号虚拟化——十万张级也能顺滑滚动
+- **缩略图下方显示文件名**（三档都显示，单行、超出省略号）
+- 六种排序、文件名/文件夹/日期搜索、选择集、照片托盘
+- 全屏查看器：等比缩放、平移、翻页、EXIF 面板、背景切换、在 Finder 显示
+- 「最近更改」、「所有照片」两个聚合入口
 
-| 界面 | 位置 | 实现 |
-| --- | --- | --- |
-| **进度弹框** | 右下角浮层，自动出现/自动收起/可关闭 | `index_progress.rs::show_toast` |
-| **进度面板** | 点状态栏「索引进度」打开，逐文件夹分项 + 失败项与重试 | `index_progress.rs::show_panel` |
-| **状态栏入口** | 右侧常驻按钮（四态：空闲/进行中/有失败/已暂停） | `statusbar.rs` + `index_progress.rs::status_button` |
-| **左栏**（既有） | 文件夹行状态点 + hover 里的「已完成 X / 已发现 Y」 | `sidebar.rs` |
-| **栅格**（既有） | 未就绪照片画「待生成」占位格（P-06） | `grid.rs` |
+### 索引
 
-弹框 / 面板 / 左栏 / 栅格**这四处不各自记账**：全部读同一份 `IndexSnapshot`
-（`picasa-core/src/index.rs` 的 `IndexBoard`）。这条是硬约束——`docs/04` §3 规定
-「同一件事在四个地方显示四个数字」属 P0，所以结构上就不给「各算一遍」的机会，
-而不是靠事后对齐。状态栏按钮是**入口**，只反映四态，不参与计数。
+- 后台异步扫描与缩略图生成，**不阻塞界面**（扫描 / 解码 / 落库全在工作线程）
+- **索引进度可见**：右下角弹框、进度面板、状态栏入口、左栏状态点、栅格占位格
+  **五处读同一份快照**，不会出现「同一件事四个地方四个数字」
+- 暂停 / 继续 / 删除索引；重建失败索引只重做被点名的那几张
+- 关闭关注文件夹**只改状态、不删索引**，重新添加秒开
 
-### 七态状态机（`暂停` 没有用户控件）
+### 数据安全
 
-`等待 / 扫描中 / 生成缩略图中 / 已完成 / 部分失败 / 暂停 / 不可访问`。
-
-`暂停` 是**系统事件态**，不是用户功能：心跳线程按**墙钟**间隔 ≥6 s 判定「系统休眠 / 进程被挂起」，
-标 `暂停` 并冻结数字；下一拍自动 `恢复`。`Instant` 在挂起时同样停走，所以只能用墙钟判。
-裁决依据 P-03：**界面上不存在暂停/继续按钮**，但状态必须实现——否则休眠回来会停在
-「生成缩略图中」一动不动，比没有状态更糟。
-
-### 批次模型（P-02 / P-04）
-
-- 一个批次 = 一次入队（首次扫描 / 重试 / 重启后恢复）。**关闭弹框只在内存记忆**，不落盘；
-  同一批次内不再自动弹出，点「索引进度」仍可打开面板。
-- **分母批次内冻结**：一旦进入 `生成缩略图中`，新发现的文件排下一批，绝不并入当前分母。
-- 进度**上包络**：同批次内只允许持平或前进（`displayed = max(displayed, raw)`）。
-- 跨批次允许重置，但**必须标注「第 N 批」**；裸的「100% → 低百分比」不合格。
-- 分母未知（扫描中）时不显示百分比——`progress_bar(None)` 画往复块，**绝不拿 0%/100% 冒充**。
-
-### 阈值与占位（P-05 / P-06）
-
-| 常量 | 值 | 含义 |
-| --- | --- | --- |
-| `APPEAR_AFTER` | 1.5 s | 短于此不出现弹框（5 张的小目录全程安静） |
-| `LONG_TASK` | 3.0 s | 超过则常驻到结束 |
-| `HIDE_AFTER` | 1.0 s | 1.5–3 s 出现的，完成后 1 s 内收起 |
-| `POLL_INTERVAL` | 0.25 s | 取快照的节流间隔，避免每帧抢锁 |
-
-栅格：命中「该文件夹正在索引」且缩略图未就绪的照片，画**灰底「待生成」占位格**，
-**原地替换**成真图（不重排，滚动位置不跳），且**不可点开**（不进查看器、不参与选中、无右键），
-**不计入「已就绪」**。状态栏与左栏用 `已就绪 X / 已发现 Y` 双数，而不是一个会跳的字幕。
-
-### M2 红线（与 M1 的 R-1/R-2 同源）
-
-| 编号 | 约束 | 怎么保证 |
-| --- | --- | --- |
-| `R-M2-1` | 照片目录零写入 | 缩略图与索引状态只进自有容器；`zero_write` 集成测试在索引前后比对目录清单 |
-| `R-M2-2` | 不读不写 `.picasa.ini` | 代码里没有 ini 路径；同一测试比对 ini 的 mtime 与内容 |
-| `R-M2-3` | 异步不阻塞界面 | 扫描/解码/写库全在 `IndexService` 的 worker 线程与 rayon 池；UI 只读快照 |
-| `R-M2-4` | 失败不静默 | 解码失败带人话原因进面板可重试；目录失联 → `不可访问`，弹框不悄悄消失 |
-
-> **照旧不给「顺手写个状态文件」留口子**：加了进度 UI 之后最容易发生的就是
-> 「为统计数量去 `stat` 一遍，顺手写个 `.done` 标记到照片目录旁边」。`R-M2-1` 的记忆衰减
-> 是 `docs/04` §0.2 标注的第一风险，因此进度状态一律进自有 SQLite。
+- 照片目录零写入；缩略图与索引只进自有 SQLite
+- 索引库可随时删掉重建——里面不存任何用户创作的数据
+- 目录失联 / 无权限 / 解码失败都**在界面上有落点**，不会静默消失
 
 ---
 
-## 目录
-
-| 路径 | 内容 | 负责人 |
-| --- | --- | --- |
-| `docs/01-产品功能清单.md` | 产品功能域、功能点、优先级、验收要点（PRD）；**v3.2**（数据自立：不读写 `.picasa.ini`；M1 = 界面复刻 + 浏览，43 条冻结 + 44 项界面还原；**M2 = 索引底座 + 编辑内核双主线**） | PM |
-| `docs/02-技术架构与选型.md` | 技术架构、crate 选型、**§5 自有元数据模型**、**§7 macOS 打包与 TCC**、**§8 界面壳层**；**v3.0**（数据自立，ini 契约已作废归档） | Dev / Tech Lead |
-| `docs/03-测试策略与验收计划.md` | 测试分层、**界面还原度截图对拍**、**macOS 安装运行测试**、**照片目录零写入测试**、**自有数据模型测试**、性能门禁；**v2.5**（220 条用例：M1 有效 95 / M2 恢复 60 / 前提消除 26 / M2 新增 24 / M2.1 新增 15） | QA |
-| `docs/04-M2-需求说明书-关注文件夹与索引.md` | M2「关注文件夹 + 后台异步缩略图索引」需求说明书：基线 M2-FD-01～28，本轮增补 **右下角进度弹框 + 索引进度查看入口**（M2-FD-29～44）、**四处状态一致性**、6 步验收脚本、需求→`TC-IDX-001～024` 追溯、**P-01～P-06 六项待确认全部裁决**（关闭再弹 / 暂停 / 批次标注 / 阈值 / 栅格占位）；**v1.5**（P 序列移交 `05`） | PM |
-| `docs/05-M2.1-规划与路线图.md` | **M2.1 规划**：数据层迁移技术设计（`roots` 表 / `folders` 层级 / `dims_status` + 生成列 / 排除表 / 任务与失败表，迁移 **v1→v2→v3**）、**与现有 schema 的 6 处对账**、任务分解 **57.5 人天**、4 迭代 7 周、M3～M5 路线图、**P-07 已裁决 / P-08～P-10 待拍板**；**v1.5**（§1.7 A 差异 6 条、§1.8 B 差异 5 条、§1.9 C 差异 6 条、§1.10 D～G 差异 8 条、§1.11 索引操作） | PM + Dev |
-| `README.md` | 项目总览、前置条件、环境准备、仓库骨架 | Dev / Tech Lead |
-
-> **M1 范围指针（新人先读这条）**：M1 的交付范围见 [`docs/01-产品功能清单.md`](docs/01-产品功能清单.md) **§11.5「M1 范围冻结与界面还原清单」**——**43 条冻结功能点 + 174 条明确不进 M1 + 44 项界面还原清单 + 3 条红线**。**§11.5 具约束力**，与 01 §11 的里程碑建议冲突时以它为准；M1 期间任何新增范围须走变更评审。
->
-> **技术方案对应**：[`docs/02-技术架构与选型.md`](docs/02-技术架构与选型.md) 的 **§7（macOS 交付与打包）**、**§8（界面壳层）**、**§9.3（M1 技术拆解）**。
->
-> **M2 索引范围指针**：[`docs/04-M2-需求说明书-关注文件夹与索引.md`](docs/04-M2-需求说明书-关注文件夹与索引.md) —— 关注文件夹 + 后台异步缩略图索引（M2-FD-01～28）与**索引进度的可见性**（右下角弹框、进度查看面板，M2-FD-29～44）。基线红线不变：照片目录零写入、不读写 `.picasa.ini`、异步不阻塞界面。
->
-> **M2.1 规划指针**：[`docs/05-M2.1-规划与路线图.md`](docs/05-M2.1-规划与路线图.md) —— 数据库迁移 **v1→v2** 的技术设计（**§1.2 是与现有 schema 的对账表，动手前必读**：`folders`/`width`/`height`/`orientation` 均**复用不加列**，`roots` 从 Preferences 迁入新建表，`display_*` 用 VIRTUAL 生成列）、57.5 人天排期、M3～M5 路线。
-
----
-
-## ⚠️ 前置条件
-
-### 0. 🚨 头号阻塞：本机没有 Rust 工具链
-
-> ## 不装 rustup，本项目的**一切讨论都是纸上谈兵**。
->
-> **这不是「无法编译验证」那么轻。** 本项目 M1 的**唯一交付物是一个能双击运行的 `OpenPicasa.app`**。没有 `cargo`，就没有 `.app`；没有 `.app`，就没有任何可演示的东西。文档写得再完整、评审开得再多，**屏幕上一个像素都产不出来**。
->
-> 当前状态（2026-10-27 实测）：`cargo` / `rustc` / `rustup` / `~/.cargo` **全部不存在**。
->
-> 所以：**在 rustup 装上之前，任何关于进度、排期、演示的承诺都没有依据。** 这是唯一一个「不解决就无法向前」的事项，其余所有问题（选型、范围、还原度）都排在它后面。
->
-> 解除方式：见下方安装命令，**需 Lead / 用户批准**（安装系统级工具不由 dev 自行决定）。
->
-> 配套的第二项：`xcode-select -p` **尚未确认**。缺 Command Line Tools 时连 `cc`/`ld` 都没有，`.app` 链接不出来——**这项和 rustup 一样是硬门槛**。
-
-### 1. Rust 工具链详解
-
-**当前这台开发机的实际状态（已核实）**：
-
-| 检查项 | 结果 |
-| --- | --- |
-| `cargo` / `rustc` | ❌ 不存在（`which` 返回空） |
-| `rustup` | ❌ 不存在 |
-| `~/.cargo/` | ❌ 不存在 |
-| `$HOME/.rustup/` | ❌ 不存在 |
-| Xcode Command Line Tools | 需先确认 `xcode-select -p` 有输出 |
-| Node.js | ✅ v24.18.0 可用 |
-| Homebrew | ✅ `/opt/homebrew/bin/brew` |
-| 系统 | macOS 27.2，Apple Silicon（arm64） |
-
-**因此：当前所有文档都不包含「已编译验证」的结论。** 任何 crate 版本、API 用法、性能数字都必须在工具链就绪后重新验证。文档中出现的 `Cargo.toml` 片段是**示例片段**，不是可编译的最终配置。
-
-### 2. 安装方式（需 Lead 批准后执行）
-
-> 约定：**不自行安装系统级工具**。安装 rustup 属于系统级环境变更，执行前必须经 Tech Lead 明确批准，并由批准者确认是否走 `brew` 还是官方 `rustup` 脚本。
-
-推荐使用官方 rustup（不污染 Homebrew 的 prefix，便于 `rustup update` 与多工具链切换）：
-
-```bash
-# 1) 安装 rustup + 稳定版工具链（默认 host triple = aarch64-apple-darwin）
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile default
-
-# 2) 让当前 shell 生效
-source "$HOME/.cargo/env"
-
-# 3) 校验
-rustc -V && cargo -V && rustup show
-
-# 4) 补齐常用目标与组件（跨平台发布需要）
-rustup target add aarch64-apple-darwin x86_64-apple-darwin \
-                  x86_64-pc-windows-msvc x86_64-unknown-linux-gnu
-rustup component add rustfmt clippy rust-src llvm-tools-preview
-```
-
-备选（若组织策略要求统一用 Homebrew 管理）：
-
-```bash
-/opt/homebrew/bin/brew install rustup-init && rustup-init -y
-# 注意：brew 的 rust 包与 rustup 会争抢 $PATH，二者只装其一
-```
-
-**工具链固定策略**：workspace 根目录放 `rust-toolchain.toml`，锁定 channel 与组件，保证本机/CI/其他开发者一致。
-
-```toml
-# rust-toolchain.toml（示例）
-[toolchain]
-channel    = "stable"          # 首次可用后改为具体版本，如 "1.95.0"，避免漂移
-components = ["rustfmt", "clippy", "llvm-tools"]
-targets    = ["aarch64-apple-darwin"]
-profile    = "default"
-```
-
-> 关于 channel 的说明：调研时发现 egui/eframe 0.37 与 ort 2.0 的 MSRV 已到 **Rust 1.92 / 1.95**（见 `docs/02` 选型表），因此不要用太旧的 stable。首次安装后请把 `channel` 钉到实际可用的具体版本号。
-
-### 3. 目标三元组（M1 只需一个）
-
-| 用途 | Triple | M1 |
-| --- | --- | --- |
-| **M1 唯一目标**：Apple Silicon Mac | **`aarch64-apple-darwin`** | ✅ **只装这个** |
-| macOS Intel / Universal | `x86_64-apple-darwin` or `lipo` | ⏸ M3 |
-| Windows | `x86_64-pc-windows-msvc` | ⏸ M3 |
-| Linux | `x86_64-unknown-linux-gnu` | ✅ 可构建（0.1.0 起产出 .deb，见「快速开始」） |
-
-```bash
-# M1 只需要这一条
-rustup target add aarch64-apple-darwin
-```
-
-> **M1 出单架构的理由**：用户目标是 M 系列 Mac。universal2 会让构建时间与体积翻倍，对 M1 无收益。M3 若需要，`lipo -create` 合并即可。详见 `docs/02` §7.5。
-
-### 4. 系统级依赖（非 Rust，需单独评估）
-
-部分选型需要 C/C++ 库或额外二进制，**安装前同样需要批准**：
-
-| 依赖 | 用途 | 备注 |
-| --- | --- | --- |
-| Xcode CLT | `cc` / `ld` / 链接 macOS framework | 必需 |
-| `pkg-config` + `libheif` | HEIC 解码（`libheif-rs`） | 可选，M3 之后再上 |
-| `exiftool`（外部二进制） | IPTC/XMP 写入的兜底路径 | 可选，替代方案见 `docs/02` |
-| `libvips` | 超大图缩放（如走 `vips` 绑定路线） | **不推荐作为主路径**，见 `docs/02` |
-
----
-
-## 建议的 workspace 骨架（**M1 只建 4 个 crate**）
-
-> 这是**目录与 Cargo 配置的规划**。**现状：前四步已落地**（Cargo.toml / 四个 crate / packaging / tests），
-> 差异只有两处，均为有意：①`picasa-ui/src` 用**平铺模块**（`app.rs` / `grid.rs` / `toolbar.rs` /
-> `sidebar.rs` / `statusbar.rs` / `viewer.rs` / `theme.rs` / `icons.rs` / `textures.rs` /
-> `shortcuts.rs` / `macos.rs` / `capture.rs`）而不是子目录——M1 每个模块只有一两个文件，
-> 子目录只会多一层路径；②`deny.toml` 尚未落地（许可审计在 M1 交付前补，`cargo-deny` 未安装）。
->
-> **M1 的一个重要决策：减少 crate 数量。** v1.x 规划了 9 个 crate，M1 只建 **4 个**。
-> v3.0 起 `.picasa.ini` 兼容层整体移除，`picasa-ini` crate **已删除**；`picasa-edit`、`picasa-face`、`picasa-ipc`、`picasa-cli` 在 M1 也不创建。
-> **少一个 crate 就少一处可能出错的地方**，这是降低 M1 风险最直接的手段。
-
-```text
-openpicasa/
-├── Cargo.toml                 # workspace 根（virtual manifest）
-├── Cargo.lock                 # 提交进仓库（应用型项目）
-├── rust-toolchain.toml
-├── rustfmt.toml
-├── clippy.toml
-├── deny.toml                  # cargo-deny：许可与安全审计
-├── README.md
-├── docs/
-│   ├── 01-产品功能清单.md      # v3.0
-│   ├── 02-技术架构与选型.md     # v3.0
-│   ├── 03-测试策略与验收计划.md  # v2.1
-│   ├── adr/                   # 架构决策记录（已写 0001-0006）
-│   └── ui-baseline/           # 界面还原基准截图（3 张自渲染图已入库，见其 README）
-├── packaging/                 # 手写打包（ADR-0003，不用 cargo-bundle）
-│   ├── Info.plist             # 模板
-│   ├── bundle.sh              # cargo build → 组 .app → icns → plutil → codesign
-│   ├── logo.png               # 品牌图标源图（1024×1024 白底圆徽标）
-│   ├── make_icons.py          # logo.png → 裁圆/透明/多尺寸 PNG（纯标准库）
-│   └── make_icon.py           # .iconset + icns（无 logo.png 时回退自绘）→ iconutil
-├── crates/
-│   ├── picasa-db/             # ✅ M1：SQLite 索引 + 缩略图 BLOB + 迁移（叶子 crate）
-│   ├── picasa-imaging/        # ✅ M1：解码 + Orientation + 缩略图（无效果算子）
-│   ├── picasa-core/           # ✅ M1：扫描/监视/库会话/选择集/搜索/任务队列
-│   ├── picasa-ui/             # ✅ M1：eframe 应用（五区面板 + 栅格 + 查看器）
-│   │   ├── assets/logo-256.png  # 窗口图标（make_icons.py 从 packaging/logo.png 生成）
-│   │   └── src/
-│   │       ├── theme.rs       # 配色常量
-│   │       ├── fonts.rs       # 系统字体（eframe system_fonts）；Plan B 才是内嵌子集
-│   │       ├── grid/          # 虚拟布局 + sticky 头 + 纹理缓存
-│   │       ├── panels/        # toolbar / library_tree / tray / statusbar
-│   │       ├── viewer/        # 暗色全屏查看器
-│   │       └── macos/         # rfd 对话框 + TCC 流程 + 全屏
-│   ├── picasa-edit/           # ⛔ M1 不创建（M2）
-│   ├── picasa-face/           # ⛔ M1 不创建（M2）
-│   ├── picasa-ipc/            # ⛔ M1 不创建（M3）
-│   └── picasa-cli/            # ⛔ M1 不创建（M2 调试期）
-├── assets/
-│   ├── icons/                 # （空：图标改为 egui 矢量自绘，见 docs/adr/0004）
-│   ├── fonts/                 # （空：M1 不内嵌字体；仅 Plan B 时放 1500 字子集）
-│   ├── OpenPicasa.icns
-│   ├── models/                # M2
-│   └── geonames/              # M2
-├── tests/
-│   ├── golden/                # 黄金图片（Git LFS）
-│   └── perf/                  # 性能基准场景脚本
-└── xtask/                     # 打包 / mem-report（字体子集生成仅 Plan B 需要）
-```
-
-### 根 `Cargo.toml` 关键片段（示例）
-
-```toml
-# 示例片段，非最终配置
-[workspace]
-resolver = "3"
-members = [
-    "crates/picasa-db",
-    "crates/picasa-imaging",
-    "crates/picasa-core",
-    "crates/picasa-ui",
-    # M1 不含：picasa-edit / picasa-face / picasa-ipc / picasa-cli
-]
-
-[workspace.package]
-version      = "0.2.0-beta.1"
-edition      = "2024"
-rust-version = "1.95"          # 受 eframe 0.37 的 MSRV 约束
-license      = "MIT OR Apache-2.0"
-
-[workspace.dependencies]
-# 依赖版本集中管理，子 crate 只写 { workspace = true }
-image        = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "tiff", "bmp"] }
-zune-jpeg    = "0.5"           # 缩略图 JPEG 快路径（缩放解码）
-kamadak-exif = "0.6"           # 只读 EXIF（Orientation / 拍摄参数）
-rusqlite     = { version = "0.41", features = ["bundled"] }
-rayon        = "1.12"
-notify       = "8.2"
-serde        = { version = "1", features = ["derive"] }
-
-# ---- GUI（M1 的核心）----
-egui         = "0.37"
-eframe       = { version = "0.37", default-features = false,
-                 features = ["wgpu", "persistence", "default_fonts"] }
-egui_extras  = "0.37"
-
-# ---- macOS 专有（M1 新增）----
-rfd          = "0.17"          # 原生 NSOpenPanel（TCC 必需）
-objc2        = "0.6"
-fontdb       = "0.24"          # 字体回退链探测
-
-tracing      = "0.1"
-thiserror    = "2"
-
-# ---- M1 显式不引入 ----
-# rawler / rawloader  (LGPL, M2)
-# tract-onnx / ort    (M2)
-# little_exif / img-parts (M2，M1 不写元数据)
-
-[features]
-# M1 无特殊 feature；ini 相关能力已随 crate 删除
-[features]
-default = []
-
-[profile.release]
-lto           = "thin"
-codegen-units = 1
-panic         = "abort"
-strip         = "symbols"      # 控制 .app 体积（M1-P11 ≤ 30MB）
-
-# 图像处理是计算密集型，debug 下也要能跑得动
-[profile.dev.package."*"]
-opt-level = 2
-```
-
-### 子 crate 依赖方向（**M1：5 个 crate，无编辑**）
-
-```text
-picasa-ui ──┬──> picasa-core ──> picasa-db
-            │                └─> picasa-imaging
-            └──> picasa-imaging
-```
-
-规则：
-
-- **`picasa-db` 是叶子 crate**，不依赖任何其他本地 crate（保证可独立测试与迁移）。**`picasa-ini` 已删除**（v3.0）。
-- `picasa-imaging` 不依赖 `picasa-db`；缓存与索引的协调放在 `picasa-core`。
-- `picasa-ui` 是**唯一依赖 `eframe`** 的 crate。
-- **依赖图里没有 `picasa-edit`——因为在 M1 它不存在。** 这是红线 R-2 的结构性保证。
-
----
-
-## 快速开始
-
-```bash
-# 0) 国内网络提醒：rustup 走 USTC 镜像装工具链（官方源实测 ≈40KB/s，会卡死）
-RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static sh <(curl -sSf https://sh.rustup.rs) -y
-# cargo 侧镜像已写进 .cargo/config.toml（本地加速用，不入库）
-
-# 1) 开发运行
-cargo run --release --bin OpenPicasa
-
-# 2) 构建 .app（M1 的交付物）
-./packaging/bundle.sh
-# 产物：dist/OpenPicasa.app（arm64 + ad-hoc 签名）
-
-# 3) 验证签名与体积
-codesign -dv --verbose=2 dist/OpenPicasa.app   # 期望 Signature=adhoc / Identifier=app.openpicasa
-du -sh dist/OpenPicasa.app                      # M1 目标 ≤ 30MB（当前 ≈12MB）
-
-# 4) 质量门禁（当前全绿）
-cargo test --workspace
-cargo clippy --workspace --all-targets          # 0 warning
-```
-
-### 在 Linux 上构建（x86_64）
-
-M1 的交付物是 macOS 的 `.app`，但代码本身在 Linux 上也能编通（2026-10 起已验证）。
-
-```bash
-# 依赖：构建期一个都不需要装。wayland / xkbcommon / vulkan 这些 GUI 库
-# 全是运行时 dlopen 的，所以不需要 pkg-config，也不需要任何 -dev 包。
-cargo build --release --bin OpenPicasa     # → target/release/OpenPicasa
-./run.sh                                    # 直接启动
-
-# 打成 .deb
-./packaging/make_deb.sh                     # → dist/openpicasa_<version>-1_amd64.deb
-sudo apt install ./dist/openpicasa_0.2.0-beta.1-1_amd64.deb
-```
-
-三个平台差异要知道：
-
-- **glibc 下限跟着构建机走**。二进制在当前机器的 glibc（2.44）上链接，control 里写的是
-  `Depends: libc6 (>= 2.44)`，**只能装 Ubuntu 26.10+**。要给老发行版用得换更旧的构建环境
-  （容器）或 musl 目标——改 control 里的版本号是没用的，符号就是不够。
-- **数据目录仍按 macOS 惯例**落在 `~/Library/Application Support/app.openpicasa/`，
-  XDG 化排在 M3。属于已知差异，不影响功能。
-- **别把 `TMPDIR` 留在 `/tmp`**：部分发行版把 `/tmp` 挂成 10MB tmpfs，
-  `libsqlite3-sys` 编译 `sqlite3.c` 的中间文件会 ENOSPC（debug profile 带 `-g` 时尤其容易）。
-  `packaging/make_deb.sh` 自己的临时目录也因此放在输出目录旁边而不是 `/tmp`。
-
-### 调试与自动化入口（只读，不碰照片目录）
-
-| 环境变量 | 作用 |
-| --- | --- |
-| `OPENPICASA_DATA_DIR=<dir>` | 把索引/偏好/日志重定向到 `<dir>`（便携模式、测试、截图基线都用它） |
-| `OPENPICASA_SCREENSHOT=<png>` | 跑到第 N 帧后截取**本窗口**帧缓冲、写 PNG、自动退出（见 ADR-0006） |
-| `OPENPICASA_SCREENSHOT_WARMUP=<n>` | 截图前预热帧数，默认 40（缩略图每帧只上传 3 张，首帧必是占位灰） |
-| `OPENPICASA_OPEN_INDEX=<n>` | 启动后自动打开第 n 张的查看器（查看器只能双击进入，没有它就拍不到查看器） |
-| `OPENPICASA_LOG=debug` | 打开调试日志（**默认 release 只记 info**：栅格每帧一条 debug，开着等于持续写盘） |
-
-配套的像素探针（纯标准库，不需要装任何东西）：
-
-```bash
-python3 tools/pngprobe.py shot.png --row 600 --scale 2     # 沿一行量出栏宽/单元格/间距
-python3 tools/pngprobe.py shot.png --rect 1180,1495,1380,1540  # 某区域主色
-```
-
-> ⚠️ **`open dist/OpenPicasa.app` 不会继承 shell 环境变量**（macOS 的 `open --env` 实测不生效），
-> 所以上面这几个入口要作用在 `.app` 里那份可执行文件上：
-> `dist/OpenPicasa.app/Contents/MacOS/OpenPicasa`。用 `open` 启动则是纯交互模式。
-
----
-
-## 📦 安装 Picasa（macOS，Apple Silicon）
-
-> 这一节的内容**必须随 `.app` 一起交付**（01 v3.0 F10-26 要求）。打包时把本节复制为 `Picasa-安装说明.txt` 放进 `.app` 同级目录或 `Contents/Resources/`。
+## 安装（macOS，Apple Silicon）
 
 1. 把 `OpenPicasa.app` 拖进「应用程序」文件夹。
 2. **首次打开如果提示「无法打开，因为 Apple 无法验证此 App 是否包含恶意软件」**：
-   - 到「应用程序」里**右键点击 Picasa → 打开**，在弹出的对话框里再点一次「打开」；
-   - 或打开「系统设置 → 隐私与安全性」，在页面底部找到关于 Picasa 的提示，点「仍要打开」。
+   - 到「应用程序」里**右键点击 OpenPicasa → 打开**，在弹出的对话框里再点一次「打开」；
+   - 或打开「系统设置 → 隐私与安全性」，在页面底部找到提示，点「仍要打开」。
 3. 以上只需做一次。
 
-**为什么会有这个提示？** 这是团队内部测试版，使用**本地 ad-hoc 签名**、未向 Apple 申请公证（公证需要付费开发者账号）。**这不代表 App 有问题。**
+**为什么会有这个提示？** 本应用使用**本地 ad-hoc 签名**、未向 Apple 申请公证（公证需要付费开发者账号）。**这不代表 App 有问题。**
 
 **如果你是通过 U 盘或直接拷贝拿到它的，通常不会看到这个提示**——quarantine 属性取决于文件怎么传过来的，不是签名决定的。
 
@@ -488,14 +90,14 @@ python3 tools/pngprobe.py shot.png --rect 1180,1495,1380,1540  # 某区域主色
 xattr -d com.apple.quarantine /Applications/OpenPicasa.app
 ```
 
-> ⚠️ **不要**关闭系统完整性保护或全局关闭 Gatekeeper（`spctl --master-disable`）——那是安全风险，我们不建议也不支持。
+> ⚠️ **不要**关闭系统完整性保护或全局关闭 Gatekeeper（`spctl --master-disable`）——那是安全风险，不建议也不支持。
 
 ### 首次运行会请求目录访问权限（macOS TCC）
 
 macOS 会保护「图片」「桌面」「下载」「文稿」与外接盘。**第一次添加这些位置的文件夹时，系统会弹窗询问授权——这是正常且必需的。**
 
 - 点「允许」后正常使用；**点「不允许」应用不会崩溃**，会提示你可以去「系统设置 → 隐私与安全性 → 文件与文件夹」重新开启。
-- 我们**不请求全盘访问**，只在你自己选择某个目录时才请求那个目录。
+- 本应用**不请求全盘访问**，只在你选择某个目录时才请求那个目录。
 
 ### 卸载
 
@@ -509,74 +111,138 @@ rm -rf ~/Library/Application\ Support/app.openpicasa
 
 ---
 
-## 当前进度与下一步
+## 从源码构建
 
-| 阶段 | 状态 |
-| --- | --- |
-| 产品功能清单（docs/01） | ✅ **v3.2**（数据自立；M1 43 条冻结 + 174 条不进 + 44 项界面还原 + 3 红线；**M2 改双主线：索引底座 + 编辑内核**） |
-| 技术架构与选型（docs/02） | ✅ **v3.0**（§5 自有元数据模型 + §7 macOS 打包 + §8 界面壳层；ini 契约已归档） |
-| 测试策略（docs/03） | ✅ **v2.10**（248 条用例：M1 有效 95 / M2 恢复 60 / 前提消除 26 / M2 新增 24 / M2.1 新增 43 / 永久废弃 0；含索引进度可见性 24 条、宽高回填 9 条、首屏分页与栅格布局性能 6 条、导航可恢复性与只读护栏 8 条、索引控制 6 条、增量发现 5 条、重建失败索引 5 条、宽高终态 4 条） |
-| M2 需求说明书（docs/04） | ✅ **v1.5**（关注文件夹 + 异步索引；增补进度弹框与索引进度入口 `M2-FD-29～44`、四处状态一致性、6 步验收脚本、追溯到 `TC-IDX-001～024`；**P 项已清零**，P-07 起移交 `05`） |
-| **M2.1 规划（docs/05）** | ✅ **v1.8**（数据层迁移设计 + 6 处 schema 对账；**57.5 人天 / 4 迭代 / 约 7 周**；M3～M5 路线；**A～J 工作包全部落地**，落地差异见 §1.7～§1.14；P-07 已裁决、P-08～P-10 待拍板） |
-| **Rust 工具链** | ✅ **已就绪**：rustc/cargo 1.99.1（USTC 镜像安装，官方源会卡死） |
-| Xcode Command Line Tools | ✅ 已确认（`iconutil`/`codesign`/`plutil` 均可用，打包链路依赖它们） |
-| cargo workspace 落地 | ✅ 4 个 crate：`picasa-db` / `picasa-imaging` / `picasa-core` / `picasa-ui`（**未建** edit/face/ipc/cli） |
-| macOS `.app` 打包链路 | ✅ `packaging/bundle.sh` → `dist/OpenPicasa.app`（arm64、ad-hoc、12MB） |
-| 测试与门禁 | ✅ `cargo test --workspace` **135 passed**；`cargo clippy --workspace --all-targets -- -D warnings` 0 warning；`c_bench`（性能门禁）5 项判定全 PASS |
-| **M2.1 A 线：数据层（迁移 v2）** | ✅ **已落地**：`roots` 表（从 `Preferences.roots` 迁入，成为唯一真相源）+ `folders` 层级（`root_id`/`parent_id`/`name`/`direct_count`/`has_children`）+ `photos.dims_status` 与 `display_*` VIRTUAL 生成列 + `exclusions` / `index_tasks` / `index_task_failures`；升级流程 = **`VACUUM INTO` 备份 → 单事务 DDL → 数据补数 → 失败回滚并恢复**；真实库样本（1150 张 / 2 根目录）迁移 **0.56 s** |
-| **M2.1 B 工作包：宽高回填** | ✅ **已落地**：`probe_dims` 只读文件头（不建 EXIF 摘要、不整图解码）+ 可见区域按需插队 + 后台批量与**索引让路** + 零进展退避；**「读不到 ≠ 坏了」**——外置盘未挂载时状态位保持「待回填」而不是判死。真实库副本实测：盘不在 → 61 张全部保留待回填；盘在 → 60 张补齐、1 张 AVIF 判终态失败 |
-| **M2.1 C 工作包：性能（首屏分页 + 栅格布局缓存 + 索引失效修复）** | ✅ **已落地**：脏排序 `ORDER BY COALESCE(...)` 让 `idx_photos_folder_taken` 失效（5 万张首页 199 ms 全表扫），新增 `eff_taken_at` VIRTUAL 生成列 + `idx_photos_eff_taken` 后降到 1.77 ms；`reload_photos` 两段式（`COUNT` 拿总数 + 只读 `PAGE_FIRST=1500` 行，空闲帧按 `PAGE_STEP=4000` 补齐）+ 栅格 `GridCache` 跨帧复用（每帧布局代价 0）+ `group_by_day` 整数快路径。release 实测：首屏分页查询 2.1~3.5 ms、每帧（分组+布局+可见区间，仅首屏页）0.10 ms、全量 `group_by_day` 2.2 ms。**仍待做**：缩略图三级调度、内存上限与淘汰、后台任务优先级（独立工作包） |
-| **M2.1 D 工作包：流式展示** | ✅ **已落地**：重载后按**照片 id** 锚定（不是像素 offset——扫描会把新照片插到列表任意位置，旧 offset 必错位）；查看器先画栅格里**已有的 T0 缩略图**当 preview，2560 大图到了再换，消灭「点开大图先黑屏 200~400 ms」 |
-| **M2.1 E 工作包：导航** | ✅ **已落地**：**关闭关注文件夹只改 `roots.state`、不删索引**（重开复用同一 `root_id`，缩略图立即有图），与「从图库移除」是两个独立菜单项；子目录排除**在扫描遍历期剪枝**（只在树里隐藏 = 关了又自己冒出来）；刷新去重用「排队中」集合 + **worker 取走时移除**（否则长任务期间永远无法再刷新） |
-| **M2.1 F 工作包：加固** | ✅ **已落地**：诊断页（根目录状态 / 排除项 / 缓存占用 / 失败清单 + 6 种一键恢复动作）；缓存清理 `clear_all_thumbs` 必须同时重置 `thumb_state=0`（否则**永远不再重建**）、`vacuum` 前先 `wal_checkpoint(TRUNCATE)`（否则 WAL 下占用看不到下降）；索引进度面板已完成项自动收起 |
-| **M2.1 G 工作包：测试** | ✅ **已落地**：`c_bench` 从跑分工具改造成**门禁**（首屏 ≤ 60 ms / 每帧三件 ≤ 4 ms / 全量分组 ≤ 5 ms + 执行计划硬断言，超阈值 `exit(1)`，`--no-check` 只报告）；`m21_nav`（关闭复用 / 排除持久 / **只读护栏**）3 条 + `maintenance`（缓存统计 / 只清缩略图）2 条；判据项取 **best-of-5**（这台 5 W 无风扇机单次取值可在 0.96 / 6.33 ms 间跳） |
-| **M2.1 H 工作包：索引控制（暂停 / 删除）** | ✅ **已落地**：进度面板新增「暂停索引 / 继续索引」与「删除索引（二次确认）」。暂停**不复用 `cancel`**（那是生命周期标志，置位会让 worker 线程退出），改用可逆的 `paused`，停在**目录边界**、恢复后原地续跑不重扫；缩略图 `par_iter` 里也设闸（那是最贵的一段）。删除靠**世代号 `epoch` + 同一把 db 锁内比较**才堵死「删完又写回来」的窗口；只清 `photos`/`thumbs`/`folders`/`index_tasks`，**`roots` 与 `exclusions` 属用户配置必须保留**。另修「索引完的照片要立刻显示」：`ScanFinished`/`IndexCleared` 跳过 150 ms 节流直接重载。`m21_pause` 2 条 + `maintenance::clear_index` 1 条 |
-| **M2.1 I 工作包：增量发现 + 重建失败索引入口** | ✅ **已落地**：① 启动扫描**只补本次新增/变化的照片**（`ScanApply::touched`），历史欠账一张不碰；缓存键命中时**完全不读盘**（`folder_cached_meta`）。② 单张缩略图 838 ms → **111 ms**：根因是 `imageops::resize` 作为泛型函数在 `picasa-imaging`（O0）里实例化，`[profile.dev.package."*"]` 不覆盖工作区成员。③ 关掉自动回填后失败项没了入口 → 工具栏常驻「索引管理」按钮 + 失败数量角标，二级菜单「重建失败索引」走**独立通道**（`Job.ids` → `generate_thumbs_for_ids`），**只重做点名的那些**，绝不把 22.4 万张欠账卷进来；且「先按关注根分组、再只重置会入队的 id」，否则未匹配的失败项会变成永久灰格子。`m21_incremental` 1 条 + `m21_rebuild_failed` 2 条 + `thumb_bench` |
-| **M2.1 J 工作包：宽高终态** | ✅ **已落地**：903 张永远读不到宽高的照片，判成终态后**必须保得住**。原先扫描器每次启动都把它们打回「待回填」（缓存键未变分支无脑写 0）+ 缓存命中只认「宽高非空」（终态项永远是 NULL → 每次都重 `probe()` 一遍），形成永不终止的自循环。现在 `CachedMeta` 带 `dims_status`、命中判定扩到「已出结论」，未变则保住终态；**内容真变了才归零重试一次**。刻意不直接 `UPDATE` 成终态——那会永久误判「当时盘没插」那一批。`m21_dims_terminal` 2 条 |
-| **M2 A 线：索引底座** | ✅ **已落地**：`IndexService`（单 worker 队列 + 心跳线程）替代一次性扫描线程；多关注文件夹 = 多任务串行；缩略图 rayon 并行 + 每 64 张探测失联；子树口径统计 |
-| **M2 A 线：进度可见性** | ✅ **已落地**：右下角弹框 / 进度面板 / 状态栏入口 / 左栏状态点 / 栅格占位，**五处同源**（`IndexBoard` → `IndexSnapshot`）；七态状态机含系统暂停态；批次模型（冻结分母 + 上包络 + 「第 N 批」标注）；阈值 1.5/3/1 s 为命名常量 |
-| M2 A 线：界面基线截图 | ⏸ 待补：**窗口已能起**（沙箱无 `/dev/dri`，但补 `LIBGL_ALWAYS_SOFTWARE=1 MESA_LOADER_DRIVER_OVERRIDE=swrast` 后 EGL 正常、`Wayland` 抓到 `attach` 29 次 / `commit` 43 次、`xdg_toplevel` 建成，常驻 7 min 正常退出）；**仍缺截图能力**——`grim`/`gnome-screenshot`/`import`/`scrot` 均未安装，`org.gnome.Shell.Screenshot` 返回 `AccessDenied`。可行路径是 eframe 的 `ViewportCommand::Screenshot` 自截（此前不触发正是因为没 attach、没有 buffer），沿 `tools/pngprobe.py` 做像素探针（详见 `docs/ui-baseline/README.md`） |
-| M2 B 线：编辑内核 + 组织 + 输出 | ⬜ 未开始（见 `docs/01` §11 的 F 域） |
-| 界面还原数值 | 🟡 主几何已实测对齐（栏宽/单元格/间距/滚动条/分组头），**细节项仍待 PM 用原版截图回填**（`theme.rs` 里标 `TODO(U-xx)`） |
-| M0.3 TCC 跨重启 / M0.4 字体首帧 / M0.5 栅格 ≥55fps | ⏸ 需真机交互验证（本轮只完成了「起窗口 + 首帧正常」） |
+需要 Rust 工具链（`rust-toolchain.toml` 锁定 stable）与 Xcode Command Line Tools。
 
-**已落地的架构决策**（`docs/adr/`）：0001 四 crate 分层 · 0002 schema 两处有意偏差（不建 FTS5、不加预留列）·
-0003 手写 bundle 脚本 · 0004 图标矢量自绘（不提取原版位图）· 0005 栅格按行号虚拟化 ·
-0006 界面还原用自截图 + 像素探针。
+```bash
+# 1) 开发运行
+cargo run --release --bin OpenPicasa
 
-**M1 的 5 个 Go/No-Go 前置**（M0 阶段必须全部验证，详见 `docs/02` §9.2）：
+# 2) 构建 .app
+./packaging/bundle.sh
+# 产物：dist/OpenPicasa.app（arm64 + ad-hoc 签名）
 
-| # | 验证项 | 现状 |
-| --- | --- | --- |
-| M0.1 | rustup + `cargo build --release` 成功 | ✅ 已通过（release 全量构建 41.5s） |
-| M0.2 | 空壳 `.app` 双击能打开 + `codesign -dv` 通过 | ✅ 已通过（`Signature=adhoc`、`Identifier=app.openpicasa`、`Mach-O thin (arm64)`）；窗口自截图证明真的画出了五区界面 |
-| M0.3 | TCC 授权选目录能读到文件，**重启后仍有效** | ⏸ 待真机：需人工点 NSOpenPanel。若重启失效 → 改用固定签名身份（自签根证书 `codesign --sign "PicasaTest"`） |
-| M0.4 | **字体首帧成本 < 200ms**（系统字体 vs 内嵌子集三配置对照） | ⏸ 待实测；当前用系统字体，首屏中文字现实测无缺字（截图可见） |
-| M0.5 | 栅格 `show_viewport` + sticky 头 **≥ 55fps** | 🟡 虚拟化已按行号裁剪（ADR-0005，1000 张同一天时可见区间 <200），帧率待真机采样 |
+# 3) 打成可双击安装的 DMG
+./packaging/make_dmg.sh
+# 产物：dist/OpenPicasa-<version>-arm64.dmg（内含 .app + Applications 链接）
 
-**✅ 已彻底关闭的事项（v3.0）**：原版 Picasa 3.9 样本（T14）**不再是任何阶段的阻塞项**——v3.0 决定**不做数据兼容**，不需要对拍样本。这**不是降级，是消失**。
+# 4) 质量门禁
+cargo test --workspace
+cargo clippy --workspace --all-targets
+```
 
-> **v3.0 立场变更**：用户决策「**不需要读和写 picasa.ini，是做一个新的程序**」。定位从「1:1 复刻（含数据兼容）」改为「**界面与交互对等的全新程序**」——视觉手感对齐 3.9，**数据格式完全自立**。
->
-> 这砍掉了本项目原本最大的技术风险（`.picasa.ini` 字节级往返保真）。省下约 1500-2500 行代码、一整套兼容性测试矩阵、一类**不可调试的 bug**，以及一条「拿不到 Windows 原版样本就卡住」的关键路径。**完整说明见 `docs/02` §0.1.4（可直接对外汇报）。**
+### 打 DMG 时的一个坑：`hdiutil makehybrid` 不能用
+
+`make_dmg.sh` 用的是 `hdiutil create`。在受限环境（容器、某些 CI、被沙箱限制的终端）里它会失败：
+
+```
+newfs_hfs: cannot create filesystem on /dev/rdisk4s1: Operation not permitted
+```
+
+**这是权限问题，不是参数问题**——别去改 `-fs` / `-format` 试。直觉上会换成 `hdiutil makehybrid`
+（它不需要格式化权限，确实能成功产出一个 DMG），**但那个 DMG 是坏的**：
+
+`makehybrid` 会给镜像里**每个文件**打上 `com.apple.FinderInfo` 扩展属性，装到目标机后
+`codesign --verify --deep --strict` 报
+
+```
+resource fork, Finder information, or similar detritus not allowed
+```
+
+也就是**签名在解镜像那一刻就废了**。`.app` 表面上还能启动（非严格校验会过），但 Gatekeeper
+的判定会落到「已损坏」而不是「未验证的开发者」——后者右键打开一次即可，前者用户会以为文件坏了。
+
+所以 `make_dmg.sh` 在**挂载后**才对镜像里的那份 `.app` 跑 `--strict` 校验，就是为了守住这条线；
+校验不过就直接 `exit 1` 不产出。
+
+### 在 Linux 上构建（x86_64）
+
+```bash
+# 构建期不需要装任何 GUI 开发包：wayland / xkbcommon / vulkan 都是运行时 dlopen 的。
+cargo build --release --bin OpenPicasa     # → target/release/OpenPicasa
+./run.sh                                    # 直接启动
+
+# 打成 .deb
+./packaging/make_deb.sh                     # → dist/openpicasa_<version>-1_amd64.deb
+sudo apt install ./dist/openpicasa_<version>-1_amd64.deb
+```
+
+三个平台差异要知道：
+
+- **glibc 下限跟着构建机走**。二进制在构建机的 glibc 上链接，`Depends: libc6` 写的就是那个版本。
+  要给老发行版用得换更旧的构建环境（容器）或 musl 目标——改 control 里的版本号是没用的，符号就是不够。
+- **数据目录仍按 macOS 惯例**落在 `~/Library/Application Support/app.openpicasa/`，XDG 化尚未做。
+- **别把 `TMPDIR` 留在 `/tmp`**：部分发行版把 `/tmp` 挂成很小的 tmpfs，
+  `libsqlite3-sys` 编译 `sqlite3.c` 的中间文件会 ENOSPC。`packaging/make_deb.sh`
+  自己的临时目录也因此放在输出目录旁边。
 
 ---
 
-## 协作约定（三份文档之间的一致性纪律）
+## 项目结构
 
-> 这三条是从本轮评审的真实冲突里总结出来的，不是凭空立的规矩。新增/修改文档时请对照检查。
+```text
+openpicasa/
+├── crates/
+│   ├── picasa-db/       # SQLite 索引 + 缩略图 BLOB + schema 迁移（叶子 crate）
+│   ├── picasa-imaging/  # 解码 + Orientation 摆正 + 缩略图（无任何效果算子）
+│   ├── picasa-core/     # 扫描 / 监视 / 库会话 / 索引服务 / 宽高回填
+│   └── picasa-ui/       # eframe 应用（五区面板 + 栅格 + 查看器）
+├── packaging/           # Info.plist、bundle.sh、make_dmg.sh、make_deb.sh、图标生成
+├── docs/                # 设计与验收文档、ADR、界面基线截图
+├── tools/               # 像素探针、只读护栏
+└── run.sh
+```
 
-1. **编号纪律：跨文档引用必须一一映射，不允许"只是数量对得上"。**
-   01 §11.5.6 的界面还原清单 `U-01`~`U-44` 与 03 的界面测试表是**同一批被测对象**，编号必须严格对应。**编号错位比缺项更糟**——缺项能被发现，错位不会，只会在验收时变成"你说测了 U-21，我说你测的不是那个"。
+依赖方向：
 
-2. **"技术选型"类条目一律用「结论 + 保险条款」两层写法。**
-   选型是技术决策，产品不拍板；产品只约束**视觉/行为结果**。写法示例见 01 §11.5.6 U-44：结论是「用 macOS 系统字体」，保险条款是「若 M0.4 实测不达标切 Plan B，但**视觉约束不变、无需再修订产品文档**」。这样把"实现可变、验收不变"写进文档，比赌某个选型永不更变更可靠。
+```text
+picasa-ui ──┬──> picasa-core ──> picasa-db
+            │                └─> picasa-imaging
+            └──> picasa-imaging
+```
 
-3. **所有"零变化 / 零写入 / 零联网"型红线，必须同时给出 ①可证伪的反向断言 ②合规路径的指定 ③正向断言。**
-   这类红线有两个共同漏洞：**一是靠"什么都不做"也能通过**（所以要正向断言"该发生的事确实发生了"）；**二是禁令不指定合规路径时，实现会顺手违规**（例如禁止写照片目录，却不说缩略图档位该存哪——见 01 §11.5.3.1 与 02 §5.2）。三处红线均如此配：
-   - R-1 照片目录零写入：负向＝照片目录零变化（不新增、不修改任何文件，含不创建 `.picasa.ini`）；**合规路径＝索引与缩略图存 `~/Library/Application Support/<bundle-id>/`、偏好存 `~/Library/Preferences/`**（02 §5.2 有完整分工表）；**正向＝应用容器里的索引与偏好确实被创建并更新**
-   - R-2 无编辑入口：负向＝无编辑按钮/菜单/快捷键；**正向＝浏览路径的入口齐全**
-   - R-3 装得上打得开：负向＝Gatekeeper 能绕过；**正向＝绕过失败时也给出正确提示**
+- `picasa-db` 是**叶子 crate**，不依赖任何其他本地 crate，保证可独立测试与迁移。
+- `picasa-imaging` 不依赖 `picasa-db`；缓存与索引的协调放在 `picasa-core`。
+- `picasa-ui` 是**唯一依赖 `eframe`** 的 crate。
+
+---
+
+## 调试与自动化入口（只读，不碰照片目录）
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `OPENPICASA_DATA_DIR=<dir>` | 把索引/偏好/日志重定向到 `<dir>`（便携模式、测试、截图基线都用它） |
+| `OPENPICASA_SCREENSHOT=<png>` | 跑到第 N 帧后截取**本窗口**帧缓冲、写 PNG、自动退出 |
+| `OPENPICASA_SCREENSHOT_WARMUP=<n>` | 截图前预热帧数，默认 40 |
+| `OPENPICASA_OPEN_INDEX=<n>` | 启动后自动打开第 n 张的查看器 |
+| `OPENPICASA_LOG=debug` | 打开调试日志（默认 release 只记 info） |
+
+配套的像素探针（纯标准库，不需要装任何东西）：
+
+```bash
+python3 tools/pngprobe.py shot.png --row 600 --scale 2        # 沿一行量出栏宽/单元格/间距
+python3 tools/pngprobe.py shot.png --rect 1180,1495,1380,1540 # 某区域主色
+```
+
+> ⚠️ **`open dist/OpenPicasa.app` 不会继承 shell 环境变量**（macOS 的 `open --env` 实测不生效），
+> 所以上面这几个入口要作用在 `.app` 里那份可执行文件上：
+> `dist/OpenPicasa.app/Contents/MacOS/OpenPicasa`。用 `open` 启动则是纯交互模式。
+
+---
+
+## 文档
+
+| 路径 | 内容 |
+| --- | --- |
+| `docs/01-产品功能清单.md` | 产品功能域、功能点、优先级、验收要点（PRD） |
+| `docs/02-技术架构与选型.md` | 技术架构、crate 选型、自有元数据模型、macOS 打包与 TCC、界面壳层 |
+| `docs/03-测试策略与验收计划.md` | 测试分层、界面还原度截图对拍、安装运行测试、零写入测试、性能门禁 |
+| `docs/04-M2-需求说明书-关注文件夹与索引.md` | 关注文件夹 + 后台异步缩略图索引的需求与验收 |
+| `docs/05-M2.1-规划与路线图.md` | 数据层迁移设计与后续版本路线 |
+| `docs/06-M2.2-实现状态与冲突登记.md` | M2.2 实现状态与已知偏差登记 |
+| `docs/adr/` | 架构决策记录 0001–0006 |
+| `docs/ui-baseline/` | 界面基线截图与实测几何数值（本程序自渲染） |
 
 ---
 
@@ -584,14 +250,21 @@ rm -rf ~/Library/Application\ Support/app.openpicasa
 
 原创代码：`MIT OR Apache-2.0`（双许可，Rust 生态惯例）。
 
-**注意第三方许可**（M1 实际依赖与 M2+ 的差异）：
+**第三方许可注意事项**：
 
-- **M1 的依赖全部是宽松许可**（MIT / Apache-2.0 / BSD / ISC / OFL-1.1）。**M1 不引入任何 LGPL 或 GPL 组件**——因为 M1 不做 RAW（`rawler` 是 LGPL-2.1）、不做元数据写入（`rexiv2` 是 GPL-3.0，已在选型阶段排除）。
-- **M1 需要留意的两项**：
-  - **字体**：**M1 使用 macOS 系统字体（PingFang SC / SF Pro），不内嵌字体**（结论见 `docs/02` §8.4）。因此**没有 OFL 字体许可负担**；若 M0.4 实测触发 Plan B 改为内嵌 1500 字子集，则需补 OFL-1.1 许可文件随包分发。
-  - **图标**：**M1 不引入任何图标库与 SVG 光栅化器**——13 个图标全部用 `egui::Painter` 矢量自绘
-    （`crates/picasa-ui/src/icons.rs`），因此既没有 Lucide 的 ISC 义务，也不需要 `resvg`（MPL-2.0）。
-    这同时避免了「从原版 Picasa 提取位图」的版权风险。详见 `docs/adr/0004`。
-- **M2 起才需要处理的许可**：`rawler`（LGPL-2.1，需子进程隔离）、人脸模型权重（InsightFace 系明确非商用，**不能随商业包分发**）、GeoNames 地名库（CC BY 4.0，须署名）。
+- 当前依赖全部是宽松许可（MIT / Apache-2.0 / BSD / ISC / OFL-1.1）。**不引入任何 LGPL 或 GPL 组件**
+  —— 因为不做 RAW（`rawler` 是 LGPL-2.1）、不做元数据写入（`rexiv2` 是 GPL-3.0）。
+- **字体**：使用 macOS 系统字体（PingFang SC / SF Pro），**不内嵌字体**，因此没有 OFL 字体许可负担。
+- **图标**：不引入任何图标库与 SVG 光栅化器——图标全部用 `egui::Painter` 矢量自绘
+  （`crates/picasa-ui/src/icons.rs`），既没有第三方图标许可义务，也避免了「从原版 Picasa 提取位图」
+  的版权风险。
 
-分发二进制前必须做许可合规审查，详见 `docs/02` §11「许可与合规」。这是本项目的**硬约束**。
+分发二进制前必须做许可合规审查。这是本项目的**硬约束**。
+
+---
+
+## 与 Google Picasa 的关系
+
+本项目是**独立的重新实现**，与 Google / 原版 Picasa 没有任何隶属或授权关系。
+界面布局作为交互参照，但所有代码、图标、文案均为原创；不包含任何原版 Picasa 的二进制、
+图标素材或代码。产品名称中的 "Picasa" 仅用于说明设计参照对象。
