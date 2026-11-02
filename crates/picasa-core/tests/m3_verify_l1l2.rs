@@ -53,6 +53,10 @@ fn fixture(root: &Path, dirs: &[&str], files_per_dir: usize) -> (Vec<i64>, Db) {
             })
             .collect();
         db.apply_scan(fid, &path, &items, 0).unwrap();
+        // `apply_scan` 会写 `dir_mtime`（`07` §3.2 VERIFY-02）。
+        // 但夹具要模拟的是**升级后第一次启动**的状态：那时 `dir_mtime` 还没被量过。
+        // 所以这里清空它——生产的升级路径正是这样（v6 的补数**故意不填**这一列）。
+        db.set_folder_dir_mtime(fid, None).unwrap();
         ids.push(fid);
     }
     (ids, db)
@@ -393,4 +397,40 @@ fn unreachable_directories_are_skipped_not_failed() {
     // 也不该记成已校验
     let fp = db.folder_fingerprints(1).unwrap_or_default();
     let _ = (ids, fp);
+}
+
+#[test]
+fn apply_scan_writes_dir_mtime_in_the_same_step() {
+    // `07` §3.2 VERIFY-02：`dir_mtime` 在**目录遍历完成时**由落库线程写入。
+    //
+    // ⚠️ 这条曾经是**真正漏掉的**：`apply_scan` 只写 `direct_count` 不写 `dir_mtime`，
+    // 于是真实库跑完一次扫描后 `dir_mtime` 仍然全 NULL，L1 每次都说「还没量过 → 走 L2」，
+    // 两级校验**完全退化**成 M2.2 的老行为——而且不报任何错，
+    // 用户只会觉得「升级了怎么还是启动 20 分钟」。
+    //
+    // 发现方式：在真实库副本上跑完迁移，`SELECT COUNT(*) FROM folders WHERE dir_mtime IS NOT NULL`
+    // 得到 0。这种事单测抓不到，因为补数是**故意留空**的（`07` §8.2），
+    // 只有在「真的扫一次」之后才有值。
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let (ids, db) = fixture(root, &["a"], 2);
+
+    // 夹具在 `fixture` 里清空了它（模拟升级态）；现在手动补一次扫描
+    assert!(db.folder_dir_mtime(ids[0]).unwrap().is_none());
+    let dir = root.join("a");
+    let path = dir.to_string_lossy().to_string();
+    db.apply_scan(ids[0], &path, &[], 0).unwrap();
+
+    let stored = db
+        .folder_dir_mtime(ids[0])
+        .unwrap()
+        .expect("扫描完成后 dir_mtime 必须有值，否则 L1 永远不会生效");
+    let actual = std::fs::metadata(&dir)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    assert_eq!(stored, actual, "存的必须是这个目录**真实**的 mtime（纳秒）");
 }

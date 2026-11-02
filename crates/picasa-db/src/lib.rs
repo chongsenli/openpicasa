@@ -1063,7 +1063,7 @@ impl Db {
     fn apply_scan_inner(
         &self,
         folder_id: i64,
-        _folder_path: &str,
+        folder_path: &str,
         items: &[PhotoInput],
         decoder_ver: i64,
         out: &mut ScanApply,
@@ -1195,11 +1195,28 @@ impl Db {
             out.removed += 1;
         }
 
+        // ---- `dir_mtime` 与扫描结果**同一事务**写入（`07` §3.2 VERIFY-02）
+        //
+        // 这是 L1 快筛能生效的**唯一**前提：没有它，`dir_mtime` 永远是 NULL，
+        // 于是 L1 每次都说「还没量过 → 走 L2」，两级校验退化成 M2.2 的老行为，
+        // 而这一点**不会报错**——只是启动一直慢 20 分钟。
+        //
+        // 为什么在这里 stat 而不是让调用方传进来：`apply_scan` 是「这个目录的
+        // 遍历结果落库」的**唯一入口**，把 `dir_mtime` 的写入点绑在这里，
+        // 就不可能出现「某条扫描路径忘了写」。而 `apply_scan` 本身已经过了
+        // `read_dir`，多一次目录 `stat` 在噪声里（一次 stat ≈ 2 µs）。
+        let dir_mtime = std::fs::metadata(folder_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| i64::try_from(d.as_nanos()).ok());
+
         self.conn.execute(
             "UPDATE folders SET last_scan_at = strftime('%s','now'), is_online = 1,
-                                direct_count = (SELECT COUNT(*) FROM photos WHERE folder_id = ?1)
+                                direct_count = (SELECT COUNT(*) FROM photos WHERE folder_id = ?1),
+                                dir_mtime = COALESCE(?2, dir_mtime)
              WHERE id = ?1",
-            params![folder_id],
+            params![folder_id, dir_mtime],
         )?;
 
         // ---- 递归计数缓存（`07` §4.1：同一事务维护 `total_count`）
