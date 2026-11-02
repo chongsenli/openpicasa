@@ -19,6 +19,7 @@ pub mod index;
 pub mod library;
 pub mod mgmt;
 pub mod migrate;
+pub mod movematch;
 pub mod paths;
 pub mod perf;
 pub mod pipeline;
@@ -50,6 +51,7 @@ pub use mgmt::{
     build_snapshot, check_export_dir, collect_storage, default_offline_probe, diag_filename,
     live_task_views, path_is_offline,
 };
+pub use movematch::{FileMeta, MatchOutcome, MoveMatcher, MoveStats, PhotoKey, head_hash};
 pub use paths::AppPaths;
 pub use watch_mgr::{RootWatchConfig, WatchManager, WatchOut};
 pub use zoom::{
