@@ -87,6 +87,10 @@ fn fixture() -> Fixture {
 }
 
 /// 快照输入的样板：seq 递增、不暂停，活任务与探针由调用方给。
+/// M22 的用例不关心监视状态（M3 才引入），统一用空 map。
+static EMPTY_WATCH: std::sync::LazyLock<std::collections::HashMap<i64, picasa_core::watcher::WatchState>> =
+    std::sync::LazyLock::new(std::collections::HashMap::new);
+
 fn input<'a>(
     seq: u64,
     probe: &'a picasa_core::OfflineProbe,
@@ -99,6 +103,7 @@ fn input<'a>(
         live,
         paused_by_system: false,
         offline: probe,
+        watch: &EMPTY_WATCH,
         prev_dataset_version,
         prev_photo_count,
     }
@@ -111,6 +116,7 @@ fn input_fresh<'a>(seq: u64, probe: &'a picasa_core::OfflineProbe) -> SnapshotIn
         live: &[],
         paused_by_system: false,
         offline: probe,
+        watch: &EMPTY_WATCH,
         prev_dataset_version: 0,
         prev_photo_count: 0,
     }
@@ -203,6 +209,7 @@ fn tc_m22_perf_09_snapshot_refresh_does_not_bump_dataset_version() {
             live: &[],
             paused_by_system: false,
             offline: &probe,
+            watch: &Default::default(),
             prev_dataset_version: prev,
             prev_photo_count: prev_photos,
         };
@@ -376,6 +383,7 @@ fn tc_m22_idx_001_running_tasks_reach_the_tasks_tab() {
         live: &views,
         paused_by_system: false,
         offline: &default_offline_probe(),
+        watch: &EMPTY_WATCH,
         prev_dataset_version: 0,
         prev_photo_count: 0,
     };

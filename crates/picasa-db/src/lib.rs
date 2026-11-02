@@ -29,7 +29,7 @@ pub use types::{
     aggregate_totals,
     CacheStats, CachedMeta, CountSnapshot, DimsStats, ExclusionRow, FailureGroup, FailureKind,
     FolderFingerprint, FolderRow, FolderTreeRow, PhotoFormat, PhotoInput, PhotoRow, RootRow,
-    RootSeed, RootStat, ScanApply, TakenFrom, TaskOutcome, TaskRow, ThumbBuf, ThumbState,
+    RootSeed, RootStat, RootWatchRow, ScanApply, TakenFrom, TaskOutcome, TaskRow, ThumbBuf, ThumbState,
     ThumbStats, UPSERT_UNCHANGED, UpgradeReport, V2DataReport, classify_failure,
 };
 

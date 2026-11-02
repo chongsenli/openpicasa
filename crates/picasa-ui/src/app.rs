@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, vec2};
 use picasa_core::{
     AppPaths, CoreEvent, DimsService, IndexBoard, IndexService, Library, ThumbService, Tier,
-    watcher,
 };
 use picasa_db::{PhotoRow, SortKey};
 
@@ -48,6 +47,9 @@ pub struct OpenPicasaApp {
     grid_layout: grid::GridCache,
     service: ThumbService,
     rx: Receiver<CoreEvent>,
+    /// 后台 → UI 的事件发送端。监视器曾经用它转发 `FsChanged`；
+    /// M3 起监视走 `WatchManager` 直接投递刷新任务，但这条通道仍被扫描/解码事件使用。
+    #[allow(dead_code)]
     tx: Sender<CoreEvent>,
     /// 索引服务（M2 A 线）：关注文件夹 → 任务队列 → 扫描/缩略图
     index: IndexService,
@@ -57,7 +59,8 @@ pub struct OpenPicasaApp {
     board: Arc<IndexBoard>,
     /// 进度弹框/面板的界面状态（含"本会话关闭过哪个批次"）
     progress: IndexProgressUi,
-    watch: Option<watcher::WatchHandle>,
+    /// 文件系统监视管理器（`07` §2）。每根一个 Watcher，集中管生命周期与降级状态。
+    watch: picasa_core::WatchManager,
 
     viewer: Option<Viewer>,
 
@@ -197,7 +200,7 @@ impl OpenPicasaApp {
             dims,
             board,
             progress: IndexProgressUi::new(),
-            watch: None,
+            watch: picasa_core::WatchManager::new(),
             viewer: None,
             search_buf,
             sort_menu_open: false,
@@ -287,11 +290,14 @@ impl OpenPicasaApp {
             std::time::Instant::now() + std::time::Duration::from_millis(MGMT_REFRESH_MS);
 
         let live = picasa_core::live_task_views(&self.progress.snapshot().clone());
+        // 监视状态是**运行时**的，从管理器取，不从库取（`07` §2.3）
+        let watch = self.watch.states();
         let input = picasa_core::SnapshotInput {
             seq: self.mgmt.seq + 1,
             live: &live,
             paused_by_system: self.index.is_paused(),
             offline: &self.offline_probe,
+            watch: &watch,
             prev_dataset_version: self.mgmt.dataset_version,
             prev_photo_count: self.mgmt.storage.photo_count,
         };
@@ -699,7 +705,62 @@ impl OpenPicasaApp {
             return;
         }
         self.index.enqueue_scan(&roots);
-        self.watch = watcher::spawn_watch(roots, self.tx.clone());
+    }
+
+    /// 同步监视器到当前的根集合（`07` WATCH-01）。
+    ///
+    /// 调用的时机有三个：启动、根增删、设置页拨开关。
+    /// **每次都是全量同步**（不是增量）：`WatchManager::sync` 自己是幂等的，
+    /// 让它去判断「哪些要装、哪些要卸」，比在这里维护一份对照表可靠。
+    fn sync_watchers(&mut self) {
+        let configs = {
+            let Ok(db) = self.lib.db() else {
+                return;
+            };
+            match picasa_core::watch_mgr::load_configs(&db) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "读监视配置失败，本轮不装监视");
+                    return;
+                }
+            }
+        };
+        let Ok(db) = self.lib.db() else {
+            return;
+        };
+        if let Err(e) = self.watch.sync(&db, &configs) {
+            tracing::warn!(error = %e, "同步监视器失败");
+        }
+        let states = self.watch.states();
+        tracing::info!(
+            active = self.watch.active_count(),
+            degraded = self.watch.degraded_count(),
+            roots = states.len(),
+            "监视器已同步"
+        );
+    }
+
+    /// 每帧推进监视器：收事件 → 去抖 → 排队刷新（`07` §2.2）。
+    ///
+    /// ⚠️ 这里**只投递 Job**，不自己扫描（R-M3-8：落库线程是唯一写 DB 的线程）。
+    fn tick_watchers(&mut self) {
+        let now = std::time::Instant::now();
+        let outs = self.watch.poll(now);
+        for out in outs {
+            match out {
+                picasa_core::WatchOut::Dirs(dirs) => {
+                    for d in dirs {
+                        // 复用 M2.1 的目录级刷新语义：**事件处理路径 = 已验证路径**
+                        self.index.enqueue_refresh(&d);
+                    }
+                    self.lib.toast = Some(("检测到外部变化，正在刷新".into(), 1.5));
+                }
+                picasa_core::WatchOut::Root { root_id, path } => {
+                    tracing::info!(root_id, path = %path.display(), "监视溢出，改为整根刷新");
+                    self.index.enqueue_refresh(&path);
+                }
+            }
+        }
     }
 
     fn refresh_tray_rows(&mut self) {
@@ -1971,6 +2032,11 @@ impl eframe::App for OpenPicasaApp {
         self.theme = Theme::picasa();
 
         self.pump_events(&ctx);
+        // M3：监视器同步（幂等，只在根集合真的变了时才装/卸）
+        if self.frames.is_multiple_of(120) {
+            self.sync_watchers();
+        }
+        self.tick_watchers();
         self.flush_reload(&ctx);
         self.handle_keys(&ctx);
         // 索引进度：按 250 ms 节流取快照（不在 UI 线程做任何索引工作）

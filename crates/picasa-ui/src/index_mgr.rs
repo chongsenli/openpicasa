@@ -415,6 +415,18 @@ fn folders_tab(
         ui.label(RichText::new("还没有关注任何文件夹").color(theme.text_secondary));
         return;
     }
+    // 角标里监视分量的来源说明（R-M3-7：降级必须在页面可见，不能只在 tooltip 里）
+    if snap.watch_degraded_roots > 0 {
+        ui.label(
+            RichText::new(format!(
+                "{} 个文件夹的实时监视不可用，已改为定时检查（详情见各行的「为什么？」）",
+                snap.watch_degraded_roots
+            ))
+            .size(11.0)
+            .color(theme.warn),
+        );
+        ui.add_space(4.0);
+    }
     for r in &snap.roots {
         ui.group(|ui| {
             ui.horizontal(|ui| {
@@ -440,6 +452,35 @@ fn folders_tab(
                 .size(11.0)
                 .color(theme.text_secondary),
             );
+
+            // ---- M3-UI-01（U-61）：监视状态列
+            //
+            // R-M3-7 的硬要求：任何根处于非 Active 状态都必须**逐行可见**。
+            // 所以这一行永远画（`Active` 也画，显示「实时」），
+            // 而不是「有问题才出现」——后者会让「一切正常」和「这行没渲染」
+            // 长得一模一样，而后者正是缺陷。
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("监视").size(11.0).color(theme.text_secondary));
+                let color = if r.watch.is_active() {
+                    theme.ok
+                } else if r.watch.counts_for_badge() {
+                    theme.warn
+                } else {
+                    theme.text_disabled
+                };
+                ui.label(RichText::new(r.watch.label()).size(11.0).color(color));
+                // 「为什么？」：只有真的降级时才给链接（正常态点它没有意义）
+                if r.watch.counts_for_badge()
+                    && let Some(advice) = r.watch.advice()
+                {
+                    ui.label(
+                        RichText::new("为什么？")
+                            .size(11.0)
+                            .color(theme.text_secondary),
+                    )
+                    .on_hover_text(advice);
+                }
+            });
 
             ui.horizontal(|ui| {
                 // 离线根：只给「连接后刷新」（§2.8），其他按钮点了必然失败
@@ -619,6 +660,7 @@ mod tests {
             thumb_bytes: 1024,
             failed: 2,
             last_indexed_at: Some(1_000_000),
+            watch: Default::default(),
         }
     }
 

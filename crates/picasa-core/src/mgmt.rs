@@ -30,6 +30,7 @@ use picasa_db::{self as db, ExclusionRow, FailureGroup, FailureKind, RootStat, T
 
 use crate::Result;
 use crate::index::IndexState;
+use crate::watcher::WatchState;
 
 // ---------------------------------------------------------------- 常量（附录 A）
 
@@ -148,6 +149,11 @@ pub struct RootView {
     pub thumb_bytes: u64,
     pub failed: u64,
     pub last_indexed_at: Option<i64>,
+    /// 监视状态（`07` §2.3 / R-M3-7）。**运行时状态，不落库**——
+    /// 换个网络环境、换个挂载点，「能不能实时」就可能完全不同。
+    ///
+    /// 默认 `Off`：还没装上监视时如实显示「未监视」，不假装在实时。
+    pub watch: WatchState,
 }
 
 impl RootView {
@@ -316,6 +322,11 @@ pub struct MgmtSnapshot {
     pub exclusions: Vec<ExclusionView>,
     /// §4.4 算好的角标
     pub badge: u32,
+    /// 角标的「监视降级」分量（`07` §2.3 第四分量，悬停文案用）。
+    ///
+    /// 单独存一份的原因与 `failed_task_count` 相同：从 `badge` 反推在封顶 99+ 时算不准，
+    /// 而 tooltip 说错一个数，用户就会怀疑整个角标是假的。
+    pub watch_degraded_roots: u32,
     /// 角标的「有未忽略失败项的任务数」分量（悬停文案用）。
     ///
     /// 存进快照而不是让 UI 从总数反推：反推在「角标封顶 99+」时会算错，
@@ -339,8 +350,40 @@ impl MgmtSnapshot {
     /// 不是「有几张照片坏了」，后者进失败分组明细。
     pub fn compute_badge(&mut self, failed_task_count: u64, missing_exclusions: u64) {
         let offline_roots = self.roots.iter().filter(|r| r.offline && !r.closed).count() as u64;
-        self.badge =
-            (failed_task_count + missing_exclusions + offline_roots).min(u32::MAX as u64) as u32;
+        self.badge = (failed_task_count + missing_exclusions + offline_roots)
+            .min(u32::MAX as u64) as u32;
+        // ⚠️ 监视分量在 [`Self::compute_badge_with_watch`] 里加。
+        // 为什么拆成两处：M2.2 的既有调用点（含测试）只传两个数，
+        // 直接改签名会波及一大片与监视无关的代码。这里保留旧语义（监视分量 0），
+        // 由 `build_snapshot` 走新方法——**只有一个地方**真的算角标。
+        self.watch_degraded_roots = 0;
+    }
+
+    /// `07` §2.3 的完整角标公式（M2.2 三分量 + 监视第四分量）。
+    ///
+    /// ```text
+    /// badge = failed_tasks(ignored=0)
+    ///       + exclusions(path_missing)
+    ///       + roots(active && offline)
+    ///       + roots(active && !offline && watch ∈ {Polling(reason≠UserDisabled), Overflow})
+    /// ```
+    ///
+    /// 第四个分量只数**在线且未关闭**的根：离线的根已经有第三个分量在数了，
+    /// 再按「它也监视不了」加一次就是同一件事算两遍。
+    pub fn compute_badge_with_watch(
+        &mut self,
+        failed_task_count: u64,
+        missing_exclusions: u64,
+    ) {
+        let offline_roots = self.roots.iter().filter(|r| r.offline && !r.closed).count() as u64;
+        let watch_degraded = self
+            .roots
+            .iter()
+            .filter(|r| !r.closed && !r.offline && r.watch.counts_for_badge())
+            .count() as u64;
+        self.watch_degraded_roots = watch_degraded as u32;
+        self.badge = (failed_task_count + missing_exclusions + offline_roots + watch_degraded)
+            .min(u32::MAX as u64) as u32;
     }
 
     /// 角标显示文案：≥ 100 显示「99+」（§4.4）。
@@ -502,6 +545,10 @@ pub struct SnapshotInput<'a> {
     pub offline: &'a OfflineProbe,
     /// 上一份快照的数据集版本号（用于判定是否自增）
     pub prev_dataset_version: u64,
+    /// 每个根的监视状态（`07` §2.3，R-M3-7 要求逐行可见）。
+    ///
+    /// 由 UI / 监视管理器每轮填进来。空 map = 还没装监视 → 全部显示 `Off`。
+    pub watch: &'a HashMap<i64, WatchState>,
     /// 上一份快照的 `photos` 行数。
     ///
     /// 数据集版本号的**唯一**自增判据（PERF-09）：行数变了才说明照片集合真的增删过。
@@ -550,7 +597,14 @@ pub fn build_snapshot(d: &db::Db, input: &SnapshotInput<'_>) -> Result<MgmtSnaps
     let root_stats = d.root_stats()?;
     let mut roots = Vec::with_capacity(root_stats.len());
     for rs in root_stats {
-        roots.push(root_view(&rs, input.offline));
+        let mut view = root_view(&rs, input.offline);
+        // 离线 / 已关闭的根不该显示「实时监视」——那会骗人。
+        view.watch = match input.watch.get(&rs.id) {
+            _ if view.closed || view.offline => WatchState::Off,
+            Some(w) => w.clone(),
+            None => WatchState::Off,
+        };
+        roots.push(view);
     }
 
     // ---- 失败分类（§4.5 五类）
@@ -625,6 +679,7 @@ pub fn build_snapshot(d: &db::Db, input: &SnapshotInput<'_>) -> Result<MgmtSnaps
         failures_by_kind,
         exclusions,
         badge: 0,
+        watch_degraded_roots: 0,
         failed_task_count: 0,
         storage,
         paused_by_system: input.paused_by_system,
@@ -634,7 +689,8 @@ pub fn build_snapshot(d: &db::Db, input: &SnapshotInput<'_>) -> Result<MgmtSnaps
     // 有未忽略失败的任务数（§4.4 的第一个分量）
     let failed_task_count = d.failed_task_count()?;
     snap.failed_task_count = failed_task_count;
-    snap.compute_badge(failed_task_count, missing_exclusions);
+    // M3：角标改走含监视分量的公式（`07` §2.3 覆盖 `06` §4.4 的三分量）
+    snap.compute_badge_with_watch(failed_task_count, missing_exclusions);
 
     // 数据集版本号只在照片集合真的变了才动（PERF-09）：
     // 计数分布变化（A 目录 +1、B 目录 -1）不动，只有 photos 行数变了才自增，
@@ -649,6 +705,8 @@ pub fn build_snapshot(d: &db::Db, input: &SnapshotInput<'_>) -> Result<MgmtSnaps
 }
 
 fn root_view(rs: &RootStat, offline: &OfflineProbe) -> RootView {
+    // 监视状态由 `build_snapshot` 的调用方经 `SnapshotInput.watch` 注入；
+    // 这里给 `Off`（= 如实显示「未监视」），**不假装** `Active`。
     let path = PathBuf::from(&rs.path);
     RootView {
         id: rs.id,
@@ -660,6 +718,7 @@ fn root_view(rs: &RootStat, offline: &OfflineProbe) -> RootView {
         thumb_bytes: 0,
         failed: rs.failed,
         last_indexed_at: rs.last_indexed_at,
+        watch: WatchState::Off,
     }
 }
 

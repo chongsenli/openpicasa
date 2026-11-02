@@ -809,3 +809,18 @@ pub fn aggregate_totals(
     }
     totals
 }
+
+/// 一个关注根的监视配置（`07` §8.1）。
+///
+/// 只有**用户意图**：开不开、轮询间隔。运行时状态
+/// （`WatchState::{Active,Polling,Overflow,Off}`）不入库——
+/// 换个网络环境就变的东西存进库只会说谎。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootWatchRow {
+    pub root_id: i64,
+    pub path: String,
+    /// `roots.watch_enabled`
+    pub enabled: bool,
+    /// `roots.poll_interval_s`；`None` = 用默认值
+    pub poll_interval_s: Option<i64>,
+}

@@ -13,7 +13,7 @@
 //! active、复用 `root_id`，排除记录也原样沿用——这就是「再次添加秒开」。
 
 use crate::pathutil::{compare_key, nfc};
-use crate::{Db, ExclusionRow, Result, RootRow};
+use crate::{Db, ExclusionRow, Result, RootRow, RootWatchRow};
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
 
@@ -195,4 +195,43 @@ fn map_root(r: &rusqlite::Row<'_>) -> rusqlite::Result<RootRow> {
         closed_at: r.get(5)?,
         case_insensitive: r.get::<_, i64>(6)? != 0,
     })
+}
+
+impl Db {
+    /// 每个关注根的监视配置（`07` §8.1 的 `roots.watch_enabled` / `poll_interval_s`）。
+    ///
+    /// **只读用户意图**：运行时状态（装没装上、是不是网络卷）不入库。
+    pub fn root_watch_configs(&self) -> Result<Vec<RootWatchRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, path, watch_enabled, poll_interval_s
+               FROM roots WHERE state = 0 ORDER BY path",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(RootWatchRow {
+                root_id: r.get::<_, i64>(0)?,
+                path: r.get::<_, String>(1)?,
+                enabled: r.get::<_, i64>(2)? != 0,
+                poll_interval_s: r.get::<_, Option<i64>>(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 设置某个根的实时监视开关（WATCH-12）。
+    pub fn set_root_watch_enabled(&self, root_id: i64, enabled: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE roots SET watch_enabled = ?2 WHERE id = ?1",
+            rusqlite::params![root_id, if enabled { 1 } else { 0 }],
+        )?;
+        Ok(())
+    }
+
+    /// 设置某个根的轮询间隔（秒）。`None` = 用默认值。
+    pub fn set_root_poll_interval(&self, root_id: i64, seconds: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE roots SET poll_interval_s = ?2 WHERE id = ?1",
+            rusqlite::params![root_id, seconds],
+        )?;
+        Ok(())
+    }
 }

@@ -111,6 +111,7 @@ fn snap_of(db: &Db) -> picasa_core::MgmtSnapshot {
             live: &[],
             paused_by_system: false,
             offline: &default_offline_probe(),
+            watch: &Default::default(),
             prev_dataset_version: 0,
             prev_photo_count: u64::MAX, // 强制 dataset_version 自增，避免与上一份比较
         },
@@ -237,6 +238,7 @@ fn tc_m3_count_002b_progress_refresh_does_not_reaggregate() {
                 live: &[],
                 paused_by_system: false,
                 offline: &default_offline_probe(),
+                watch: &Default::default(),
                 prev_dataset_version: prev_version,
                 prev_photo_count: prev_count,
             },

@@ -28,6 +28,7 @@ pub mod texbudget;
 pub mod thumbs;
 pub mod trash;
 pub mod verify;
+pub mod watch_mgr;
 pub mod watcher;
 
 pub use datasource::{
@@ -49,6 +50,7 @@ pub use mgmt::{
     live_task_views, path_is_offline,
 };
 pub use paths::AppPaths;
+pub use watch_mgr::{RootWatchConfig, WatchManager, WatchOut};
 pub use prefs::Preferences;
 pub use scanner::{CoreEvent, IndexService, ScanHandle, spawn_scan, spawn_scan_with_board};
 pub use thumbs::{THUMB_WORKERS, ThumbJob, ThumbService};

@@ -28,6 +28,7 @@ fn main() {
             live: &live,
             paused_by_system: false,
             offline: &roots_probe,
+            watch: &Default::default(),
             prev_dataset_version: 0,
             prev_photo_count: 0,
         };
