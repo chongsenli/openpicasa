@@ -28,7 +28,8 @@ use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Rect, Response, ScrollArea, Sense, Stroke,
     StrokeKind, Ui, Vec2, pos2, vec2,
 };
-use picasa_core::{IndexSnapshot, ThumbService, Tier, library};
+use picasa_core::{IndexSnapshot, ThumbJob, ThumbService, ViewMode, library};
+use picasa_core::thumbs::JobKind;
 use picasa_db::{Db, PhotoRow};
 
 use crate::icons::{self, Icon};
@@ -42,6 +43,14 @@ use crate::theme::{Metrics, Theme};
 /// 单张约 0.1 ms，8 张 ≈ 0.8 ms，在 16.7 ms 的帧预算里可以接受；
 /// 一次装 32 张就会吃掉 3 ms 以上，开始在弱机上掉帧。
 const ATLAS_UPLOADS_PER_FRAME: usize = 8;
+
+/// masonry 模式下 `cell_px` 的实际下限。滑块仍显示 22～512，但瀑布流把列宽/行高
+/// 钳到 ≥ 64：低于这个值一张图不足几像素，且几千列会让每帧的布局与绘制都失控。
+const MASONRY_MIN_CELL: f32 = 64.0;
+
+/// masonry 视口裁剪桶的粒度（每多少个索引一个桶）。
+/// 128 张 × ~200px ≈ 2.6 万 px 的主轴跨度，一次二分后只需扫描 1～2 个桶。
+const MASONRY_BUCKET: usize = 128;
 
 /// 一个分组（日期）在内容坐标里的位置。
 #[derive(Clone, Debug)]
@@ -62,18 +71,56 @@ pub struct GridLayout {
     pub content_w: f32,
     pub show_filename: bool,
     pub has_headers: bool,
+    /// 视图模式。`MasonryV`/`MasonryH` 下坐标由 `masonry_rects` 决定，
+    /// `thumb_rect` 走瀑布流坐标而不是等宽方格坐标。
+    pub mode: ViewMode,
+    /// masonry 模式下每个索引的（x, y, w, h）——**内容坐标**，按索引升序。
+    /// `Grid` 模式为空（走方格算式）。
+    masonry: Vec<egui::Vec2>,
+    /// masonry 模式下每个索引的 rect 起点（x, y）。与 `masonry` 尺寸一一对应。
+    masonry_pos: Vec<egui::Vec2>,
+    /// masonry 视口裁剪桶：每 `MASONRY_BUCKET` 个索引记录主轴坐标（V=y / H=x）
+    /// 的 `(min, max)`。贪心放置的坐标**不随索引单调**，不能直接二分；
+    /// 用桶把线性扫描限制在命中的少数桶里，保持虚拟化成立。
+    masonry_buckets: Vec<(f32, f32)>,
 }
 
 impl GridLayout {
-    pub fn build(photos: &[PhotoRow], width: f32, tier: Tier, has_headers: bool) -> Self {
-        let cell = Metrics::CELL_SIZES[tier.index()];
-        let show_filename = tier.shows_filename();
+    pub fn build(
+        photos: &[PhotoRow],
+        width: f32,
+        cell_px: f32,
+        has_headers: bool,
+        mode: ViewMode,
+    ) -> Self {
+        // masonry 下 `cell_px` 语义变为「目标列宽/行高基准」，下限拉到可读的最小值，
+        // 避免拖到 22px 时几千列/行直接卡死。
+        let cell = if mode == ViewMode::Grid {
+            cell_px
+        } else {
+            cell_px.max(MASONRY_MIN_CELL)
+        };
+        // 连续模式下文件名始终显示（产品定义：三档都显示文件名，文件名是辨认主线索）。
+        // masonry 的图片高度由宽高比决定，文件名行跟在每张图下方（不占统一行高）。
+        let show_filename = true;
         let cell_h = cell
-            + if show_filename {
+            + if show_filename && mode == ViewMode::Grid {
                 Metrics::FILENAME_H
             } else {
                 0.0
             };
+
+        let mut layout = if mode == ViewMode::Grid {
+            Self::build_grid(photos, width, cell, cell_h, has_headers)
+        } else {
+            Self::build_masonry(photos, width, cell, mode)
+        };
+        layout.mode = mode;
+        layout
+    }
+
+    /// 默认等宽等高方格布局（原 `build` 主体）。
+    fn build_grid(photos: &[PhotoRow], width: f32, cell: f32, cell_h: f32, has_headers: bool) -> Self {
         let gap = Metrics::CELL_GAP;
         let pad = Metrics::GRID_PAD;
 
@@ -118,8 +165,118 @@ impl GridLayout {
             groups,
             total_h,
             content_w: width,
-            show_filename,
+            show_filename: true,
             has_headers,
+            mode: ViewMode::Grid,
+            masonry: Vec::new(),
+            masonry_pos: Vec::new(),
+            masonry_buckets: Vec::new(),
+        }
+    }
+
+    /// masonry 瀑布流布局（M3 追加）。
+    ///
+    /// - `MasonryV`：列宽 = `cell`，图片按真实宽高比缩放到列宽，放进**最矮的列**；纵向滚动。
+    /// - `MasonryH`：行高 = `cell`，图片按真实宽高比缩放到行高，放进**最窄的行**；横向滚动。
+    ///
+    /// 宽高缺失（`width/height` 为 `None`）按 1:1 占位；DimsService 回填后布局重排。
+    /// 分组头不画（贪心坐标无法对齐行边界，见 `ViewMode` 文档），`groups` 只放一个
+    /// 覆盖全量的哑分组让 `group_of`/`groups_in_range` 继续工作。
+    fn build_masonry(photos: &[PhotoRow], width: f32, cell: f32, mode: ViewMode) -> Self {
+        let gap = Metrics::CELL_GAP;
+        let pad = Metrics::GRID_PAD;
+
+        let mut sizes = Vec::with_capacity(photos.len());
+        let mut positions = Vec::with_capacity(photos.len());
+
+        let (total_w, total_h) = match mode {
+            ViewMode::MasonryV => {
+                let usable = (width - 2.0 * pad).max(cell);
+                let cols = (((usable + gap) / (cell + gap)).floor() as usize).max(1);
+                let col_w = ((usable - gap * (cols as f32 - 1.0)) / cols as f32).max(cell * 0.5);
+                let mut col_y = vec![pad; cols];
+                for row in photos {
+                    let ratio = match (row.width, row.height) {
+                        (Some(w), Some(h)) if w > 0 && h > 0 => w as f32 / h as f32,
+                        _ => 1.0,
+                    };
+                    let h = (col_w / ratio).clamp(cell * 0.3, col_w * 4.0)
+                        + Metrics::FILENAME_H; // 文件名行跟在图下方，占位防重叠
+                    // 最矮列贪心放置
+                    let (ci, y) = col_y
+                        .iter()
+                        .enumerate()
+                        .min_by(|a, b| a.1.total_cmp(b.1).then(a.0.cmp(&b.0)))
+                        .map(|(i, y)| (i, *y))
+                        .unwrap_or((0, pad));
+                    let x = pad + ci as f32 * (col_w + gap);
+                    positions.push(egui::vec2(x, y));
+                    sizes.push(egui::vec2(col_w, h));
+                    col_y[ci] = y + h + gap;
+                }
+                let bottom = col_y.iter().copied().fold(pad, f32::max);
+                (width, bottom + pad)
+            }
+            ViewMode::MasonryH => {
+                // 行高 = cell，图片按宽高比得宽；放进当前最窄的行；横向滚动。
+                let rows = (((width - 2.0 * pad) / (cell + gap)).floor() as usize).max(1);
+                let row_h = cell;
+                let mut row_x = vec![pad; rows];
+                for row in photos {
+                    let ratio = match (row.width, row.height) {
+                        (Some(w), Some(h)) if w > 0 && h > 0 => w as f32 / h as f32,
+                        _ => 1.0,
+                    };
+                    let w = (row_h * ratio).clamp(row_h * 0.3, row_h * 8.0);
+                    let (ri, x) = row_x
+                        .iter()
+                        .enumerate()
+                        .min_by(|a, b| a.1.total_cmp(b.1).then(a.0.cmp(&b.0)))
+                        .map(|(i, x)| (i, *x))
+                        .unwrap_or((0, pad));
+                    let y = pad + ri as f32 * (row_h + gap);
+                    positions.push(egui::vec2(x, y));
+                    sizes.push(egui::vec2(w, row_h));
+                    row_x[ri] = x + w + gap;
+                }
+                let right = row_x.iter().copied().fold(pad, f32::max);
+                let content_h = pad * 2.0 + rows as f32 * row_h + (rows.saturating_sub(1)) as f32 * gap;
+                (right + pad, content_h)
+            }
+            ViewMode::Grid => unreachable!("build_masonry 只处理瀑布流模式"),
+        };
+
+        // 视口裁剪桶：按主轴（V=y / H=x）记录每 128 个索引的 (min, max)。
+        let vertical = mode == ViewMode::MasonryV;
+        let mut buckets: Vec<(f32, f32)> = Vec::new();
+        for chunk in positions.chunks(MASONRY_BUCKET) {
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for p in chunk {
+                let v = if vertical { p.y } else { p.x };
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            buckets.push((lo, hi));
+        }
+
+        Self {
+            cell,
+            cell_h: cell,
+            cols: 1,
+            groups: vec![Group {
+                title: String::new(),
+                y: 0.0,
+                first: 0,
+                count: photos.len(),
+            }],
+            total_h,
+            content_w: total_w,
+            show_filename: true,
+            has_headers: false,
+            mode,
+            masonry: sizes,
+            masonry_pos: positions,
+            masonry_buckets: buckets,
         }
     }
 
@@ -142,6 +299,12 @@ impl GridLayout {
 
     /// 索引 → 缩略图方块的内容坐标 rect。
     pub fn thumb_rect(&self, index: usize) -> Option<Rect> {
+        if self.mode != ViewMode::Grid {
+            // masonry：坐标在 build 时已经算好，直接查表。
+            let size = self.masonry.get(index).copied()?;
+            let p = self.masonry_pos.get(index).copied()?;
+            return Some(Rect::from_min_size(pos2(p.x, p.y), size));
+        }
         let gi = self.group_of(index)?;
         let g = &self.groups[gi];
         if index < g.first || index >= g.first + g.count {
@@ -161,10 +324,21 @@ impl GridLayout {
             return None;
         }
         let r = self.thumb_rect(index)?;
-        Some(Rect::from_min_size(
-            pos2(r.left(), r.bottom() + 1.0),
-            vec2(self.cell, Metrics::FILENAME_H),
-        ))
+        if self.mode == ViewMode::Grid {
+            // 方格：文件名画在格子**下方**的独立行（行高已计入 cell_h，不会重叠）
+            Some(Rect::from_min_size(
+                pos2(r.left(), r.bottom() + 1.0),
+                vec2(self.cell, Metrics::FILENAME_H),
+            ))
+        } else {
+            // masonry：rect 已包含文件名带（build 时高度 +FILENAME_H），图片填满
+            // 上部的 img_rect，文件名必须画在**格子内部**的底部带里——画到
+            // `rect.bottom()` 之外会落进 gap / 下一张图的格子上，被盖住。
+            Some(Rect::from_min_size(
+                pos2(r.left(), r.bottom() - Metrics::FILENAME_H),
+                vec2(r.width(), Metrics::FILENAME_H),
+            ))
+        }
     }
 
     /// 分组头高度（无分组头时 0）。
@@ -255,6 +429,9 @@ impl GridLayout {
         if self.groups.is_empty() {
             return (0, 0);
         }
+        if self.mode != ViewMode::Grid {
+            return self.masonry_visible_range(viewport, n);
+        }
         let top = viewport.min.y;
         let bottom = viewport.max.y;
         if bottom <= 0.0 {
@@ -309,6 +486,44 @@ impl GridLayout {
         g.first + (row * self.cols).min(g.count)
     }
 
+    /// masonry 的视口裁剪：先二分命中裁剪桶，再只扫命中桶里的索引。
+    /// 精确（逐 rect 相交判断），且代价 O(log 桶数 + 可见数)。
+    fn masonry_visible_range(&self, viewport: Rect, n: usize) -> (usize, usize) {
+        if n == 0 || self.masonry_buckets.is_empty() {
+            return (0, 0);
+        }
+        let vertical = self.mode == ViewMode::MasonryV;
+        let (vlo, vhi) = if vertical {
+            (viewport.min.y, viewport.max.y)
+        } else {
+            (viewport.min.x, viewport.max.x)
+        };
+        let mut first = n;
+        let mut last = 0usize;
+        for (bi, (lo, hi)) in self.masonry_buckets.iter().enumerate() {
+            // 桶与视口在主轴上不相交 → 跳过
+            if *hi < vlo - 2.0 || *lo > vhi + 2.0 {
+                continue;
+            }
+            let start = bi * MASONRY_BUCKET;
+            let end = (start + MASONRY_BUCKET).min(n);
+            for i in start..end {
+                let Some(size) = self.masonry.get(i) else { break };
+                let Some(p) = self.masonry_pos.get(i) else { break };
+                let (a, b) = if vertical { (p.y, p.y + size.y) } else { (p.x, p.x + size.x) };
+                if b >= vlo && a <= vhi {
+                    first = first.min(i);
+                    last = last.max(i + 1);
+                }
+            }
+        }
+        if first >= last {
+            (n, n)
+        } else {
+            (first.min(n), last.min(n))
+        }
+    }
+
     fn group_bottom(&self, gi: usize) -> f32 {
         match self.groups.get(gi + 1) {
             Some(next) => next.y,
@@ -337,6 +552,17 @@ impl GridLayout {
 
     /// 内容坐标 → 命中的索引（用于点击空白判断；M1 不做框选）。
     pub fn index_at(&self, pos: egui::Pos2) -> Option<usize> {
+        if self.mode != ViewMode::Grid {
+            // masonry：坐标无规律，只能按桶缩小范围后逐格判（桶是主轴有序的近似，
+            // 实际直接线性扫——命中测试只在点击时调用一次，不是热路径）。
+            for (i, (size, p)) in self.masonry.iter().zip(&self.masonry_pos).enumerate() {
+                let r = Rect::from_min_size(pos2(p.x, p.y), *size);
+                if r.contains(pos) {
+                    return Some(i);
+                }
+            }
+            return None;
+        }
         for (gi, g) in self.groups.iter().enumerate() {
             if pos.y < g.y || pos.y > self.group_bottom(gi) {
                 continue;
@@ -390,8 +616,16 @@ pub struct GridCache {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct LayoutKey {
     width_bits: u32,
-    tier: u8,
+    /// M3 ZOOM-01：连续滑块值（22～512），取代离散 `tier`。用 bits 存，
+    /// 拖 1px 就换 key → 布局实时重排。
+    cell_px_bits: u32,
     headers: bool,
+    /// 视图模式（方格 / 纵向瀑布流 / 横向瀑布流）。
+    mode: u8,
+    /// 宽高签名：masonry 的坐标依赖每张图的宽高，DimsService 回填后必须重排。
+    /// 把「可见宽高是否为空」折进 8 位签名：任一格从 None → Some 都会换 key。
+    /// （比每帧哈希全部宽高便宜得多，且 masonry 重排本来就是切模式/回填时才发生。）
+    dims_sig: u64,
     /// 首尾 id 用来识别「同样长度但内容换了」（切排序、切视图）
     first_id: i64,
     last_id: i64,
@@ -415,11 +649,17 @@ impl GridCache {
                 content_w: 0.0,
                 show_filename: false,
                 has_headers: false,
+                mode: ViewMode::Grid,
+                masonry: Vec::new(),
+                masonry_pos: Vec::new(),
+                masonry_buckets: Vec::new(),
             },
             key: LayoutKey {
                 width_bits: 0,
-                tier: 0,
+                cell_px_bits: 0,
                 headers: false,
+                mode: 0,
+                dims_sig: 0,
                 first_id: 0,
                 last_id: 0,
             },
@@ -433,13 +673,32 @@ impl GridCache {
         &mut self,
         photos: &[PhotoRow],
         width: f32,
-        tier: Tier,
+        cell_px: f32,
         has_headers: bool,
+        mode: ViewMode,
     ) -> &GridLayout {
+        // masonry 坐标依赖宽高：把「可见宽高是否为空」折成签名。
+        // 增量回填一张图（None → Some）就换签名 → 全量重排一次（回填是低频事件）。
+        let dims_sig = if mode == ViewMode::Grid {
+            0
+        } else {
+            photos
+                .iter()
+                .take(MASONRY_BUCKET * 8)
+                .map(|p| match (p.width.is_some(), p.height.is_some()) {
+                    (true, true) => 3u64,
+                    (true, false) => 2,
+                    (false, true) => 1,
+                    (false, false) => 0,
+                })
+                .fold(0u64, |acc, v| (acc << 2) | v)
+        };
         let key = LayoutKey {
             width_bits: width.to_bits(),
-            tier: tier.index() as u8,
+            cell_px_bits: cell_px.to_bits(),
             headers: has_headers,
+            mode: mode as u8,
+            dims_sig,
             first_id: photos.first().map(|p| p.id).unwrap_or(0),
             last_id: photos.last().map(|p| p.id).unwrap_or(0),
         };
@@ -449,9 +708,11 @@ impl GridCache {
             if key == self.key && photos.len() == self.built {
                 return &self.layout;
             }
-            // ② 前缀不变、尾部变长 → 增量追加（分页补齐）
-            let prefix_same = key.width_bits == self.key.width_bits
-                && key.tier == self.key.tier
+            // ② 前缀不变、尾部变长 → 增量追加（分页补齐）。
+            //    仅方格模式支持增量：masonry 是贪心放置，中途插入会级联改坐标。
+            let prefix_same = mode == ViewMode::Grid
+                && key.width_bits == self.key.width_bits
+                && key.cell_px_bits == self.key.cell_px_bits
                 && key.headers == self.key.headers
                 && key.first_id == self.key.first_id
                 && photos.len() > self.built;
@@ -464,7 +725,7 @@ impl GridCache {
         }
 
         // ③ 全量重建
-        self.layout = GridLayout::build(photos, width, tier, has_headers);
+        self.layout = GridLayout::build(photos, width, cell_px, has_headers, mode);
         self.built = photos.len();
         self.key = key;
         self.ready = true;
@@ -510,8 +771,9 @@ pub fn show(
     photos: &[PhotoRow],
     selection: &std::collections::HashSet<i64>,
     current_index: Option<usize>,
-    tier: Tier,
     has_headers: bool,
+    // 视图模式（M3：方格 / 纵向瀑布流 / 横向瀑布流）
+    mode: ViewMode,
     restore_scroll: Option<f32>,
     // 「重载后锚定」的目标照片 id（D 流式展示）。`None` = 不用锚定。
     anchor_id: Option<i64>,
@@ -548,11 +810,20 @@ pub fn show(
     let ctx = ui.ctx().clone();
     // 走不走微缩图集（`07-A` §A-2.2）：≤ 48 逻辑 px 时走。
     // 判据与 `picasa_core::zoom::uses_atlas` 同一份——不能有两套阈值。
-    let use_atlas = picasa_core::uses_atlas(cell_px);
-    let content_w = (ui.available_width() - Metrics::SCROLLBAR).max(120.0);
+    // masonry 下不走进图集：瀑布流的格子是变高的，图集 32² 槽装不下。
+    let use_atlas = mode == ViewMode::Grid && picasa_core::uses_atlas(cell_px);
+    let avail_w = (ui.available_width() - Metrics::SCROLLBAR).max(120.0);
+    // MasonryH 的「内容宽度」是横向滚出来的，布局输入用视口高度决定行数；
+    // 其余模式用可用宽度。
+    let layout_input = if mode == ViewMode::MasonryH {
+        (ui.available_height() - Metrics::SCROLLBAR).max(120.0)
+    } else {
+        avail_w
+    };
     // 每帧「算布局」在 M2 是 5 万张 110 ms 的开销，而输入几乎每帧都一样——
     // 交给 GridCache，滚动时这一行是 0 代价。
-    let layout = grid.get(photos, content_w, tier, has_headers);
+    let layout = grid.get(photos, layout_input, cell_px, has_headers, mode);
+    let content_w = avail_w;
     // 正在索引的文件夹（含子目录）：这些目录里 `thumb_state == 0` 的格子只画占位，
     // **不要**再向 ThumbService 要一次缩略图（会和索引线程抢同一张图的解码）。
     let indexing_folders: std::collections::HashSet<i64> = {
@@ -582,25 +853,48 @@ pub fn show(
     // 滚动位置：显式 `restore_scroll` 优先（切视图/搜索要回顶）；
     // 否则若给了锚点 id，就把它滚到视口顶部——这就是「重载后用户还在看同一张」。
     // 注意 O(n) 的 position 只在锚定这一帧跑一次，滚动时 `anchor_id` 恒为 None，不产生每帧开销。
+    let horizontal = mode == ViewMode::MasonryH;
     let anchor_off = anchor_id.and_then(|id| {
         let idx = photos.iter().position(|p| p.id == id)?;
-        layout
-            .thumb_rect(idx)
-            .map(|r| (r.top() - Metrics::GRID_PAD).max(0.0))
+        layout.thumb_rect(idx).map(|r| {
+            // 锚定偏移跟主轴走：横向瀑布流锚 x，其余锚 y
+            if horizontal {
+                (r.left() - Metrics::GRID_PAD).max(0.0)
+            } else {
+                (r.top() - Metrics::GRID_PAD).max(0.0)
+            }
+        })
     });
     let scroll_off = restore_scroll.or(anchor_off);
 
-    let mut area = ScrollArea::vertical()
-        .id_salt("grid-scroll")
-        .auto_shrink([false, false]);
+    let mut area = if horizontal {
+        ScrollArea::horizontal()
+            .id_salt("grid-scroll")
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+    } else {
+        ScrollArea::vertical()
+            .id_salt("grid-scroll")
+            .auto_shrink([false, false])
+    };
     if let Some(off) = scroll_off {
-        area = area.vertical_scroll_offset(off);
+        area = if horizontal {
+            area.horizontal_scroll_offset(off)
+        } else {
+            area.vertical_scroll_offset(off)
+        };
     }
 
     let mut budget = Metrics::TEX_UPLOAD_PER_FRAME;
 
     let area_out = area.show_viewport(ui, |ui, viewport| {
-        ui.set_height(layout.total_h);
+        if horizontal {
+            // 横向瀑布流：内容尺寸 = 布局算出的 (content_w × total_h)
+            ui.set_width(layout.content_w);
+            ui.set_height(layout.total_h);
+        } else {
+            ui.set_height(layout.total_h);
+        }
         let origin = ui.max_rect().left_top();
         let clip = ui.clip_rect();
         let painter = ui.painter_at(clip);
@@ -639,6 +933,12 @@ pub fn show(
             }
             let is_sel = selection.contains(&row.id);
             let is_current = current_index == Some(index);
+            // masonry 的 rect 含文件名行，图片画在去掉文件名行的内矩形里
+            let img_rect = if mode == ViewMode::Grid {
+                rect
+            } else {
+                Rect::from_min_max(rect.left_top(), pos2(rect.right(), rect.bottom() - Metrics::FILENAME_H))
+            };
 
             // ---- 宽高空着的，报给回填服务（M2.1 B「可见区域按需回填」）----
             // 放在占位分支**之前**：占位格是「缩略图还没好」，与「宽高还不知道」
@@ -648,7 +948,13 @@ pub fn show(
             }
 
             // ---- 单元格背景（U-24：1px 浅灰框，不是投影）----
-            painter.rect_filled(rect, 1.0, Color32::WHITE);
+            // 方格模式保留白底（contain 留白区靠它衬托）；masonry 图片填满格子，
+            // 白底只会漏出「白色外框」，改用网格背景色。
+            if mode == ViewMode::Grid {
+                painter.rect_filled(rect, 1.0, Color32::WHITE);
+            } else {
+                painter.rect_filled(rect, 1.0, theme.grid_bg);
+            }
 
             // ---- 缩略图 / 占位格（`04` §3.2.1，P-06）----
             //
@@ -658,14 +964,14 @@ pub fn show(
             let placeholder =
                 failed || (row.thumb_state == 0 && indexing_folders.contains(&row.folder_id));
             if placeholder {
-                index_progress::draw_placeholder(&painter, rect, theme, failed);
+                index_progress::draw_placeholder(&painter, img_rect, theme, failed);
             } else if use_atlas {
                 // ---- 微缩图集路径（`07-A` §A-2.2，格宽 ≤ 48 px）
                 //
                 // 为什么不走 `cache.get`：那条路是「每张图一张 GPU 纹理」，
                 // 17 000 个可见格就是 17 000 张纹理 → 直接撞 TextureBudget。
                 // 图集把 16 384 张塞进一张 4096² 纹理，一帧最多 2 张图集。
-                match draw_from_atlas(&painter, atlas, db, row, rect) {
+                match draw_from_atlas(&painter, atlas, db, row, img_rect) {
                     true => {}
                     false => {
                         // 还没进图集：画占位，等它进来（不阻塞本帧）
@@ -675,7 +981,13 @@ pub fn show(
             } else {
                 match cache.get(&ctx, db, service, row, &mut budget) {
                     TexState::Ready(tex_id, tex_size) => {
-                        let fitted = fit_rect(rect, tex_size);
+                        // masonry 的格子比例就是图片比例：直接填满，消除 contain
+                        // 舍入造成的 1px 白边；方格仍用 contain（格子是正方形）。
+                        let fitted = if mode == ViewMode::Grid {
+                            fit_rect(img_rect, tex_size)
+                        } else {
+                            img_rect
+                        };
                         painter.image(
                             tex_id,
                             fitted,
@@ -875,15 +1187,17 @@ pub fn pump_atlas_public(
     ctx: &egui::Context,
     atlas: &mut crate::atlas::ThumbAtlas,
     db: &Db,
+    service: &ThumbService,
     rows: &[&PhotoRow],
 ) -> usize {
-    pump_atlas_from_db(ctx, atlas, db, rows)
+    pump_atlas_from_db(ctx, atlas, db, service, rows)
 }
 
 fn pump_atlas_from_db(
     ctx: &egui::Context,
     atlas: &mut crate::atlas::ThumbAtlas,
     db: &Db,
+    service: &ThumbService,
     rows: &[&PhotoRow],
 ) -> usize {
     use crate::atlas::SLOT_PX;
@@ -892,7 +1206,21 @@ fn pump_atlas_from_db(
         if done >= ATLAS_UPLOADS_PER_FRAME {
             break;
         }
-        if atlas.contains(row.id) || row.thumb_state != 1 {
+        if atlas.contains(row.id) {
+            continue;
+        }
+        // 还没生成过缩略图：交给后台服务去生成（`request` 自带去重），
+        // 下一帧这里就能从库里读到。早先直接 `continue` 掉，等于
+        // 「没生成过的照片在 ≤48 px 档永远灰着」——大图路径没有这个洞。
+        if row.thumb_state == 0 {
+            service.request(ThumbJob {
+                photo_id: row.id,
+                path: row.abs_path(),
+                kind: JobKind::Thumb,
+            });
+            continue;
+        }
+        if row.thumb_state != 1 {
             continue;
         }
         let Ok(Some(buf)) = db.get_thumb(row.id, 0) else {
@@ -1031,6 +1359,7 @@ mod tests {
             decoder_ver: 0,
             // 与 v3 生成列同口径：有 taken_at 就用它
             eff_taken_at: taken_at,
+            starred: false,
         }
     }
 
@@ -1044,8 +1373,8 @@ mod tests {
     #[test]
     fn columns_are_derived_from_width_but_cell_size_is_fixed() {
         let photos = same_day(10);
-        let a = GridLayout::build(&photos, 1000.0, Tier::Small, true);
-        let b = GridLayout::build(&photos, 2000.0, Tier::Small, true);
+        let a = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
+        let b = GridLayout::build(&photos, 2000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
         // U-21：单元格边长**不随窗口变化**
         assert_eq!(a.cell, Metrics::CELL_SIZES[0]);
         assert_eq!(b.cell, Metrics::CELL_SIZES[0]);
@@ -1059,15 +1388,27 @@ mod tests {
     fn three_tiers_have_fixed_pixel_sizes() {
         let photos = same_day(3);
         for (i, expected) in Metrics::CELL_SIZES.iter().enumerate() {
-            let layout = GridLayout::build(&photos, 1200.0, Tier::from_index(i), true);
+            // M3 ZOOM-01：布局吃连续 cell_px，这里用三个历史档位值验证尺寸映射
+            let layout = GridLayout::build(&photos, 1200.0, *expected, true, ViewMode::Grid);
             assert_eq!(layout.cell, *expected, "第 {i} 档边长");
         }
     }
 
     #[test]
+    fn continuous_cell_px_drives_layout() {
+        // 连续滑块：不同 cell_px 给出不同列数与单元格尺寸（修复前布局只看离散档）
+        let photos = same_day(40);
+        let small = GridLayout::build(&photos, 1000.0, 48.0, true, ViewMode::Grid);
+        let big = GridLayout::build(&photos, 1000.0, 256.0, true, ViewMode::Grid);
+        assert_eq!(small.cell, 48.0);
+        assert_eq!(big.cell, 256.0);
+        assert!(big.cols < small.cols, "cell 越大列数越少");
+    }
+
+    #[test]
     fn first_cell_sits_after_padding_and_header() {
         let photos = same_day(4);
-        let layout = GridLayout::build(&photos, 1000.0, Tier::Medium, true);
+        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[1], true, ViewMode::Grid);
         let r = layout.thumb_rect(0).unwrap();
         assert_eq!(r.left(), Metrics::GRID_PAD);
         assert_eq!(r.top(), Metrics::GRID_PAD + Metrics::GROUP_HEADER_H);
@@ -1077,7 +1418,7 @@ mod tests {
     #[test]
     fn cells_are_laid_out_in_rows() {
         let photos = same_day(40);
-        let layout = GridLayout::build(&photos, 1000.0, Tier::Small, true);
+        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
         let cols = layout.cols;
         assert!(cols >= 3);
         let r0 = layout.thumb_rect(0).unwrap();
@@ -1091,7 +1432,7 @@ mod tests {
         // 第 cols 张必然是第二行的第一格
         let second_row = layout.thumb_rect(cols).unwrap();
         assert_eq!(second_row.left(), r0.left());
-        // 行距 = 单元格边长 + 文件名行（U-26：三档都显示）+ 间距。
+        // 行距 = 单元格边长 + 文件名行（U-26：始终显示）+ 间距。
         // 这里用 `cell_h` 而不是硬写边长，否则以后调文件名行高又会静默错位。
         assert_eq!(
             second_row.top(),
@@ -1102,8 +1443,8 @@ mod tests {
 
     #[test]
     fn total_height_grows_with_photos() {
-        let small = GridLayout::build(&same_day(3), 1000.0, Tier::Small, true);
-        let big = GridLayout::build(&same_day(300), 1000.0, Tier::Small, true);
+        let small = GridLayout::build(&same_day(3), 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
+        let big = GridLayout::build(&same_day(300), 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
         assert!(big.total_h > small.total_h);
         assert!(small.total_h > 0.0);
     }
@@ -1111,7 +1452,7 @@ mod tests {
     #[test]
     fn visible_range_is_bounded_and_covers_viewport() {
         let photos = same_day(1000);
-        let layout = GridLayout::build(&photos, 1000.0, Tier::Small, true);
+        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
         let viewport = Rect::from_min_size(pos2(0.0, 500.0), vec2(1000.0, 600.0));
         let (first, last) = layout.visible_index_range(viewport);
         assert!(first < last);
@@ -1133,13 +1474,13 @@ mod tests {
     #[test]
     fn sticky_header_appears_only_after_scrolling_past_it() {
         let photos = same_day(50);
-        let layout = GridLayout::build(&photos, 1000.0, Tier::Small, true);
+        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
         // 还没滚：分组头就在正常位置，不需要吸顶补画
         assert_eq!(layout.sticky_group(0.0), None);
         // 滚过分组头之后：需要吸顶
         assert_eq!(layout.sticky_group(Metrics::GROUP_HEADER_H + 5.0), Some(0));
         // 关掉分组时不吸顶
-        let plain = GridLayout::build(&photos, 1000.0, Tier::Small, false);
+        let plain = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], false, ViewMode::Grid);
         assert_eq!(plain.sticky_group(100.0), None);
     }
 
@@ -1147,7 +1488,7 @@ mod tests {
     fn huge_single_group_stays_virtualized() {
         // 「同一天连拍 3000 张」是最坏情况：只有一个分组，按分组边界返回就会整组返回
         let photos = same_day(3000);
-        let layout = GridLayout::build(&photos, 1000.0, Tier::Small, true);
+        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
         assert_eq!(layout.groups.len(), 1, "构造前提：只有一个分组");
 
         let mid = Rect::from_min_size(pos2(0.0, 5000.0), vec2(1000.0, 800.0));
@@ -1167,7 +1508,7 @@ mod tests {
     #[test]
     fn viewport_below_content_yields_empty_range() {
         let photos = same_day(20);
-        let layout = GridLayout::build(&photos, 1000.0, Tier::Small, true);
+        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
         let below = Rect::from_min_size(pos2(0.0, layout.total_h + 500.0), vec2(1000.0, 400.0));
         let (first, last) = layout.visible_index_range(below);
         assert_eq!(first, last, "视口在内容下方时应返回空区间");
@@ -1179,7 +1520,7 @@ mod tests {
         let photos: Vec<PhotoRow> = (1..=15i64)
             .map(|i| photo(i, 1_300_000_000 + ((i - 1) / 5) * 86_400))
             .collect();
-        let layout = GridLayout::build(&photos, 1000.0, Tier::Small, true);
+        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
         assert_eq!(layout.groups.len(), 3, "应分成三天");
         assert_eq!(layout.groups_in_range(0, 5), 0..1);
         assert_eq!(layout.groups_in_range(0, 15), 0..3);
@@ -1191,7 +1532,7 @@ mod tests {
     #[test]
     fn hit_testing_round_trips() {
         let photos = same_day(20);
-        let layout = GridLayout::build(&photos, 1000.0, Tier::Medium, true);
+        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[1], true, ViewMode::Grid);
         for index in [0usize, 3, 7, 19] {
             let r = layout.thumb_rect(index).unwrap();
             assert_eq!(
@@ -1204,7 +1545,7 @@ mod tests {
 
     #[test]
     fn empty_view_has_zero_height_and_no_cells() {
-        let layout = GridLayout::build(&[], 1000.0, Tier::Small, true);
+        let layout = GridLayout::build(&[], 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
         assert_eq!(layout.groups.len(), 0);
         assert_eq!(layout.thumb_rect(0), None);
         assert!(layout.total_h >= 0.0);
@@ -1218,20 +1559,163 @@ mod tests {
         assert!(long.ends_with('…'));
     }
 
-    /// 文件名行在所有档位都占位（U-26：三档都显示）。
+    /// 文件名行在所有 cell_px 下都占位（U-26：三档都显示 → 连续模式下始终显示）。
     ///
     /// 守的是**布局**：`cell_h` 少算 `FILENAME_H` 的话，文件名会压到下一行的
     /// 缩略图上；多算的话每行多一条空带。两种都不报错，只会「看起来怪」，
     /// 所以只能靠用例拦。
     #[test]
     fn filename_row_reserves_height_in_every_tier() {
-        for tier in [Tier::Small, Tier::Medium, Tier::Large] {
-            let layout = GridLayout::build(&[], 1280.0, tier, true);
-            assert!(layout.show_filename, "{tier:?} 档应显示文件名");
+        for px in Metrics::CELL_SIZES {
+            let layout = GridLayout::build(&[], 1280.0, px, true, ViewMode::Grid);
+            assert!(layout.show_filename, "{px}px 应显示文件名");
             assert_eq!(
                 layout.cell_h,
-                tier.cell_size() + crate::theme::Metrics::FILENAME_H,
-                "{tier:?} 档的单元格总高没算上文件名行"
+                px + crate::theme::Metrics::FILENAME_H,
+                "{px}px 的单元格总高没算上文件名行"
+            );
+        }
+    }
+
+    /// 纵向瀑布流：不同宽高比的图给出不同高度，放进列内；列数由宽度与 cell 决定。
+    #[test]
+    fn masonry_v_sizes_follow_aspect_ratio() {
+        let mut photos = same_day(6);
+        // 前 3 张 4:3 横图，后 3 张 9:16 竖图
+        for (i, p) in photos.iter_mut().enumerate() {
+            if i < 3 {
+                p.width = Some(400);
+                p.height = Some(300);
+            } else {
+                p.width = Some(300);
+                p.height = Some(600);
+            }
+        }
+        let layout = GridLayout::build(&photos, 1000.0, 128.0, true, ViewMode::MasonryV);
+        assert_eq!(layout.mode, ViewMode::MasonryV);
+        assert!(!layout.has_headers, "masonry 不画分组头");
+        let r0 = layout.thumb_rect(0).unwrap();
+        let r1 = layout.thumb_rect(1).unwrap();
+        // 同列等宽
+        assert_eq!(r0.width(), r1.width());
+        // 横图高度 < 竖图高度（同列宽下）
+        let r_h = layout.thumb_rect(3).unwrap();
+        assert!(r_h.height() > r0.height(), "9:16 应比 4:3 高：{:?} vs {:?}", r_h, r0);
+        // 高度 = 宽度 / 比例 + 文件名行
+        let expect = r0.width() / (400.0 / 300.0) + crate::theme::Metrics::FILENAME_H;
+        assert!((r0.height() - expect).abs() < 0.5, "高度算式不对：{} vs {}", r0.height(), expect);
+    }
+
+    /// 横向瀑布流：按宽高比得宽，横向滚动；总宽 > 视口宽。
+    #[test]
+    fn masonry_h_extends_horizontally() {
+        let mut photos = same_day(60);
+        for (i, p) in photos.iter_mut().enumerate() {
+            if i < 3 {
+                p.width = Some(400);
+                p.height = Some(300);
+            } else {
+                p.width = Some(300);
+                p.height = Some(600);
+            }
+        }
+        let layout = GridLayout::build(&photos, 400.0, 128.0, true, ViewMode::MasonryH);
+        assert_eq!(layout.mode, ViewMode::MasonryH);
+        let r0 = layout.thumb_rect(0).unwrap();
+        let r3 = layout.thumb_rect(3).unwrap();
+        // 同行等高
+        assert_eq!(r0.height(), r3.height());
+        // 横图比竖图宽（同行高下）
+        assert!(r0.width() > r3.width(), "4:3 应比 9:16 宽：{:?} vs {:?}", r0, r3);
+        // 内容比视口宽（需要横向滚动）
+        assert!(layout.content_w > 400.0, "content_w={}", layout.content_w);
+    }
+
+    /// masonry 下宽高回填（None → Some）必须触发布局重排。
+    #[test]
+    fn masonry_rebuilds_when_dims_backfill() {
+        let mut photos = same_day(20);
+        // 清空宽高：模拟「刚入库还没回填」的占位状态
+        for p in photos.iter_mut() {
+            p.width = None;
+            p.height = None;
+        }
+        let mut cache = GridCache::new();
+        let before = cache.get(&photos, 1000.0, 128.0, true, ViewMode::MasonryV).thumb_rect(0).unwrap();
+        // 回填第 0 张的宽高（很扁的全景图）
+        let mut photos2 = photos.clone();
+        photos2[0].width = Some(1000);
+        photos2[0].height = Some(300);
+        let after = cache.get(&photos2, 1000.0, 128.0, true, ViewMode::MasonryV).thumb_rect(0).unwrap();
+        assert!(
+            (before.height() - after.height()).abs() > 1.0,
+            "宽高回填后 masonry 没重排：before={before:?} after={after:?}"
+        );
+    }
+
+    /// masonry 视口裁剪：只返回视口附近的索引（虚拟化仍然成立）。
+    #[test]
+    fn masonry_visible_range_stays_virtualized() {
+        let photos = same_day(2000);
+        let layout = GridLayout::build(&photos, 1000.0, 128.0, true, ViewMode::MasonryV);
+        let viewport = Rect::from_min_size(pos2(0.0, 3000.0), vec2(1000.0, 800.0));
+        let (first, last) = layout.visible_index_range(viewport);
+        assert!(first < last, "视口内应有可见格");
+        assert!(
+            last - first < 400,
+            "masonry 虚拟化失效：{} 张",
+            last - first
+        );
+        // 命中的 rect 确实与视口相交
+        let r = layout.thumb_rect(first).unwrap();
+        assert!(r.bottom() >= viewport.min.y - 1.0 && r.top() <= viewport.max.y + 1.0);
+    }
+
+    /// 视口之外点击不命中（masonry 的 hit test 走 rect 表）。
+    #[test]
+    fn masonry_hit_test_round_trips() {
+        let mut photos = same_day(20);
+        for (i, p) in photos.iter_mut().enumerate() {
+            p.width = Some(400 + (i as i64) * 10);
+            p.height = Some(300);
+        }
+        let layout = GridLayout::build(&photos, 1000.0, 128.0, true, ViewMode::MasonryV);
+        for index in [0usize, 5, 11, 19] {
+            let r = layout.thumb_rect(index).unwrap();
+            assert_eq!(
+                layout.index_at(r.center()),
+                Some(index),
+                "索引 {index} 的命中测试不一致"
+            );
+        }
+        assert_eq!(layout.index_at(pos2(99999.0, 99999.0)), None);
+    }
+
+    /// masonry：文件名带必须在**格子内部**的底部（图片带的正下方）。
+    ///
+    /// 守的是「名字被下一张图盖住」：早期实现把文件名画到 `rect.bottom()` 之外，
+    /// 落进 gap / 邻格区域，被后续绘制的图片盖住——表现为「图片名字被遮挡」。
+    #[test]
+    fn masonry_filename_sits_inside_the_cell() {
+        let mut photos = same_day(12);
+        for (i, p) in photos.iter_mut().enumerate() {
+            p.width = Some(400 + (i as i64) * 30);
+            p.height = Some(300);
+        }
+        let layout = GridLayout::build(&photos, 1000.0, 128.0, true, ViewMode::MasonryV);
+        for i in 0..12 {
+            let cell = layout.thumb_rect(i).unwrap();
+            let img_bottom = cell.bottom() - crate::theme::Metrics::FILENAME_H;
+            let name = layout.filename_rect(i).unwrap();
+            assert!(
+                name.top() >= img_bottom - 0.5,
+                "文件名带 ({:?}) 与图片带（底 {img_bottom}）重叠：索引 {i}",
+                name
+            );
+            assert!(
+                name.bottom() <= cell.bottom() + 0.5,
+                "文件名带 ({:?}) 超出格子底边：索引 {i}",
+                name
             );
         }
     }
@@ -1242,7 +1726,7 @@ mod tests {
         let photos: Vec<PhotoRow> = (0..3)
             .map(|i| photo(i, 1_600_000_000 + i))
             .collect();
-        let layout = GridLayout::build(&photos, 1280.0, Tier::Medium, false);
+        let layout = GridLayout::build(&photos, 1280.0, Metrics::CELL_SIZES[1], false, ViewMode::Grid);
         for i in 0..3 {
             let thumb = layout.thumb_rect(i).unwrap();
             let name = layout.filename_rect(i).unwrap();

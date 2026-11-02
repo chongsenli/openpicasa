@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, vec2};
 use picasa_core::{
-    AppPaths, CoreEvent, DimsService, IndexBoard, IndexService, Library, ThumbService, Tier,
+    AppPaths, CoreEvent, DimsService, IndexBoard, IndexService, Library, ThumbJob, ThumbService,
 };
+use picasa_core::thumbs::JobKind;
 use picasa_db::{PhotoRow, SortKey};
 
 use crate::grid;
@@ -80,12 +81,36 @@ pub struct OpenPicasaApp {
     search_buf: String,
     sort_menu_open: bool,
     sort_menu_pos: Pos2,
+    /// 「视图」弹出菜单开关（默认 / 纵向瀑布流 / 横向瀑布流）
+    view_menu_open: bool,
+    view_menu_pos: Pos2,
+    /// 「筛选」弹出面板开关与打开帧（豁免逻辑同视图菜单）
+    filter_menu_open: bool,
+    filter_menu_frame: u64,
+    filter_menu_pos: Pos2,
+    /// 筛选面板的草稿状态（点「应用」才提交，避免每点一下就重查全库）
+    filter_draft_tag: String,
+    /// 批量标签输入框内容
+    batch_tag_buf: String,
+    /// 打开视图菜单的帧号：同一帧的点击事件必须豁免，否则菜单刚开就被
+    /// 「点空白就关」检测当成「点在菜单外」立刻关掉——表现是按钮点了没反应。
+    /// 排序菜单的同款机制见 `sort_menu_frame`。
+    view_menu_frame: u64,
     /// 排序菜单打开的帧号，用途同 `folder_ctx_frame`（点按钮也是 click，同一帧会被误关）
     sort_menu_frame: u64,
     tray_expanded: bool,
     favorites_collapsed: bool,
     folders_collapsed: bool,
     folder_ctx: Option<(String, Pos2)>,
+    /// 照片右键菜单：(photo_id, 当前是否收藏, 屏幕位置)
+    photo_ctx: Option<(i64, bool, Pos2)>,
+    /// 说明编辑窗口打开中（photo_id）
+    caption_editor: Option<i64>,
+    /// 标签编辑窗口打开中（photo_id）
+    tag_editor: Option<i64>,
+    /// 编辑框草稿
+    caption_buf: String,
+    tag_buf: String,
     /// 右键菜单是在**哪一帧**打开的。
     /// 必须记这个：右键释放的那一帧里，`secondary_clicked()` 与 `pointer.any_click()`
     /// **同时**为真（egui 的 click 就是在 release 时判定）。菜单在 `draw_library`
@@ -153,6 +178,11 @@ pub struct OpenPicasaApp {
     restore_scroll: Option<f32>,
     /// 上一帧视口顶部的照片 id（D 流式展示的「锚点」）。
     anchor_id: Option<i64>,
+    /// 上一帧视口顶部照片在 `lib.photos` 里的下标（图集装载的中心点）。
+    ///
+    /// 为什么不用 `anchor_id` 反查下标：那要每帧 `iter().position()`，
+    /// 25 万张的列表就是线性扫。栅格每帧本来就产出 `top_index`，顺手存下来。
+    viewport_top_index: usize,
     /// 下一次重载后要滚回哪张（重载会重建列表，用户不该被弹回顶部）
     pending_anchor: Option<i64>,
     tray_rows: Vec<PhotoRow>,
@@ -226,11 +256,24 @@ impl OpenPicasaApp {
             search_buf,
             sort_menu_open: false,
             sort_menu_pos: Pos2::ZERO,
+            view_menu_open: false,
+            view_menu_pos: Pos2::ZERO,
+            view_menu_frame: u64::MAX,
+            filter_menu_open: false,
+            filter_menu_frame: u64::MAX,
+            filter_menu_pos: Pos2::ZERO,
+            filter_draft_tag: String::new(),
+            batch_tag_buf: String::new(),
             sort_menu_frame: u64::MAX,
             tray_expanded: false,
             favorites_collapsed: false,
             folders_collapsed: false,
             folder_ctx: None,
+            photo_ctx: None,
+            caption_editor: None,
+            tag_editor: None,
+            caption_buf: String::new(),
+            tag_buf: String::new(),
             folder_ctx_frame: u64::MAX,
             reload_dirty: false,
             last_reload: Instant::now(),
@@ -255,6 +298,7 @@ impl OpenPicasaApp {
             reload_now: false,
             restore_scroll,
             anchor_id: None,
+            viewport_top_index: 0,
             pending_anchor: None,
             tray_rows: Vec::new(),
             tray_rows_dirty: true,
@@ -283,6 +327,47 @@ impl OpenPicasaApp {
             tracing::info!("启动扫描已按环境变量跳过");
         } else {
             app.start_index();
+        }
+
+        // M4：解码器升级 / 历史欠账的自动补全（一次性检查，同步做）。
+        //
+        // 为什么不在 UI tick 里：egui 界面静止时**不重绘**（没有输入、没有
+        // request_repaint 就没有新帧），tick 永远不跑——实测 30 秒后 frames 还停
+        // 在个位数。这里的检查是单条 EXISTS（毫秒级）+ 入队（微秒级），放 new()
+        // 毫无压力；真正的补图在扫描线程里跑，不阻塞启动。
+        //
+        // 放在 start_index() **之后**：重试任务排在启动扫描后面，不会抢锁。
+        {
+            // ⚠️ 先把需要的数据全部取出、**释放 DB 锁**，再 enqueue——
+            // `enqueue_retry` 内部会再拿同一把锁（`inner.db`），在循环里持有外层
+            // guard 调它 = std Mutex 不可重入 = 死锁（实测：主线程卡在启动回调，
+            // 所有 thumb worker 等锁，缩略图永远不动）。
+            let stale = app
+                .lib
+                .db()
+                .ok()
+                .and_then(|db| {
+                    db.has_rows_with_decoder_ver_before(picasa_imaging::DECODER_VER)
+                        .ok()
+                })
+                .unwrap_or(false);
+            if stale {
+                let roots: Vec<(i64, std::path::PathBuf)> = app
+                    .lib
+                    .db()
+                    .ok()
+                    .and_then(|db| db.roots(false).ok())
+                    .map(|v| {
+                        v.into_iter()
+                            .map(|r| (r.id, std::path::PathBuf::from(r.path)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for (id, path) in &roots {
+                    app.index.enqueue_retry(*id, path);
+                }
+                tracing::info!(roots = roots.len(), "解码器升级/欠账：已对全部根触发自动补全");
+            }
         }
         app
     }
@@ -415,6 +500,12 @@ impl OpenPicasaApp {
     /// 为什么放在这里而不是启动时：校验要 `read_dir` 4330 个目录，
     /// 虽然每目录只有几十微秒，但**不能在首屏之前**抢 IO——用户先看见照片更重要。
     /// 执行器内部按 `VERIFY_DIR_INTERVAL_MS`（50ms/目录）自己限速，这里不用 sleep。
+    /// 解码器版本升级后的自动补全（M4）。
+    ///
+    /// `DECODER_VER` bump 的语义是「像素输出变了 / 能力变了」——本版新增
+    /// HEIC/AVIF/RAW 解码，升级前的失败项与旧缓存都必须重做。靠 L1 快筛
+    /// 发现不了它们（dir_mtime 没变），所以启动后主动查一次库，把有旧版本
+    /// 行的根走一遍「重试」（与用户点「重试失败项」同一条路径，有进度、可暂停）。
     fn tick_startup_verify(&mut self, ctx: &egui::Context) {
         if self.verify.is_none() && !self.verify_done && self.frames > 30 {
             let paths: Vec<std::path::PathBuf> = {
@@ -480,7 +571,7 @@ impl OpenPicasaApp {
         // 所以这里可以放心把视口前后各 3 屏都列进去。
         let from = first.saturating_sub(rows_per_screen * 3);
         let to = last.saturating_add(rows_per_screen * 3);
-        let distances = self
+        let distances: Vec<(i64, u32)> = self
             .lib
             .photos
             .iter()
@@ -496,8 +587,14 @@ impl OpenPicasaApp {
                     0
                 };
                 (p.id, d as u32)
-            });
-        self.cache.note_viewport(distances);
+            })
+            .collect();
+        self.cache.note_viewport(distances.iter().copied());
+        // ⚠️ 图集必须收到同一份屏距：它是按「整页里最近的那张」判定淘汰的。
+        // 早先漏了这条接线，每页 min_distance 恒为 u32::MAX（= 本帧没被看到），
+        // 帧末 evict_pages_farther_than(3) 就把**所有图集页**整页删光——
+        // 表现为滑块拖进 ≤48px 档后预览图全部消失（只剩灰占位）。
+        self.atlas.note_viewport(distances.iter().copied());
     }
 
     /// L2 全校的周期检查（`07` §3.2 VERIFY-03）。
@@ -925,14 +1022,22 @@ impl OpenPicasaApp {
         }
         self.atlas.begin_frame();
 
-        // 视口附近的行（前后各 2 屏）——图集的填充与淘汰都用这一个集合
-        let first = self.anchor_id.unwrap_or(0);
-        let _ = first; // 真实首屏下标由栅格给；这里用保守的「全列前 N 行」
+        // 视口附近的行（前后各 2 屏）——图集的填充与淘汰都用这一个集合。
+        //
+        // ⚠️ 中心点必须是**当前视口**，不能是列表开头：早先的实现 `take(400)`
+        // 只装前 400 行，用户滚动到后面（或排序变化后视口不在顶部）时，
+        // 可见的格子永远等不到进图集，一路都是灰占位——「≤48 px 档预览全灰」。
+        // 中心点用上一帧栅格记录的 `viewport_top_index`；首帧还没栅格输出时
+        // 自然是 0（列表顶部），行为与旧版一致。
+        let first = self.viewport_top_index.min(self.lib.photos.len());
+        let window = crate::atlas::ATLAS_PREFILL_ROWS;
+        let from = first.saturating_sub(window / 2);
         let rows: Vec<&picasa_db::PhotoRow> = self
             .lib
             .photos
             .iter()
-            .take(crate::atlas::ATLAS_PREFILL_ROWS)
+            .skip(from)
+            .take(window)
             .collect();
         if rows.is_empty() {
             return;
@@ -940,7 +1045,13 @@ impl OpenPicasaApp {
 
         // ② 装几张（限量，避免一帧建页 + 上传几十张）
         if let Ok(db) = self.lib.db() {
-            let n = crate::grid::pump_atlas_public(ctx, &mut self.atlas, &db, &rows);
+            let n = crate::grid::pump_atlas_public(
+                ctx,
+                &mut self.atlas,
+                &db,
+                &self.service,
+                &rows,
+            );
             if n > 0 {
                 tracing::debug!(n, "图集装入一批");
             }
@@ -1006,6 +1117,29 @@ impl OpenPicasaApp {
                     h,
                     rgba,
                 } => {
+                    // 并排比较图先于主图判定（同一 JobKind::Viewer 通道）
+                    if let Some(v) = self.viewer.as_mut()
+                        && v.compare_requested == Some(photo_id)
+                        && v.loaded_id != Some(photo_id)
+                    {
+                        if let Some(img) = image::RgbaImage::from_raw(w, h, rgba) {
+                            let small = picasa_imaging::resize_to_fit(&img, 2560);
+                            let size = [small.width() as usize, small.height() as usize];
+                            let color =
+                                egui::ColorImage::from_rgba_unmultiplied(size, small.as_raw());
+                            let tex = ctx.load_texture(
+                                format!("compare-{photo_id}"),
+                                color,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            v.compare_tex = Some((
+                                photo_id,
+                                tex,
+                                vec2(size[0] as f32, size[1] as f32),
+                            ));
+                        }
+                        continue;
+                    }
                     if let Some(v) = self.viewer.as_mut()
                         && v.requested_id == Some(photo_id)
                     {
@@ -1023,6 +1157,9 @@ impl OpenPicasaApp {
                                 color,
                                 egui::TextureOptions::LINEAR,
                             ));
+                            // M4 #11：直方图——在缩小的图上算（2560 长边已保留全部
+                            // 影调信息；采样到 512² 只是省一次 6 万桶的循环）。
+                            v.histogram = Some(picasa_imaging::histogram(&small));
                             v.loaded_id = Some(photo_id);
                             // 拿到真实尺寸后按「适应窗口」重新定 zoom
                             let avail = ctx.content_rect();
@@ -1195,6 +1332,12 @@ impl OpenPicasaApp {
             KeyAction::ZoomActual => v.zoom = 1.0,
             KeyAction::ToggleBackground => v.toggle_bg(),
             KeyAction::ToggleInfo => v.info_open = !v.info_open,
+            KeyAction::ToggleCompare => {
+                v.compare = !v.compare;
+                if !v.compare {
+                    v.compare_tex = None;
+                }
+            }
             KeyAction::ToggleFullscreen => {
                 let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
@@ -1261,16 +1404,29 @@ impl OpenPicasaApp {
             .exact_size(Metrics::TOOLBAR_H)
             .frame(egui::Frame::new().fill(theme.chrome_bg))
             .show(ui, |ui| {
+                let filter_active = self
+                    .lib
+                    .filter
+                    .as_ref()
+                    .is_some_and(|f| {
+                        f.starred_only
+                            || f.tag.is_some()
+                            || f.taken_range.is_some()
+                            || f.size_class.is_some()
+                            || !f.formats.is_empty()
+                    });
                 let out = toolbar::show(
                     ui,
                     &theme,
-                    self.lib.tier,
+                    self.zoom.cell_px(),
                     self.lib.sort,
                     !self.lib.selection.is_empty(),
                     &mut self.search_buf,
                     self.sort_menu_open,
                     self.lib.recurse,
                     self.lib.recurse_available(),
+                    filter_active,
+                    self.lib.search_in_current,
                 );
                 let sort_btn_rect = out.sort_button.as_ref().map(|r| r.rect);
                 if let Some(new_search) = out.search_changed {
@@ -1282,6 +1438,12 @@ impl OpenPicasaApp {
                 if let Some(rect) = sort_btn_rect {
                     self.sort_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
                 }
+                if let Some(rect) = out.view_button {
+                    self.view_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
+                }
+                if let Some(rect) = out.filter_button {
+                    self.filter_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
+                }
                 for action in out.actions {
                     match action {
                         ToolbarAction::AddFolder => self.add_folder(),
@@ -1292,6 +1454,81 @@ impl OpenPicasaApp {
                                 self.sort_menu_frame = ctx.cumulative_frame_nr();
                             }
                         }
+                        ToolbarAction::ToggleViewMenu => {
+                            self.view_menu_open = !self.view_menu_open;
+                            if self.view_menu_open {
+                                self.view_menu_frame = ctx.cumulative_frame_nr();
+                            }
+                        }
+                        ToolbarAction::ToggleFilterMenu => {
+                            self.filter_menu_open = !self.filter_menu_open;
+                            if self.filter_menu_open {
+                                self.filter_menu_frame = ctx.cumulative_frame_nr();
+                                // 面板打开时把现有筛选读进草稿
+                                self.filter_draft_tag = self
+                                    .lib
+                                    .filter
+                                    .as_ref()
+                                    .and_then(|f| f.tag.clone())
+                                    .unwrap_or_default();
+                            }
+                        }
+                        ToolbarAction::ClearFilter => {
+                            if let Err(e) = self.lib.set_filter(None) {
+                                tracing::warn!(error = %e, "清除筛选失败");
+                            }
+                            self.restore_scroll = Some(0.0);
+                        }
+                        ToolbarAction::ApplyFilter(f) => {
+                            let f = *f;
+                            let has = f.starred_only
+                                || f.tag.is_some()
+                                || f.taken_range.is_some()
+                                || f.size_class.is_some()
+                                || !f.formats.is_empty();
+                            if let Err(e) = self.lib.set_filter(has.then_some(f)) {
+                                tracing::warn!(error = %e, "应用筛选失败");
+                            }
+                            self.filter_menu_open = false;
+                            self.restore_scroll = Some(0.0);
+                        }
+                        ToolbarAction::ToggleSearchScope => {
+                            if let Err(e) = self.lib.set_search_in_current(!self.lib.search_in_current)
+                            {
+                                tracing::warn!(error = %e, "切换搜索范围失败");
+                            }
+                        }
+                        ToolbarAction::BatchStar(on) => {
+                            match self.lib.batch_set_starred(on) {
+                                Ok(n) if n > 0 => {
+                                    self.lib.toast =
+                                        Some((format!("{} {} 张照片", if on { "已收藏" } else { "已取消收藏" }, n), 2.5));
+                                }
+                                Ok(_) => {}
+                                Err(e) => tracing::warn!(error = %e, "批量收藏失败"),
+                            }
+                        }
+                        ToolbarAction::BatchAddTag => {
+                            let label = self.batch_tag_buf.trim().to_string();
+                            if label.is_empty() {
+                                self.lib.toast = Some(("先输入标签名".into(), 2.0));
+                            } else {
+                                match self.lib.batch_add_tag(&label) {
+                                    Ok(n) if n > 0 => {
+                                        self.lib.toast =
+                                            Some((format!("已为 {n} 张打上「{label}」"), 2.5));
+                                        self.batch_tag_buf.clear();
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => tracing::warn!(error = %e, "批量加标签失败"),
+                                }
+                            }
+                        }
+                        ToolbarAction::PickViewMode(mode) => {
+                            self.lib.set_view_mode(mode);
+                            // 切布局等于换了一个视图：滚动位置回顶，避免落在空洞处
+                            self.restore_scroll = Some(0.0);
+                        }
                         ToolbarAction::PickSort(key) => {
                             self.pick_sort(key);
                             self.sort_menu_open = false;
@@ -1301,18 +1538,14 @@ impl OpenPicasaApp {
                             self.pick_sort(key);
                             self.sort_menu_open = false;
                         }
-                        // ZOOM-02：工具栏按钮保留为「循环三刻度」（零功能丢失）
                         // RECURSE-01（U-70）：切换「包含子文件夹」
                         ToolbarAction::ToggleRecurse => self.toggle_recurse(),
+                        // ZOOM-02：工具栏「缩略图」按钮保留为「循环三刻度点」
+                        // （48/128/256，对应 SNAP_POINTS）。M3 下布局由连续
+                        // `cell_px` 驱动，按钮只是把滑块跳到三个习惯刻度。
                         ToolbarAction::CycleTier => {
                             self.zoom.cycle_point();
                             self.persist_zoom();
-                            let next = match self.lib.tier {
-                                Tier::Small => Tier::Medium,
-                                Tier::Medium => Tier::Large,
-                                Tier::Large => Tier::Small,
-                            };
-                            self.lib.set_tier(next);
                         }
                         ToolbarAction::ToggleFullscreen => {
                             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -1422,8 +1655,8 @@ impl OpenPicasaApp {
                     &self.lib.photos,
                     &self.lib.selection,
                     None,
-                    self.lib.tier,
                     matches!(self.lib.sort.key, SortKey::TakenAt),
+                    self.lib.view_mode,
                     self.restore_scroll,
                     anchor,
                     &db,
@@ -1454,6 +1687,7 @@ impl OpenPicasaApp {
                 self.restore_scroll = None;
                 // 记住这一帧视口顶部在看哪张：下次重载（扫描出新照片、切排序）时用它锚回来。
                 self.anchor_id = self.lib.photos.get(out.top_index).map(|p| p.id);
+                self.viewport_top_index = out.top_index;
                 self.lib.prefs.grid_scroll = out.scroll_y;
                 if out.scroll_y > 0.5 {
                     self.lib.mark_prefs_dirty();
@@ -1474,7 +1708,10 @@ impl OpenPicasaApp {
                 if let Some((index, pos)) = out.context {
                     self.lib.click_select(index, false, false);
                     self.folder_ctx = None;
-                    let _ = pos;
+                    // M4：照片右键菜单（收藏 / 说明 / 标签）
+                    if let Some(row) = self.lib.photos.get(index) {
+                        self.photo_ctx = Some((row.id, row.starred, pos));
+                    }
                 }
             });
     }
@@ -1487,6 +1724,46 @@ impl OpenPicasaApp {
                 }
                 self.restore_scroll = Some(0.0);
                 self.viewer = None;
+            }
+            SidebarAction::TimelineYear(year) => {
+                if year == 0 {
+                    // 清除年份筛选（保留其他筛选维度）
+                    let mut f = self.lib.filter.clone().unwrap_or_default();
+                    f.taken_range = None;
+                    let has = f.starred_only
+                        || f.tag.is_some()
+                        || f.taken_range.is_some()
+                        || f.size_class.is_some()
+                        || !f.formats.is_empty();
+                    if let Err(e) = self.lib.set_filter(has.then_some(f)) {
+                        tracing::warn!(error = %e, "清除时间轴筛选失败");
+                    }
+                } else {
+                    let mut f = self.lib.filter.clone().unwrap_or_default();
+                    f.taken_range = Some(picasa_core::year_range_seconds(year));
+                    if let Err(e) = self.lib.set_filter(Some(f)) {
+                        tracing::warn!(error = %e, "时间轴筛选失败");
+                    }
+                }
+                self.restore_scroll = Some(0.0);
+            }
+            SidebarAction::ToggleStarredFilter => {
+                let mut f = self.lib.filter.clone().unwrap_or_default();
+                f.starred_only = !f.starred_only;
+                let f = if f.starred_only
+                    || f.tag.is_some()
+                    || f.taken_range.is_some()
+                    || f.size_class.is_some()
+                    || !f.formats.is_empty()
+                {
+                    Some(f)
+                } else {
+                    None
+                };
+                if let Err(e) = self.lib.set_filter(f) {
+                    tracing::warn!(error = %e, "切换收藏筛选失败");
+                }
+                self.restore_scroll = Some(0.0);
             }
             SidebarAction::ToggleFolder(path) => {
                 self.lib.toggle_folder(&path);
@@ -1617,6 +1894,21 @@ impl OpenPicasaApp {
         if let Some(v) = self.viewer.as_mut() {
             if let Some(row) = self.lib.photos.get(v.index) {
                 viewer::ensure_loaded(v, row, &self.service);
+                // 并排比较（M4 #11）：需要右侧图且还没载入 → 排队下一张的大图。
+                // 复用同一 ThumbnailService 通道；载入完成在 pump_events 的
+                // FullImageReady 里落进 compare_tex。
+                if v.compare
+                    && v.compare_tex.is_none()
+                    && let Some(next) = self.lib.photos.get(v.index + 1)
+                    && v.compare_requested != Some(next.id)
+                {
+                    v.compare_requested = Some(next.id);
+                    self.service.request(ThumbJob {
+                        photo_id: next.id,
+                        path: next.abs_path(),
+                        kind: JobKind::Viewer,
+                    });
+                }
                 // 逐级加载第一级：大图还没到、也还没预览 → 借栅格缓存里的 T0 缩略图顶上。
                 // T0 是 512，解码 + 上传只要几毫秒，比起等 2560 大图（24MP 要 200~400ms）
                 // 能立刻给用户画面。拿不到就维持「正在解码…」，不阻塞。
@@ -1697,6 +1989,233 @@ impl OpenPicasaApp {
                     && !Rect::from_min_size(self.sort_menu_pos, vec2(180.0, 200.0)).contains(p)
                 {
                     self.sort_menu_open = false;
+                }
+            }
+        }
+
+        // 视图菜单（默认 / 纵向瀑布流 / 横向瀑布流）
+        if self.view_menu_open && self.viewer.is_none() {
+            if let Some(action) = toolbar::view_menu(ui, self.view_menu_pos, self.lib.view_mode) {
+                if let ToolbarAction::PickViewMode(mode) = action {
+                    self.lib.set_view_mode(mode);
+                    self.restore_scroll = Some(0.0);
+                }
+                self.view_menu_open = false;
+            }
+            // 打开帧豁免（与排序菜单同款）：那一帧的 click 就是「点按钮」本身
+            if self.view_menu_frame != ctx.cumulative_frame_nr()
+                && ctx.input(|i| i.pointer.any_click())
+            {
+                let pos = ctx.input(|i| i.pointer.interact_pos());
+                if let Some(p) = pos
+                    && !Rect::from_min_size(self.view_menu_pos, vec2(160.0, 120.0)).contains(p)
+                {
+                    self.view_menu_open = false;
+                }
+            }
+        }
+
+        // 照片右键菜单（M4：收藏 / 说明 / 标签）
+        if let Some((photo_id, starred, pos)) = self.photo_ctx {
+            let mut close = false;
+            let mut action: Option<PhotoCtxAction> = None;
+            egui::Area::new(egui::Id::unique("photo-ctx-menu"))
+                .fixed_pos(pos)
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::WHITE)
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(0xC0)))
+                        .corner_radius(3.0)
+                        .inner_margin(egui::Margin::same(4))
+                        .shadow(egui::epaint::Shadow {
+                            offset: [1, 2],
+                            blur: 6,
+                            spread: 0,
+                            color: egui::Color32::from_black_alpha(40),
+                        })
+                        .show(ui, |ui| {
+                            let star_label = if starred { "☆ 取消收藏" } else { "★ 收藏" };
+                            if ui.button(star_label).clicked() {
+                                action = Some(PhotoCtxAction::ToggleStar);
+                            }
+                            if ui.button("说明…").clicked() {
+                                action = Some(PhotoCtxAction::EditCaption);
+                            }
+                            if ui.button("标签…").clicked() {
+                                action = Some(PhotoCtxAction::EditTags);
+                            }
+                        });
+                });
+            if action.is_some() || ctx.input(|i| i.pointer.any_click()) {
+                // 菜单里点了按钮不关（下一帧重开编辑框）；点空白关
+                if action.is_none() {
+                    close = true;
+                }
+            }
+            if let Some(act) = action {
+                match act {
+                    PhotoCtxAction::ToggleStar => {
+                        match self.lib.batch_set_starred_ids(vec![photo_id], !starred) {
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(error = %e, "切换收藏失败"),
+                        }
+                        close = true;
+                    }
+                    PhotoCtxAction::EditCaption => {
+                        self.caption_editor = Some(photo_id);
+                        close = true;
+                    }
+                    PhotoCtxAction::EditTags => {
+                        self.tag_editor = Some(photo_id);
+                        close = true;
+                    }
+                }
+            }
+            if close {
+                self.photo_ctx = None;
+            }
+        }
+
+        // 说明编辑窗口（M4 #8：说明只存应用库）
+        if let Some(photo_id) = self.caption_editor {
+            let mut open = true;
+            egui::Window::new("照片说明")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .order(egui::Order::Foreground)
+                .show(ui, |ui| {
+                    ui.text_edit_multiline(&mut self.caption_buf);
+                    ui.horizontal(|ui| {
+                        if ui.button("保存").clicked() {
+                            if let Err(e) = self.lib.set_caption(photo_id, &self.caption_buf) {
+                                tracing::warn!(error = %e, "保存说明失败");
+                            } else {
+                                self.lib.toast = Some(("说明已保存".into(), 2.0));
+                                self.caption_editor = None; // 直接关闭，绕开 open 的借用
+                            }
+                        }
+                    });
+                });
+            if !open {
+                self.caption_editor = None;
+            }
+        }
+
+        // 标签编辑窗口（M4 #8：标签只存应用库）
+        if let Some(photo_id) = self.tag_editor {
+            let mut open = true;
+            let existing = self.lib.tags_of(photo_id).unwrap_or_default();
+            egui::Window::new("照片标签")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .order(egui::Order::Foreground)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for t in &existing {
+                            if ui
+                                .button(format!("{t} ×"))
+                                .on_hover_text("点击移除这个标签")
+                                .clicked()
+                            {
+                                let _ = self.lib.batch_remove_tag_id(photo_id, t);
+                            }
+                        }
+                        if existing.is_empty() {
+                            ui.label("（还没有标签）");
+                        }
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.tag_buf);
+                        if ui.button("添加").clicked() {
+                            let label = self.tag_buf.trim().to_string();
+                            if !label.is_empty() {
+                                let _ = self.lib.batch_add_tag_id(photo_id, &label);
+                                self.tag_buf.clear();
+                            }
+                        }
+                    });
+                });
+            if !open {
+                self.tag_editor = None;
+            }
+        }
+
+        // 筛选面板（日期/类型/尺寸/标签/收藏 + 批量操作）
+        if self.filter_menu_open && self.viewer.is_none() {
+            let current = self.lib.filter.clone().unwrap_or_default();
+            let has_selection = !self.lib.selection.is_empty();
+            let (action, tag_out) = toolbar::filter_menu(
+                ui,
+                self.filter_menu_pos,
+                &current,
+                &mut self.filter_draft_tag,
+                has_selection,
+            );
+            if tag_out != self.filter_draft_tag {
+                // 文本框的实时回写已发生在 &mut 借用里，这里无需处理
+            }
+            if let Some(action) = action {
+                match action {
+                    ToolbarAction::ApplyFilter(f) => {
+                        let f = *f;
+                        let has = f.starred_only
+                            || f.tag.is_some()
+                            || f.taken_range.is_some()
+                            || f.size_class.is_some()
+                            || !f.formats.is_empty();
+                        if let Err(e) = self.lib.set_filter(has.then_some(f)) {
+                            tracing::warn!(error = %e, "应用筛选失败");
+                        }
+                        self.filter_menu_open = false;
+                        self.restore_scroll = Some(0.0);
+                    }
+                    ToolbarAction::ClearFilter => {
+                        if let Err(e) = self.lib.set_filter(None) {
+                            tracing::warn!(error = %e, "清除筛选失败");
+                        }
+                        self.filter_menu_open = false;
+                        self.restore_scroll = Some(0.0);
+                    }
+                    ToolbarAction::BatchStar(on) => {
+                        match self.lib.batch_set_starred(on) {
+                            Ok(n) if n > 0 => {
+                                self.lib.toast = Some((
+                                    format!("{} {n} 张照片", if on { "已收藏" } else { "已取消收藏" }),
+                                    2.5,
+                                ));
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(error = %e, "批量收藏失败"),
+                        }
+                    }
+                    ToolbarAction::BatchAddTag => {
+                        let label = self.filter_draft_tag.trim().to_string();
+                        if !label.is_empty() {
+                            match self.lib.batch_add_tag(&label) {
+                                Ok(n) if n > 0 => {
+                                    self.lib.toast =
+                                        Some((format!("已为 {n} 张打上「{label}」"), 2.5));
+                                }
+                                Ok(_) => {}
+                                Err(e) => tracing::warn!(error = %e, "批量加标签失败"),
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if self.filter_menu_frame != ctx.cumulative_frame_nr()
+                && ctx.input(|i| i.pointer.any_click())
+            {
+                let pos = ctx.input(|i| i.pointer.interact_pos());
+                if let Some(p) = pos
+                    && !Rect::from_min_size(self.filter_menu_pos, vec2(260.0, 420.0)).contains(p)
+                {
+                    self.filter_menu_open = false;
                 }
             }
         }
@@ -2368,4 +2887,11 @@ impl eframe::App for OpenPicasaApp {
         self.lib.save_prefs();
         tracing::info!("退出：偏好已保存");
     }
+}
+
+/// 照片右键菜单的动作。
+enum PhotoCtxAction {
+    ToggleStar,
+    EditCaption,
+    EditTags,
 }

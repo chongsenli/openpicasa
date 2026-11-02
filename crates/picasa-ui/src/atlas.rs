@@ -448,6 +448,47 @@ mod tests {
         assert!(a.stats_text().contains("0 页"));
     }
 
+    /// 回归：被看到的页**不得**被帧末淘汰。
+    ///
+    /// 守的是「滑块拖进 ≤48px 档后预览图全部消失」：早先 UI 忘了把视口屏距
+    /// 喂给图集（`note_viewport` 零调用者），每页 min_distance 恒为 u32::MAX，
+    /// `evict_pages_farther_than(3)` 就把所有页当「本帧没被看到」整页删光。
+    /// 图集层能测的部分：note 之后页的距离被正确记录，淘汰放行；没 note 的页照删。
+    #[test]
+    fn pages_that_were_seen_survive_eviction() {
+        let mut a = ThumbAtlas::new();
+        // 手工造一页两个槽（不走 GPU 路径）
+        a.pages.push(AtlasPage {
+            // 测试只关心 slots/min_distance 的逻辑，纹理用 4²（egui 测试后端
+            // 限制纹理边 ≤ 2048，真尺寸 4096² 会 panic）
+            texture: egui::Context::default().load_texture(
+                "t",
+                egui::ColorImage::filled([4, 4], egui::Color32::GRAY),
+                TextureOptions::LINEAR,
+            ),
+            used: vec![true, true],
+            used_count: 2,
+            min_distance: u32::MAX,
+            last_used_frame: 0,
+        });
+        a.slots.insert(1, AtlasSlot { page: 0, slot: 0, uv: slot_uv(0) });
+        a.slots.insert(2, AtlasSlot { page: 0, slot: 1, uv: slot_uv(1) });
+
+        // 帧 1：photo 1 在视口内（屏距 0），photo 2 不喂
+        a.begin_frame();
+        a.note_viewport([(1, 0)]);
+        assert_eq!(a.evict_pages_farther_than(3), 0, "被看到的页不得被淘汰");
+        assert!(a.contains(1), "看到的图必须还在");
+        assert!(a.contains(2), "同页的其他图跟着页活下来");
+
+        // 帧 2：正常帧会调 note_viewport（空视口也要调——它负责把所有页的
+        // 距离重置成 MAX），这里模拟「图都在视口外」的空喂入 → 整页按最远淘汰
+        a.begin_frame();
+        a.note_viewport([] as [(i64, u32); 0]);
+        assert_eq!(a.evict_pages_farther_than(3), 1, "没被看到的页应被淘汰");
+        assert!(!a.contains(1));
+    }
+
     #[test]
     fn clear_drops_everything() {
         let mut a = ThumbAtlas::new();

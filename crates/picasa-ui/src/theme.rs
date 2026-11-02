@@ -247,6 +247,7 @@ pub fn text_styles() -> Vec<(TextStyle, FontId)> {
 /// 把 egui 的全局样式调成 Picasa 的观感。
 pub fn apply(ctx: &egui::Context) {
     let theme = Theme::picasa();
+    install_cjk_fallback(ctx);
 
     // 🔒 锁定浅色（2026-11-01 用户报告「索引管理里按钮文字与按钮颜色接近，无法识别」）：
     // egui 默认**跟随系统**主题偏好，GNOME 深色模式下 egui 走 dark 调色板——
@@ -301,4 +302,54 @@ pub fn apply(ctx: &egui::Context) {
         style.spacing.scroll.bar_width = Metrics::SCROLLBAR;
         style.spacing.scroll.floating = false;
     });
+}
+
+/// 安装中日韩字体回退（2026-11-02 用户报告：界面中文全部乱码）。
+///
+/// ## 为什么不用 `system_fonts` feature
+///
+/// 那个 feature 在本机（macOS 26）上会让 egui 的系统字体枚举卡死主线程
+/// （见根 `Cargo.toml` 里 eframe features 的注释）。所以这里**手动**加载一个
+/// 已知路径的系统 CJK 字体，绕开枚举，也不走 CoreText fallback 探测。
+///
+/// ## 为什么选 Hiragino Sans GB 而不是 PingFang
+///
+/// 都在 `/System/Library/Fonts` 下、所有 macOS 自带；PingFang.ttc 的第一个 face
+/// 就是中文主 face，而 Hiragino Sans GB.ttc 第一个 face 覆盖拉丁、后面 face 才是
+/// 中文字形——作为 **fallback**（`FontPriority::Lowest`）后者更合适：
+/// 拉丁字符继续用 egui 内置字体（保持现有观感与度量），只有内置字体缺的字形
+/// （全部汉字）才落到 Hiragino 上。
+///
+/// 加载失败静默跳过：缺字体的后果只是中文乱码（可诊断），不该让应用打不开。
+fn install_cjk_fallback(ctx: &egui::Context) {
+    const CANDIDATES: &[&str] = &[
+        // macOS 自带（第一个含简体中文字形的系统字体，23 MB，比 PingFang 小）
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        // 备选：Windows / 其他发行方式下可能存在的路径
+        "C:/Windows/Fonts/msyh.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    ];
+    for path in CANDIDATES {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        tracing::info!(path, bytes = bytes.len(), "已加载 CJK 回退字体");
+        ctx.add_font(egui::FontInsert::new(
+            "cjk_fallback",
+            egui::FontData::from_owned(bytes),
+            vec![
+                egui::InsertFontFamily {
+                    family: egui::FontFamily::Proportional,
+                    priority: egui::FontPriority::Lowest,
+                },
+                egui::InsertFontFamily {
+                    family: egui::FontFamily::Monospace,
+                    priority: egui::FontPriority::Lowest,
+                },
+            ],
+        ));
+        return;
+    }
+    tracing::warn!("未找到可用的 CJK 回退字体，中文可能显示为方框");
 }

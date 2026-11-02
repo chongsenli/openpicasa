@@ -46,7 +46,6 @@
 
 use std::time::{Duration, Instant};
 
-use picasa_core::Tier;
 use picasa_core::library::{PAGE_FIRST, PAGE_STEP, group_by_day};
 use picasa_db::{Db, PhotoInput, SortSpec};
 use picasa_ui::grid::GridLayout;
@@ -249,7 +248,8 @@ fn main() {
     println!("  {:>36} {} 个分组", "", groups.len());
 
     let (layout, t_layout) = timed_n("GridLayout::build(首屏页)", RUNS, || {
-        GridLayout::build(&page, 1280.0, Tier::Medium, true)
+        // 用连续 cell_px（对应旧的 Medium 档 144px）跑布局基准
+        GridLayout::build(&page, 1280.0, 144.0, true, picasa_core::ViewMode::Grid)
     });
     println!(
         "  {:>36} {} 列 / 内容高 {:.0}px",

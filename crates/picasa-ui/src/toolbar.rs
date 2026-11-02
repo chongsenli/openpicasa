@@ -8,7 +8,7 @@
 //! 唯一保留的置灰入口是左栏的「星标」——它是版式的一部分（U-19 的例外说明）。
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Ui, pos2, vec2};
-use picasa_core::Tier;
+use picasa_core::ViewMode;
 use picasa_db::SortKey;
 
 use crate::icons::{self, Icon};
@@ -23,6 +23,22 @@ pub enum ToolbarAction {
     PickSort(SortKey),
     ToggleSortDirection,
     CycleTier,
+    /// 打开/关闭「视图」弹出菜单（默认 / 纵向瀑布流 / 横向瀑布流）
+    ToggleViewMenu,
+    /// 打开/关闭「筛选」弹出面板（日期/类型/尺寸/标签/收藏）
+    ToggleFilterMenu,
+    /// 清除全部筛选
+    ClearFilter,
+    /// 设置筛选条件（面板点选后整包提交）
+    ApplyFilter(Box<picasa_db::PhotoFilter>),
+    /// 切换搜索范围（当前文件夹 ↔ 全部图库）
+    ToggleSearchScope,
+    /// 批量收藏（当前选择集）
+    BatchStar(bool),
+    /// 批量加标签（当前选择集）
+    BatchAddTag,
+    /// 选择一个视图模式（M3 瀑布流）
+    PickViewMode(ViewMode),
     /// 切换「包含子文件夹」（`07-A` RECURSE-01 / U-70）
     ToggleRecurse,
     ToggleFullscreen,
@@ -42,13 +58,17 @@ pub struct ToolbarOutput {
     /// 搜索框内容（双向绑定由 App 处理）
     pub search_changed: Option<String>,
     pub sort_button: Option<Response>,
+    /// 「视图」按钮的矩形（App 用它定位弹出菜单）
+    pub view_button: Option<egui::Rect>,
+    /// 「筛选」按钮的矩形（App 用它定位弹出菜单）
+    pub filter_button: Option<egui::Rect>,
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     theme: &Theme,
-    tier: Tier,
+    cell_px: f32,
     sort: picasa_db::SortSpec,
     has_selection: bool,
     search: &mut String,
@@ -56,11 +76,17 @@ pub fn show(
     // 「包含子文件夹」当前状态与可用性（`07-A` RECURSE-01/09）
     recurse_on: bool,
     recurse_available: bool,
+    // M4：筛选是否有激活条件（按钮高亮用）
+    filter_active: bool,
+    // M4：搜索范围（true = 当前文件夹，false = 全部图库）
+    search_in_current: bool,
 ) -> ToolbarOutput {
     let mut out = ToolbarOutput {
         actions: Vec::new(),
         search_changed: None,
         sort_button: None,
+        view_button: None,
+        filter_button: None,
     };
     let rect = Rect::from_min_size(
         ui.max_rect().left_top(),
@@ -177,6 +203,62 @@ pub fn show(
     }
     x = size_rect.right() + 4.0;
 
+    // M3 追加：视图切换（默认 / 纵向瀑布流 / 横向瀑布流）。弹出菜单由 App 画。
+    let view_rect = Rect::from_min_size(pos2(x, btn_y), vec2(64.0, btn_h));
+    if row_button(
+        ui,
+        &painter,
+        view_rect,
+        Icon::GridSize,
+        "视图",
+        true,
+        "切换视图布局（默认方格 / 瀑布流）",
+        theme,
+    ) {
+        out.actions.push(ToolbarAction::ToggleViewMenu);
+    }
+    out.view_button = Some(view_rect);
+    x = view_rect.right() + 4.0;
+
+    // M4：筛选按钮（日期/类型/尺寸/标签）。有激活条件时按钮保持按下态。
+    let filter_rect = Rect::from_min_size(pos2(x, btn_y), vec2(64.0, btn_h));
+    if row_button(
+        ui,
+        &painter,
+        filter_rect,
+        Icon::Sort,
+        "筛选",
+        true,
+        "按拍摄日期 / 类型 / 尺寸 / 标签筛选",
+        theme,
+    ) {
+        out.actions.push(ToolbarAction::ToggleFilterMenu);
+    }
+    out.filter_button = Some(filter_rect);
+    let _ = filter_active; // 高亮由 row_button_resp 的 pressed 参数承担（下方重画）
+    x = filter_rect.right() + 4.0;
+
+    // M4：搜索范围切换（搜索框左边的小按钮）
+    let scope_label = if search_in_current { "当前文件夹" } else { "全部图库" };
+    let scope_rect = Rect::from_min_size(pos2(x, btn_y), vec2(88.0, btn_h));
+    if row_button(
+        ui,
+        &painter,
+        scope_rect,
+        Icon::Search,
+        scope_label,
+        true,
+        if search_in_current {
+            "搜索范围：当前文件夹。点击改为搜索全部图库"
+        } else {
+            "搜索范围：全部图库。点击改回当前文件夹"
+        },
+        theme,
+    ) {
+        out.actions.push(ToolbarAction::ToggleSearchScope);
+    }
+    x = scope_rect.right() + 4.0;
+
     // M3 RECURSE-01（U-70）：工具栏「包含子文件夹」切换钮。
     //
     // 「所有照片」视图下置灰（RECURSE-09：语义重叠——它本来就是全库）。
@@ -225,11 +307,11 @@ pub fn show(
     );
     painters_search_box(ui, &painter, search_rect, theme, search, &mut out);
 
-    // 档位提示（搜索框左侧小字；原版工具行中部也有灰字提示）
+    // 档位提示（搜索框左侧小字；M3 ZOOM-01：显示连续滑块值，而非离散档）
     painter.text(
         pos2(search_rect.left() - 8.0, tr.center().y),
         Align2::RIGHT_CENTER,
-        format!("{}px", Metrics::CELL_SIZES[tier.index()] as i32),
+        format!("{}px", cell_px.round() as i32),
         FontId::new(10.0, egui::FontFamily::Proportional),
         theme.text_secondary,
     );
@@ -477,7 +559,7 @@ pub fn sort_menu(ui: &mut Ui, at: Pos2, current: picasa_db::SortSpec) -> Option<
                         (SortKey::Size, "文件大小"),
                         (SortKey::Dimensions, "图片尺寸"),
                     ] {
-                        let mark = if current.key == key { "✓ " } else { "   " };
+                        let mark = if current.key == key { "√ " } else { "   " };
                         if ui
                             .add(egui::Button::new(format!("{mark}{label}")).frame(false))
                             .clicked()
@@ -493,6 +575,193 @@ pub fn sort_menu(ui: &mut Ui, at: Pos2, current: picasa_db::SortSpec) -> Option<
                     };
                     if ui.add(egui::Button::new(dir).frame(false)).clicked() {
                         action = Some(ToolbarAction::ToggleSortDirection);
+                    }
+                });
+        });
+    action
+}
+
+/// 筛选弹出面板（M4 #5/#9：日期 / 类型 / 尺寸 / 标签 / 收藏）。
+///
+/// 面板自己维护草稿（`draft_tag`），点「应用」才把整包 [`picasa_db::PhotoFilter`]
+/// 交给 App 提交——每点一个勾就重查全库会让筛选面板变得不可用。
+/// 返回 `(可能的动作, 草稿标签回写)`——标签输入框的内容要跨帧保存在 App 里。
+pub fn filter_menu(
+    ui: &mut Ui,
+    at: Pos2,
+    current: &picasa_db::PhotoFilter,
+    draft_tag: &mut String,
+    has_selection: bool,
+) -> (Option<ToolbarAction>, String) {
+    let mut action = None;
+    let mut tag_out = draft_tag.clone();
+    let mut draft = current.clone();
+
+    egui::Area::new(ui.scope_id().with("filter-menu"))
+        .fixed_pos(at)
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(Color32::WHITE)
+                .stroke(egui::Stroke::new(1.0, Color32::from_gray(0xC0)))
+                .corner_radius(3.0)
+                .inner_margin(egui::Margin::same(8))
+                .shadow(egui::epaint::Shadow {
+                    offset: [1, 2],
+                    blur: 6,
+                    spread: 0,
+                    color: Color32::from_black_alpha(40),
+                })
+                .show(ui, |ui| {
+                    ui.set_min_width(230.0);
+                    ui.heading("筛选");
+                    ui.separator();
+
+                    // ---- 收藏 ----
+                    if ui
+                        .checkbox(&mut draft.starred_only, "只看收藏（星标）")
+                        .changed()
+                    {
+                        action = Some(ToolbarAction::ApplyFilter(Box::new(draft.clone())));
+                    }
+
+                    // ---- 类型 ----
+                    ui.label("类型");
+                    ui.horizontal_wrapped(|ui| {
+                        for (slug, label) in [
+                            ("jpeg", "JPEG"),
+                            ("png", "PNG"),
+                            ("gif", "GIF"),
+                            ("webp", "WebP"),
+                            ("tiff", "TIFF"),
+                            ("svg", "SVG"),
+                            ("heic", "HEIC"),
+                            ("avif", "AVIF"),
+                        ] {
+                            let mut on = draft.formats.iter().any(|f| f == slug);
+                            if ui.toggle_value(&mut on, label).clicked() {
+                                if on {
+                                    draft.formats.push(slug.into());
+                                } else {
+                                    draft.formats.retain(|f| f != slug);
+                                }
+                                action =
+                                    Some(ToolbarAction::ApplyFilter(Box::new(draft.clone())));
+                            }
+                        }
+                        // RAW 家族一个选项覆盖全部
+                        let mut raw_on = draft
+                            .formats
+                            .iter()
+                            .any(|f| matches!(f.as_str(), "cr2" | "cr3" | "nef" | "arw" | "dng"));
+                        if ui.toggle_value(&mut raw_on, "RAW").clicked() {
+                            for slug in ["cr2", "cr3", "nef", "arw", "dng"] {
+                                if raw_on {
+                                    draft.formats.push(slug.into());
+                                } else {
+                                    draft.formats.retain(|f| f != slug);
+                                }
+                            }
+                            action = Some(ToolbarAction::ApplyFilter(Box::new(draft.clone())));
+                        }
+                    });
+
+                    // ---- 尺寸 ----
+                    ui.label("尺寸");
+                    ui.horizontal(|ui| {
+                        let mut none = draft.size_class.is_none();
+                        if ui.toggle_value(&mut none, "全部").clicked() {
+                            draft.size_class = None;
+                            action = Some(ToolbarAction::ApplyFilter(Box::new(draft.clone())));
+                        }
+                        for sc in [
+                            picasa_db::SizeClass::Small,
+                            picasa_db::SizeClass::Medium,
+                            picasa_db::SizeClass::Large,
+                        ] {
+                            let mut on = draft.size_class == Some(sc);
+                            if ui.toggle_value(&mut on, sc.label()).clicked() {
+                                draft.size_class = Some(sc);
+                                action =
+                                    Some(ToolbarAction::ApplyFilter(Box::new(draft.clone())));
+                            }
+                        }
+                    });
+
+                    // ---- 标签 ----
+                    ui.label("标签");
+                    ui.horizontal(|ui| {
+                        if ui.text_edit_singleline(draft_tag).changed() {
+                            tag_out = draft_tag.clone();
+                        }
+                        if ui.button("按此标签筛").clicked() {
+                            let t = draft_tag.trim().to_string();
+                            draft.tag = (!t.is_empty()).then_some(t);
+                            action = Some(ToolbarAction::ApplyFilter(Box::new(draft)));
+                        }
+                    });
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("清除全部筛选").clicked() {
+                            action = Some(ToolbarAction::ClearFilter);
+                        }
+                        if has_selection {
+                            ui.separator();
+                            ui.label("对所选：");
+                            if ui.button("★ 收藏").clicked() {
+                                action = Some(ToolbarAction::BatchStar(true));
+                            }
+                            if ui.button("☆ 取消").clicked() {
+                                action = Some(ToolbarAction::BatchStar(false));
+                            }
+                        }
+                    });
+                    if has_selection {
+                        ui.horizontal(|ui| {
+                            ui.label("批量标签：");
+                            ui.text_edit_singleline(&mut tag_out);
+                            if ui.button("打标签").clicked() {
+                                action = Some(ToolbarAction::BatchAddTag);
+                            }
+                        });
+                    }
+                });
+        });
+    (action, tag_out)
+}
+
+/// 视图弹出菜单（默认 / 纵向瀑布流 / 横向瀑布流）。
+/// 弹出定位与关停由 App 管（与排序菜单同一套机制）。
+pub fn view_menu(ui: &mut Ui, at: Pos2, current: ViewMode) -> Option<ToolbarAction> {
+    let mut action = None;
+    egui::Area::new(ui.scope_id().with("view-menu"))
+        .fixed_pos(at)
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(Color32::WHITE)
+                .stroke(egui::Stroke::new(1.0, Color32::from_gray(0xC0)))
+                .corner_radius(3.0)
+                .inner_margin(egui::Margin::same(4))
+                .shadow(egui::epaint::Shadow {
+                    offset: [1, 2],
+                    blur: 6,
+                    spread: 0,
+                    color: Color32::from_black_alpha(40),
+                })
+                .show(ui, |ui| {
+                    ui.set_min_width(150.0);
+                    for mode in [ViewMode::Grid, ViewMode::MasonryV, ViewMode::MasonryH] {
+                        let mark = if current == mode { "√ " } else { "   " };
+                        if ui
+                            .add(
+                                egui::Button::new(format!("{mark}{}", mode.label())).frame(false),
+                            )
+                            .clicked()
+                        {
+                            action = Some(ToolbarAction::PickViewMode(mode));
+                        }
                     }
                 });
         });

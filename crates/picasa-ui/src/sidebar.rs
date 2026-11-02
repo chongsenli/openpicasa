@@ -23,6 +23,10 @@ use crate::theme::{Metrics, Theme};
 #[derive(Clone, Debug, PartialEq)]
 pub enum SidebarAction {
     ShowView(View),
+    /// 左栏「星标」行：切换「只看收藏」筛选。
+    ToggleStarredFilter,
+    /// 时间轴：按某一年筛选（拍摄日期）。
+    TimelineYear(i32),
     ToggleFolder(String),
     ToggleSection(String),
     TrayToggle,
@@ -270,9 +274,61 @@ fn favorites(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut Vec
     if row.clicked() {
         actions.push(SidebarAction::ShowView(View::Recent));
     }
-    // 星标：**置灰 + 说明**（U-19 的唯一例外，红线 R-2 允许）
-    let row = fav_row(ui, &t, "星标", None, false, false, ctx.has_focus);
-    row.on_hover_text("本版本暂不支持星标（M2 提供）。这里保留入口是为了保持左栏版式与原版一致。");
+    // 星标：M4 起可用——切「只看收藏」筛选（数据只存应用库，不写照片文件）。
+    //
+    // ⚠️ 必须用 `ctx.db`（调用方 `app.rs` 持锁传入的引用），**绝不能**在这里
+    // 调 `lib.db()` 再拿一次锁：std Mutex 不可重入，重入 = 主线程自我死锁
+    // （2026-11-02 实测：启动首帧 hang 127 s，主线程与 op-index 互锁——
+    // 与 `app.rs` new() 里 `enqueue_retry` 那条教训是同一类错误）。
+    let starred_on = lib.filter.as_ref().is_some_and(|f| f.starred_only);
+    let count = ctx.db.starred_ids().ok().map(|v| v.len() as u64);
+    let row = fav_row(ui, &t, "星标", count, starred_on, true, ctx.has_focus);
+    if row.clicked() {
+        actions.push(SidebarAction::ToggleStarredFilter);
+    }
+    row.on_hover_text(if starred_on {
+        "正在只看收藏的照片，再点一次显示全部"
+    } else {
+        "只看收藏（星标）的照片"
+    });
+
+    // ---- 时间轴（M4 #7：按拍摄年份分组浏览）----
+    if !ctx.favorites_collapsed {
+        ui.add_space(4.0);
+        if ui
+            .add(egui::Label::new(
+                egui::RichText::new("时间轴")
+                    .size(11.0)
+                    .color(t.text_secondary),
+            ))
+            .clicked()
+        {
+            // 分组标题不可点
+        }
+        // ⚠️ 同 `starred_ids` 的教训：用 `ctx.db`（调用方持锁传入），不能调
+        // `lib.timeline_years()`——它内部会 `self.db()` 重入拿锁 = 死锁。
+        if let Ok(years) = ctx.db.timeline_years() {
+            for (year, n) in years.iter().take(12) {
+                let active = lib.filter.as_ref().is_some_and(|f| {
+                    f.taken_range == Some(year_range(*year))
+                });
+                let label = format!("{year}");
+                let row = fav_row(ui, &t, &label, Some(*n as u64), active, true, ctx.has_focus);
+                if row.clicked() {
+                    if active {
+                        actions.push(SidebarAction::TimelineYear(0)); // 0 = 清除
+                    } else {
+                        actions.push(SidebarAction::TimelineYear(*year));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 某一年的拍摄日期筛选范围（epoch 秒）。算式在 core（`year_range_seconds`）。
+fn year_range(year: i32) -> (i64, i64) {
+    picasa_core::year_range_seconds(year)
 }
 
 fn fav_row(

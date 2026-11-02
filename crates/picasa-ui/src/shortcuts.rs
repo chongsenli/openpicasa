@@ -31,6 +31,8 @@ pub enum KeyAction {
     ZoomActual,
     ToggleBackground,
     ToggleInfo,
+    /// `C`：查看器并排比较（M4 #11）
+    ToggleCompare,
     /// 切换「包含子文件夹」（`07-A` RECURSE-01：`⌘⇧R`）
     ToggleRecurse,
     /// `⌘0`：缩略图滑块回默认刻度（`07-A` ZOOM-03）
@@ -103,6 +105,9 @@ pub fn collect(ctx: &Context, in_viewer: bool) -> Vec<KeyAction> {
             // ---- 查看器 ----
             if i.key_pressed(Key::Escape) {
                 out.push(KeyAction::CloseViewer);
+            }
+            if i.key_pressed(Key::C) {
+                out.push(KeyAction::ToggleCompare);
             }
             if i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::J) {
                 out.push(KeyAction::Prev);

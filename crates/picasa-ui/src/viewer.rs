@@ -66,6 +66,14 @@ pub struct Viewer {
     pub fullscreen: bool,
     /// EXIF 摘要（打开时同步读一次，1~5ms）
     pub exif: picasa_imaging::ExifSummary,
+    /// 直方图（M4 #11）：纹理加载时算一次。`None` = 还没加载 / 算不出来。
+    pub histogram: Option<picasa_imaging::Histogram>,
+    /// 并排比较（M4 #11）：与相邻照片并排。`true` 时同时加载 index±1 的纹理。
+    pub compare: bool,
+    /// 比较对象（右侧图）的纹理与尺寸：(photo_id, texture, size)。
+    pub compare_tex: Option<(i64, TextureHandle, Vec2)>,
+    /// 已排队等待的比较图 photo_id（防重复排队）。
+    pub compare_requested: Option<i64>,
     pub dims: Option<(u32, u32)>,
 }
 
@@ -85,6 +93,10 @@ impl Viewer {
             last_move: 0.0,
             fullscreen: false,
             exif: Default::default(),
+            histogram: None,
+            compare: false,
+            compare_tex: None,
+            compare_requested: None,
             dims: None,
         }
     }
@@ -101,6 +113,8 @@ impl Viewer {
         self.requested_id = None;
         self.dims = None;
         self.exif = Default::default();
+        self.histogram = None;
+        self.compare_tex = None;
     }
 
     pub fn zoom_in(&mut self) {
@@ -192,15 +206,28 @@ pub fn show(
         viewer.zoom = fit;
     }
 
+    // ---- 并排比较（M4 #11）：主图占左半屏，比较图占右半屏 ----
+    let avail = if viewer.compare && viewer.compare_tex.is_some() {
+        Rect::from_min_size(
+            avail.left_top(),
+            vec2(avail.width() / 2.0 - 4.0, avail.height()),
+        )
+    } else {
+        avail
+    };
     let size = vec2(iw * viewer.zoom, ih * viewer.zoom);
     let mut center = rect.center() + viewer.pan;
+    if viewer.compare && viewer.compare_tex.is_some() {
+        // 主图中心移到左半屏中心
+        center.x = avail.center().x;
+    }
     // 图片比视口小就居中（不让人把它拖出屏幕）
     if size.x <= avail.width() {
-        center.x = rect.center().x;
+        center.x = avail.center().x;
         viewer.pan.x = 0.0;
     }
     if size.y <= avail.height() {
-        center.y = rect.center().y;
+        center.y = avail.center().y;
         viewer.pan.y = 0.0;
     }
     let img_rect = Rect::from_center_size(center, size);
@@ -221,6 +248,7 @@ pub fn show(
             Color32::WHITE,
         );
     } else if let Some((tex_id, psize)) = viewer.preview {
+        // 占位（compare 模式下同样生效）
         // 预览按自身比例贴合（缩略图与大图比例一致，但用自身尺寸更稳）
         let prect = fit_rect(img_rect, psize);
         painter.image(
@@ -243,6 +271,40 @@ pub fn show(
             "正在解码…",
             FontId::new(13.0, egui::FontFamily::Proportional),
             Color32::from_white_alpha(160),
+        );
+    }
+
+    // ---- 并排比较图（M4 #11）：右半屏 ----
+    if viewer.compare {
+        let right_rect = Rect::from_min_size(
+            pos2(rect.center().x + 4.0, rect.top()),
+            vec2(rect.width() / 2.0 - 8.0, rect.height()),
+        );
+        if let Some((_, tex, csize)) = viewer.compare_tex.as_ref() {
+            let crect = fit_rect(right_rect, *csize);
+            painter.image(tex.id(), crect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            if let Some(next) = photos.get(viewer.index + 1) {
+                painter.text(
+                    pos2(crect.center().x, crect.bottom() + 14.0),
+                    Align2::CENTER_CENTER,
+                    &next.name,
+                    FontId::new(11.0, egui::FontFamily::Proportional),
+                    Color32::from_white_alpha(150),
+                );
+            }
+        } else {
+            painter.text(
+                right_rect.center(),
+                Align2::CENTER_CENTER,
+                "正在载入比较图…",
+                FontId::new(12.0, egui::FontFamily::Proportional),
+                Color32::from_white_alpha(140),
+            );
+        }
+        // 中缝分隔线
+        painter.line_segment(
+            [pos2(rect.center().x, rect.top()), pos2(rect.center().x, rect.bottom())],
+            Stroke::new(1.0, Color32::from_white_alpha(40)),
         );
     }
 
@@ -359,7 +421,7 @@ pub fn show(
             painter.text(
                 pos2(bar.right() - 10.0, bar.center().y),
                 Align2::RIGHT_CENTER,
-                "I 隐藏信息 · Space 切背景 · ←/→ 翻页 · Esc 返回",
+                "I 隐藏信息 · Space 切背景 · C 并排比较 · ←/→ 翻页 · Esc 返回",
                 FontId::new(11.0, egui::FontFamily::Proportional),
                 Color32::from_white_alpha(150),
             );
@@ -475,9 +537,10 @@ fn button(
 
 fn draw_info_panel(painter: &egui::Painter, rect: Rect, viewer: &Viewer, theme: &Theme) {
     let w = 250.0;
+    let hist_h = if viewer.histogram.is_some() { 92.0 } else { 0.0 };
     let panel = Rect::from_min_size(
         pos2(rect.right() - w - 10.0, rect.top() + 44.0),
-        vec2(w, 210.0),
+        vec2(w, 210.0 + hist_h),
     );
     painter.rect_filled(panel, 4.0, Color32::from_black_alpha(190));
     painter.rect_stroke(
@@ -486,6 +549,11 @@ fn draw_info_panel(painter: &egui::Painter, rect: Rect, viewer: &Viewer, theme: 
         Stroke::new(1.0, Color32::from_white_alpha(30)),
         egui::StrokeKind::Inside,
     );
+
+    // ---- 直方图（M4 #11）----
+    if let Some(hist) = &viewer.histogram {
+        draw_histogram(painter, panel, hist);
+    }
 
     let e = &viewer.exif;
     let rows: Vec<(&str, Option<String>)> = vec![
@@ -500,7 +568,7 @@ fn draw_info_panel(painter: &egui::Painter, rect: Rect, viewer: &Viewer, theme: 
         ("位置", e.gps.clone()),
     ];
 
-    let mut y = panel.top() + 10.0;
+    let mut y = panel.top() + 10.0 + hist_h;
     painter.text(
         pos2(panel.left() + 12.0, y),
         Align2::LEFT_TOP,
@@ -535,4 +603,45 @@ fn join_opt(a: &Option<String>, b: &Option<String>) -> Option<String> {
         (None, Some(b)) => Some(b.clone()),
         (None, None) => None,
     }
+}
+
+
+/// 画 RGB 直方图：三条半透明折线叠在半透明底上（92px 高，占面板宽减 24px 边距）。
+fn draw_histogram(painter: &egui::Painter, panel: Rect, hist: &picasa_imaging::Histogram) {
+    let inset = 10.0;
+    let bar = Rect::from_min_size(
+        pos2(panel.left() + inset, panel.top() + 8.0),
+        vec2(panel.width() - inset * 2.0, 76.0),
+    );
+    painter.rect_filled(bar, 2.0, Color32::from_black_alpha(120));
+
+    let channels: [(&[f32; 256], Color32); 3] = [
+        (&hist.r, Color32::from_rgba_unmultiplied(255, 80, 80, 140)),
+        (&hist.g, Color32::from_rgba_unmultiplied(80, 230, 110, 140)),
+        (&hist.b, Color32::from_rgba_unmultiplied(90, 140, 255, 140)),
+    ];
+    for (data, color) in channels {
+        let mut mesh = egui::Mesh::default();
+        let n = data.len();
+        let base = pos2(bar.left(), bar.bottom());
+        mesh.colored_vertex(base, color);
+        for (i, v) in data.iter().enumerate() {
+            let x = bar.left() + (i as f32 / (n - 1) as f32) * bar.width();
+            let y = bar.bottom() - v.clamp(0.0, 1.0) * (bar.height() - 2.0);
+            mesh.colored_vertex(pos2(x, y), color);
+        }
+        // 闭合到右下角
+        mesh.colored_vertex(pos2(bar.right(), bar.bottom()), color);
+        let count = n as u32 + 2;
+        for i in 0..count - 1 {
+            mesh.add_triangle(0, i + 1, i + 2);
+        }
+        painter.add(egui::Shape::Mesh(std::sync::Arc::new(mesh)));
+    }
+    painter.rect_stroke(
+        bar,
+        2.0,
+        Stroke::new(1.0, Color32::from_white_alpha(30)),
+        egui::StrokeKind::Inside,
+    );
 }
