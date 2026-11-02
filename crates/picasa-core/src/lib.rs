@@ -42,7 +42,7 @@ pub use texbudget::{
     texture_cache_budget_mb,
 };
 pub use index::{FailureItem, IndexBoard, IndexSnapshot, IndexState, TaskSnapshot};
-pub use library::{Library, View};
+pub use library::{Library, View, year_range_seconds};
 pub use mgmt::{
     DECODE_TIMEOUT_MS, HISTORY_KEEP, SNAPSHOT_HZ_MAX, STARTUP_VERIFY_DELAY_MS,
     VERIFY_DIR_INTERVAL_MS, ExclusionView, FolderState, IndexEntryState, MgmtSnapshot,
@@ -82,6 +82,33 @@ pub enum CoreError {
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
+
+/// 栅格视图模式（M3 追加：用户要求的瀑布流支持）。
+///
+/// - `Grid`：默认等宽等高方格（对齐 Picasa 3.9）。
+/// - `MasonryV`：纵向瀑布流——列宽固定、图片按真实宽高比缩放、放进当前最矮的列。
+/// - `MasonryH`：横向瀑布流——行高固定、图片按真实宽高比缩放、放进当前最窄的行。
+///
+/// 两种 masonry 都依赖照片的真实宽高比（`photos.width/height`），宽高缺失时按 1:1
+/// 占位，回填后布局自动重排。日期分组头在 masonry 下**不显示**：贪心放置的坐标
+/// 无法与「每组的起始行」对齐（分组头会插在图片流中间，而不是行边界上）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ViewMode {
+    #[default]
+    Grid,
+    MasonryV,
+    MasonryH,
+}
+
+impl ViewMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewMode::Grid => "默认视图",
+            ViewMode::MasonryV => "纵向瀑布流",
+            ViewMode::MasonryH => "横向瀑布流",
+        }
+    }
+}
 
 /// 缩略图档位（三档离散值，**不可连续缩放**，01 F1-14 / 02 §8.2.4）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -17,6 +17,11 @@
 use picasa_core::{CoreEvent, IndexService};
 use picasa_imaging::format::{DECODE_PANIC_FUSE_PER_MIN, global_guard};
 
+/// 两个测试共享进程级 `global_guard()`（真实扫描器也用它），并行跑会互相
+/// 污染熔断计数 → 偶发红。用互斥锁强制串行；锁本身也是进程级的。
+static GUARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+
 /// 造一个目录，里面塞满**同一个格式**的畸形文件。
 ///
 /// 用同一个格式是关键：熔断按格式计，混着放永远到不了阈值。
@@ -40,6 +45,7 @@ fn dir_with_broken_pngs(tmp: &std::path::Path, n: usize) -> std::path::PathBuf {
 
 #[test]
 fn scanner_survives_a_directory_full_of_broken_files() {
+    let _serial = GUARD_TEST_LOCK.lock().unwrap();
     // 核心断言：**整个扫描跑完，进程活着，每个文件都有结局**。
     //
     // 这是 R-M3-10「畸形文件不崩」在系统层面的验证——
@@ -104,6 +110,7 @@ fn scanner_survives_a_directory_full_of_broken_files() {
 
 #[test]
 fn repeated_panics_trip_the_format_fuse() {
+    let _serial = GUARD_TEST_LOCK.lock().unwrap();
     // R-M3-10：连续 panic > 20/分钟 → 熔断该格式。
     //
     // 这里直接驱动 `DecodeGuard`（扫描器的 `catch_unwind` 分支调的就是它）——

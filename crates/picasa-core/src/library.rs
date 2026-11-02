@@ -4,12 +4,12 @@
 //! 单次几十毫秒），没有后台线程参与。**简单性优先**——M1 的性能瓶颈在渲染与解码，不在查询。
 
 use crate::{
-    CoreError, Result, Tier,
+    CoreError, Result, Tier, ViewMode,
     paths::{self, AppPaths},
     prefs::Preferences,
     scanner::CoreEvent,
 };
-use picasa_db::{Db, ExclusionRow, PhotoRow, SortKey, SortSpec};
+use picasa_db::{Db, ExclusionRow, PhotoFilter, PhotoRow, SortKey, SortSpec};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -136,7 +136,14 @@ pub struct Library {
     pub tray: Vec<i64>,
 
     pub search: String,
+    /// 搜索范围：`true` = 只搜当前视图（文件夹/聚合入口），`false` = 全库。
+    /// 默认「当前视图」——用户在某个文件夹里搜索，预期就是在这个文件夹里找。
+    pub search_in_current: bool,
+    /// 照片筛选（日期/格式/尺寸/收藏/标签）。`None` = 无筛选。
+    pub filter: Option<PhotoFilter>,
     pub tier: Tier,
+    /// 栅格视图模式（默认方格 / 纵向瀑布流 / 横向瀑布流）。
+    pub view_mode: ViewMode,
     pub sort: SortSpec,
     /// 「包含子文件夹」开关（`07-A` §3，P-28 裁决全局一份）。
     ///
@@ -215,6 +222,7 @@ impl Library {
             paths,
             db: Arc::new(Mutex::new(db)),
             tier: prefs.tier,
+            view_mode: prefs.view_mode,
             sort: prefs.sort,
             view: prefs
                 .last_view
@@ -228,6 +236,8 @@ impl Library {
             current: None,
             tray: Vec::new(),
             search: String::new(),
+            search_in_current: true,
+            filter: None,
             recurse: false, // 下面从 `settings.recurse_subfolders` 覆盖（P-28：全局一份）
             roots: Vec::new(),
             visible_folders: Vec::new(),
@@ -425,6 +435,17 @@ impl Library {
     /// 切换时**保持当前选中文件夹**；顶部 `photo_id` 若仍在新视图内则对齐，
     /// 否则回顶。这里只把「要不要回顶」的决定权交出去（返回是否变了），
     /// 具体位置由栅格的 `anchor_id` 机制处理——它本来就有这个能力。
+    /// 切换栅格视图模式。切到 masonry 需要宽高，宽高缺失的格子按 1:1 占位，
+    /// DimsService 回填后布局自动重排。
+    pub fn set_view_mode(&mut self, mode: ViewMode) {
+        if self.view_mode == mode {
+            return;
+        }
+        self.view_mode = mode;
+        self.prefs.view_mode = mode;
+        self.dirty_prefs = true;
+    }
+
     pub fn set_recurse(&mut self, on: bool) -> Result<bool> {
         if self.recurse == on {
             return Ok(false);
@@ -502,13 +523,22 @@ impl Library {
     /// 只是分页补齐前不是完整的——所以新增了 `photos_total` 与 `photos_complete`。
     /// 任何想显示「共 N 张」的地方都要用 `photos_total`，不能用 `photos.len()`。
     pub fn reload_photos(&mut self) -> Result<()> {
-        let folder_ids = self.view_folder_ids();
+        // 搜索范围切换（用户功能 #10）：「当前文件夹」用视图 scope，「全部图库」传 None。
+        // 无搜索词时范围无意义，筛选仍按 scope 走（筛选的是「视图内」的照片）。
+        let searching = !self.search.trim().is_empty();
+        let folder_ids = if searching && !self.search_in_current {
+            None
+        } else {
+            self.view_folder_ids()
+        };
+        let filter = self.filter.clone().unwrap_or_default();
+        let has_filter = filter != picasa_db::PhotoFilter::default();
         // ⚠️ 用 `count_photos_visible` / `photos_from_visible`，**不是**无后缀的那两个：
         // 后者是「物理全库」，会把已关闭关注文件夹的照片也算进来。
         // 用户关掉一个关注文件夹后，树里没了、栅格却还在——那正是这条 bug 的形态。
         let total = self.db()?.count_photos_visible(folder_ids.as_deref())? as usize;
 
-        let photos = if self.search.trim().is_empty() {
+        let photos = if !searching && !has_filter {
             match self.view {
                 // 「最近更改」按 `mtime_ns` 排序，有 `idx_photos_mtime`，全库 5 万也只要几毫秒；
                 // 且它本身就是「最近 N 条」的语义，不需要分页补齐。
@@ -519,6 +549,27 @@ impl Library {
                     PAGE_FIRST.min(total.max(1)),
                     0,
                 )?,
+            }
+        } else if has_filter {
+            // 带筛选（可与搜索词叠加，也可单独用）。筛选查询自带排序与分页口径。
+            let rows = self.db()?.photos_filtered(
+                folder_ids.as_deref(),
+                &filter,
+                self.sort,
+                200_000,
+                0,
+            )?;
+            if !searching {
+                rows
+            } else {
+                // 搜索词与筛选叠加：取并集口径太重（LIKE ∩ 筛选），直接在内存里过滤
+                let needle = paths::compare_key(self.search.trim());
+                rows.into_iter()
+                    .filter(|p| {
+                        p.name.to_lowercase().contains(&needle)
+                            || p.folder_path.to_lowercase().contains(&needle)
+                    })
+                    .collect()
             }
         } else {
             let needle = paths::compare_key(self.search.trim());
@@ -598,6 +649,110 @@ impl Library {
         }
         self.search = s;
         self.reload_photos()
+    }
+
+    /// 切换搜索范围（当前文件夹 ↔ 全部图库）。
+    pub fn set_search_in_current(&mut self, on: bool) -> Result<()> {
+        if self.search_in_current == on {
+            return Ok(());
+        }
+        self.search_in_current = on;
+        // 只在有搜索词时影响结果；无词也 reload 无害（幂等）
+        self.reload_photos()
+    }
+
+    /// 设置/清除筛选。`None` = 清除。
+    pub fn set_filter(&mut self, f: Option<PhotoFilter>) -> Result<()> {
+        if self.filter == f {
+            return Ok(());
+        }
+        self.filter = f;
+        self.reload_photos()
+    }
+
+    /// 批量设置收藏（多选工具栏调用）。
+    pub fn batch_set_starred(&mut self, on: bool) -> Result<usize> {
+        let ids: Vec<i64> = self.selection.iter().copied().collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.db()?.set_starred(&ids, on)?;
+        // 立即反映到当前列表的行状态（不必整页重查）
+        for p in self.photos.iter_mut() {
+            if self.selection.contains(&p.id) {
+                p.starred = on;
+            }
+        }
+        Ok(ids.len())
+    }
+
+    /// 设置单张的收藏（右键菜单用）。会同步刷新当前列表里的行状态。
+    pub fn batch_set_starred_ids(&mut self, ids: Vec<i64>, on: bool) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.db()?.set_starred(&ids, on)?;
+        for p in self.photos.iter_mut() {
+            if ids.contains(&p.id) {
+                p.starred = on;
+            }
+        }
+        Ok(ids.len())
+    }
+
+    /// 批量加标签。
+    pub fn batch_add_tag(&mut self, label: &str) -> Result<usize> {
+        let ids: Vec<i64> = self.selection.iter().copied().collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.db()?.add_tag(&ids, label)?;
+        Ok(ids.len())
+    }
+
+    /// 给单张加标签（标签编辑窗口用）。
+    pub fn batch_add_tag_id(&mut self, photo_id: i64, label: &str) -> Result<()> {
+        self.db()?.add_tag(&[photo_id], label).map_err(CoreError::from)
+    }
+
+    /// 从单张摘标签。
+    pub fn batch_remove_tag_id(&mut self, photo_id: i64, label: &str) -> Result<()> {
+        self.db()?.remove_tag(&[photo_id], label).map_err(CoreError::from)
+    }
+
+    /// 批量摘标签。
+    pub fn batch_remove_tag(&mut self, label: &str) -> Result<usize> {
+        let ids: Vec<i64> = self.selection.iter().copied().collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.db()?.remove_tag(&ids, label)?;
+        Ok(ids.len())
+    }
+
+    /// 设置单张说明（查看器 / 右键菜单调用）。
+    pub fn set_caption(&mut self, photo_id: i64, text: &str) -> Result<()> {
+        self.db()?.set_caption(photo_id, text).map_err(CoreError::from)
+    }
+
+    /// 读单张说明。
+    pub fn caption_of(&self, photo_id: i64) -> Result<String> {
+        self.db()?.caption_of(photo_id).map_err(CoreError::from)
+    }
+
+    /// 读单张的标签列表。
+    pub fn tags_of(&self, photo_id: i64) -> Result<Vec<String>> {
+        self.db()?.tags_of(photo_id).map_err(CoreError::from)
+    }
+
+    /// 全库标签清单（筛选面板）。
+    pub fn all_tags(&self) -> Result<Vec<(String, i64)>> {
+        self.db()?.all_tags().map_err(CoreError::from)
+    }
+
+    /// 时间轴：按拍摄年份的计数（左栏时间轴分组用）。
+    pub fn timeline_years(&self) -> Result<Vec<(i32, i64)>> {
+        self.db()?.timeline_years().map_err(CoreError::from)
     }
 
     pub fn set_sort(&mut self, key: SortKey) -> Result<()> {
@@ -1079,6 +1234,7 @@ impl Library {
     /// 落盘偏好（退出前 + 定时）。**只在应用容器内写**。
     pub fn save_prefs(&mut self) {
         self.prefs.tier = self.tier;
+        self.prefs.view_mode = self.view_mode;
         self.prefs.sort = self.sort;
         self.prefs.tray = self.tray.clone();
         if let Err(e) = self.prefs.save(&self.paths) {
@@ -1189,6 +1345,22 @@ fn collect_ids(node: &FolderNode, out: &mut Vec<i64>) {
 /// 搜索框里输入 `2011` / `2011-05` / `2011-05-13` 时，转成一个日期区间匹配拍摄时间。
 ///
 /// 这是 F1-21「EXIF 拍摄日期」这一路数据源；纯文件名搜索不受影响（OR 关系）。
+/// 某一年的拍摄日期范围（epoch 秒）。时间轴 / 筛选面板共用同一条算式。
+pub fn year_range_seconds(year: i32) -> (i64, i64) {
+    use chrono::TimeZone;
+    let start = chrono::Utc
+        .with_ymd_and_hms(year, 1, 1, 0, 0, 0)
+        .single()
+        .map(|t| t.timestamp())
+        .unwrap_or(0);
+    let end = chrono::Utc
+        .with_ymd_and_hms(year + 1, 1, 1, 0, 0, 0)
+        .single()
+        .map(|t| t.timestamp())
+        .unwrap_or(i64::MAX / 2);
+    (start, end)
+}
+
 pub fn parse_date_range(s: &str) -> Option<(i64, i64)> {
     use chrono::{Local, NaiveDate, TimeZone};
     let digits: Vec<u32> = s

@@ -656,8 +656,10 @@ fn run_job(inner: &Arc<Inner>, job: Job) {
     // · **显式重试**（用户点了「重试 / 补全」）：把这一子树里所有待补的都补完。
     //   这是用户主动要求的长任务，进度条会一直转，也有暂停按钮。
     if job.retry && stats.pending > 0 {
+        tracing::info!(path = %job.path.display(), pending = stats.pending, "重试：开始补全待生成缩略图");
         inner.board.mark_thumbnailing(&key);
         generate_thumbs(inner, folder_id, &key, &job.path);
+        tracing::info!(path = %job.path.display(), "重试：补全结束");
 
         if inner.cancel.load(Ordering::Relaxed) {
             return;
@@ -1220,7 +1222,9 @@ fn generate_thumbs(inner: &Arc<Inner>, folder_id: i64, key: &str, root: &Path) {
             if pending.is_empty() {
                 break;
             }
+            tracing::debug!(folder_id = id, batch = pending.len(), "补全批次");
             if !process_batch(inner, &pending, key, root, epoch, &watched) {
+                tracing::warn!(folder_id = id, "补全批次未推进（状态写不进库），退出");
                 return;
             }
         }

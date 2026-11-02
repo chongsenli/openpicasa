@@ -2,7 +2,7 @@
 //!
 //! 落盘位置由 [`crate::paths::AppPaths::preferences_file`] 决定，**永远不在照片目录**。
 
-use crate::{Result, Tier, paths::AppPaths};
+use crate::{Result, Tier, ViewMode, paths::AppPaths};
 use picasa_db::SortSpec;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -40,6 +40,8 @@ pub struct Preferences {
     pub viewer_info_open: bool,
     /// 窗口几何（x, y, w, h）。
     pub window: Option<[f32; 4]>,
+    /// 栅格视图模式（默认方格 / 纵向瀑布流 / 横向瀑布流）。
+    pub view_mode: ViewMode,
 }
 
 impl Default for Preferences {
@@ -58,6 +60,7 @@ impl Default for Preferences {
             viewer_bg: 0,
             viewer_info_open: true,
             window: None,
+            view_mode: ViewMode::default(),
         }
     }
 }
