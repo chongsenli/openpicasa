@@ -91,6 +91,12 @@ pub struct ThumbAtlas {
     pub uploads: u64,
     /// 累计整页淘汰次数（诊断）
     pub evictions: u64,
+    /// 账本是否已同步（`TextureBudget` 的图集页登记）。
+    ///
+    /// 放在这里而不是每帧都重新登记：登记是**幂等**的（同 key 覆盖），
+    /// 但每帧调一次会让 `last_seen_frame` 一直刷新，淘汰逻辑就永远选不中它。
+    /// 所以在「页数变化」时才同步一次。
+    synced_pages: usize,
 }
 
 impl Default for ThumbAtlas {
@@ -107,6 +113,7 @@ impl ThumbAtlas {
             frame: 0,
             uploads: 0,
             evictions: 0,
+            synced_pages: 0,
         }
     }
 
@@ -297,6 +304,36 @@ impl ThumbAtlas {
 
         self.evictions += drop_pages.len() as u64;
         drop_pages.len()
+    }
+
+    /// 把图集占用同步进 `TextureBudget`（`07-A` §A-2.2 / SCALE-08）。
+    ///
+    /// ## 为什么必须同步
+    ///
+    /// 不同步的话 `TextureBudget.used_mb` 在 22 px 档会**低估**实际占用
+    /// （低估最多 `页数 × 64 MB`），于是 `M3-SCALE-08` 的内存自保护
+    /// （软 2 GB → 降档 / 硬 2.46 GB → 停解码）会偏乐观——
+    /// 它以为还有 200 MB 余量，实际已经被图集吃掉。
+    ///
+    /// ## 为什么只在页数变化时同步
+    ///
+    /// `register` 会刷新 `last_seen_frame`。每帧调一次会让图集页永远「刚被看到」，
+    /// 淘汰逻辑就再也选不中它（`evict_end_of_frame` 按「同距离下最久没被看到」排）。
+    pub fn sync_budget(&mut self, budget: &mut picasa_core::TextureBudget) {
+        if self.synced_pages == self.pages.len() {
+            return;
+        }
+        // 先把已经不存在的页销账（按 key 全清再重登，页数很少，成本可忽略）
+        for pid in 0..self.synced_pages as i64 {
+            budget.forget_atlas_page(pid);
+        }
+        for (i, page) in self.pages.iter().enumerate() {
+            // 一页的屏距 = 这一页里**最近的那张**的距离
+            // （只要有一张在视口内，这 64 MB 就砍不得）
+            let distance = page.min_distance.min(3);
+            budget.register_atlas_page(i as i64, (ATLAS_SIZE * ATLAS_SIZE * 4) as u64, distance);
+        }
+        self.synced_pages = self.pages.len();
     }
 
     /// 诊断文案（浮层显示）。

@@ -139,6 +139,37 @@ impl TextureBudget {
         self.used_bytes += u64::from(bytes);
     }
 
+    /// 登记**一整页图集**的占用（`07-A` §A-2.2 的微缩图集）。
+    ///
+    /// ## 为什么图集要单独一个方法
+    ///
+    /// 图集的记账粒度是**页**而不是张：一页 4096² = 64 MB，里面装 16 384 张
+    /// 缩略图。用 [`Self::register`] 逐张记会把 4 KB 记 16 384 次
+    /// （`used_bytes` 总数对，但账本会膨胀到 1.6 万条，`distance_histogram`
+    /// 也会失真）。
+    ///
+    /// ## 屏距怎么算
+    ///
+    /// 图集的屏距由**这一页里最近的那张**决定（`min_distance`）——
+    /// 一页里只要有一张在视口内，这 64 MB 就砍不得。
+    /// 这与 `ThumbAtlas::note_viewport` 的口径一致，两处必须是同一个定义。
+    pub fn register_atlas_page(&mut self, page_id: i64, bytes: u64, min_distance: u32) {
+        // 负数 id 段留给「非照片实体」（图集页）。照片 id 恒为正，
+        // 所以不会撞——这个约定写在这里，避免有人用 0/1/2 当页号。
+        let key = -(page_id + 1);
+        self.register(key, bytes.min(u64::from(u32::MAX)) as u32, min_distance);
+    }
+
+    /// 图集页被淘汰了（整页释放）。
+    pub fn forget_atlas_page(&mut self, page_id: i64) {
+        self.forget(-(page_id + 1));
+    }
+
+    /// 已登记多少页图集。
+    pub fn atlas_page_count(&self) -> usize {
+        self.entries.keys().filter(|k| **k < 0).count()
+    }
+
     /// 纹理被释放了（无论谁释放的，都要销账，否则预算会只涨不落）。
     pub fn forget(&mut self, photo_id: i64) {
         if let Some(old) = self.entries.remove(&photo_id) {
@@ -524,5 +555,78 @@ mod tests {
     fn zero_limit_does_not_divide_by_zero() {
         let b = TextureBudget::new(0);
         assert_eq!(b.fill_ratio(), 1.0);
+    }
+}
+
+#[cfg(test)]
+mod atlas_budget_tests {
+    use super::*;
+
+    fn mb(n: u32) -> u32 {
+        n * 1024 * 1024
+    }
+
+    #[test]
+    fn an_atlas_page_is_counted_as_one_entry() {
+        // 一页 64 MB、16 384 张缩略图 → 账本只能多 1 条。
+        // 逐张记会让账本膨胀到 1.6 万条（used_bytes 对，但直方图与诊断全失真）。
+        let mut b = TextureBudget::new(384);
+        b.register_atlas_page(0, 64u64 * 1024 * 1024, 0);
+        assert_eq!(b.len(), 1, "★ 一页只能记一条");
+        assert_eq!(b.used_mb(), 64);
+        assert_eq!(b.atlas_page_count(), 1);
+    }
+
+    #[test]
+    fn atlas_pages_do_not_collide_with_photo_ids() {
+        // 照片 id 恒为正；图集页用负键。撞了的话「淘汰图集」会把某张照片销账，
+        // 而那张照片的纹理还在——预算就会永久低估一个照片的量。
+        let mut b = TextureBudget::new(384);
+        b.register(1, mb(10), 0); // 照片 id=1
+        b.register_atlas_page(0, 64u64 * 1024 * 1024, 0); // 页 0
+        assert_eq!(b.len(), 2, "两者必须各占一条");
+        assert_eq!(b.used_mb(), 74);
+
+        // 销掉图集页，照片那条必须还在
+        b.forget_atlas_page(0);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b.used_mb(), 10, "★ 不能把照片的账一起销掉");
+        assert_eq!(b.atlas_page_count(), 0);
+    }
+
+    #[test]
+    fn atlas_pages_participate_in_eviction() {
+        // 图集页也要受预算约束：一页 64 MB 在 64 MB 预算里就该被淘汰。
+        let mut b = TextureBudget::new(64);
+        b.begin_frame();
+        b.register_atlas_page(0, 64u64 * 1024 * 1024, 5); // 屏距 5 → 可淘汰
+        b.register_atlas_page(1, 64u64 * 1024 * 1024, 0); // 屏距 0 → 永不淘汰
+        assert!(b.over_budget());
+        let evicted = b.evict_end_of_frame();
+        // 负键会被转成页号比较麻烦；这里只断言「淘汰了东西」且「屏距 0 的还在」
+        assert!(!evicted.is_empty(), "超预算时必须淘汰");
+        assert_eq!(b.atlas_page_count(), 1, "屏距 0 的那页必须留着");
+    }
+
+    #[test]
+    fn eviction_order_puts_far_atlas_pages_first() {
+        let mut b = TextureBudget::new(64);
+        b.begin_frame();
+        b.register_atlas_page(0, 32u64 * 1024 * 1024, 9); // 最远
+        b.register_atlas_page(1, 32u64 * 1024 * 1024, 4); // 较远
+        b.register(5, mb(32), 0); // 照片，正在看
+        assert!(b.over_budget());
+        let evicted = b.evict_end_of_frame();
+        assert!(evicted.contains(&-1), "最远的图集页（page 0 → key -1）先走：{evicted:?}");
+        assert!(!evicted.contains(&5), "屏距 0 的照片不许被淘汰");
+    }
+
+    #[test]
+    fn a_page_larger_than_u32_is_clamped_not_wrapped() {
+        // 防御：理论上页大小不会超 u32（64 MB 远小于 4 GB），
+        // 但 `as u32` 直接截断会得到 0 —— 那等于「这页不占空间」，预算永远不超。
+        let mut b = TextureBudget::new(384);
+        b.register_atlas_page(0, u64::MAX, 0);
+        assert!(b.used_mb() > 0, "截断成 0 会让预算永久低估");
     }
 }

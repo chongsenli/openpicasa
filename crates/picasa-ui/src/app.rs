@@ -946,6 +946,9 @@ impl OpenPicasaApp {
             }
         }
 
+        // ②b 把图集占用同步进纹理账本（SCALE-08 的内存自保护依赖它）
+        self.atlas.sync_budget(&mut self.cache.budget);
+
         // ③ 帧末淘汰：屏距 ≥ 3 的整页作废（与 TextureBudget 同一条线）
         let dropped = self.atlas.evict_pages_farther_than(3);
         if dropped > 0 {
