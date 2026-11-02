@@ -34,9 +34,10 @@ pub use library::{Library, View};
 pub use mgmt::{
     DECODE_TIMEOUT_MS, HISTORY_KEEP, SNAPSHOT_HZ_MAX, STARTUP_VERIFY_DELAY_MS,
     VERIFY_DIR_INTERVAL_MS, ExclusionView, FolderState, IndexEntryState, MgmtSnapshot,
-    MgmtTab, OfflineProbe, RootView, SnapshotInput, StorageView, TaskView, ThumbStorage,
-    VerifyPlan, VerifyProgress, anonymize_path, apply_storage, build_snapshot, check_export_dir,
-    collect_storage, default_offline_probe, diag_filename, live_task_views, path_is_offline,
+    MgmtTab, OfflineProbe, RootView, SnapshotInput, StorageView, TREE_COUNT_MODE, TaskView,
+    ThumbStorage, TreeCountMode, VerifyPlan, VerifyProgress, anonymize_path, apply_storage,
+    build_snapshot, check_export_dir, collect_storage, default_offline_probe, diag_filename,
+    live_task_views, path_is_offline,
 };
 pub use paths::AppPaths;
 pub use prefs::Preferences;

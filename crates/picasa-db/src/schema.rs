@@ -12,6 +12,7 @@
 //! | 3 | `m21_sort_effective_taken` | `eff_taken_at` 虚拟生成列 + 排序索引（**让「按拍摄时间」真正走索引**） |
 //! | 4 | `m21_pending_thumbs_index` | `(thumb_state, taken_at DESC)` —— 让「取一批待补缩略图」不再全表排序 |
 //! | 5 | `m22_index_management` | 失败分类 `kind`/`ignored`、任务历史终态列、`folders.last_verified_at` |
+//! | 6 | `m3_scale_realtime_formats` | L1 快筛 `folders.dir_mtime`、递归计数 `total_count`、监视配置、`photos.format`/`taken_from`、`settings` 表与规模索引 |
 
 /// 一条迁移：版本号 + 名字 + 一段 SQL。**只追加，不改已有的**。
 pub struct Migration {
@@ -26,7 +27,7 @@ pub struct Migration {
 /// 因为它成文时代码停在 v2；本仓库在 M2.1 收尾时又落了 v3（`eff_taken_at`）与
 /// v4（待补缩略图索引）。**内容按规格做，版本号以代码为准 = 5**，
 /// 已登记进 `docs/06` §12.1 冲突表。
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// v1 · M1 最小集（02 §5.3）。
 ///
@@ -280,6 +281,89 @@ CREATE INDEX IF NOT EXISTS idx_tasks_finished ON index_tasks(finished_at);
 ALTER TABLE folders ADD COLUMN last_verified_at INTEGER;
 "#;
 
+/// v6 · M3「规模与实时性」（`07` §8.1 + `07-A` §6 + `08` §1 合并）。
+///
+/// ## 这一版要解决的四个问题
+///
+/// 1. **启动校验从「全树 read_dir + 逐文件 stat」变成「每目录一次 stat」**
+///    （`07` §3 的 L1 快筛）。判据是目录 `st_mtime`，所以要把它存下来 →
+///    `folders.dir_mtime`。**留空**表示「还没量过」，等价于 M2.2 行为（走 L2），
+///    于是升级后的首次启动仍然是一次老实全校，之后才变快。
+/// 2. **递归计数**（`07` §4）。`total_count` 是缓存列：快照里的 `folder_totals`
+///    才是 UI 读的那份（同事务算出），这一列只写不读，供 M4+ 的查询用。
+/// 3. **监视配置**（`07` §2）。注意**运行时状态不入库**——`WatchState` 每次启动
+///    重新探测（装不装得上、是不是网络卷，换个网络环境就变了），入库只会说谎。
+///    入库的**只有用户意图**：开不开、轮询间隔。
+/// 4. **多格式**（`07-A` §4）。`format` 记录**实际**格式（魔数嗅探结果，
+///    不是扩展名）；`taken_from` 区分拍摄时间是 EXIF 还是文件时间
+///    （M4 的「无日期」筛选就是 `taken_from = 2`）。
+///
+/// ## ⚠️ 与规格的三处命名偏差（以代码为准，登记进 `docs/06` §12.1）
+///
+/// | 规格写法 | 本仓库 | 原因 |
+/// | --- | --- | --- |
+/// | `photos.filename` | `photos.name` | v1 就叫 `name`，改名要重建表 |
+/// | `idx_photos_folder_name(folder_id, filename)` | **已存在** `idx_photos_folder(folder_id, name_key)` | 同一件事，不重复建（写放大） |
+/// | `folders.rel_path` 范围索引 | `idx_folders_root_path(root_id, path_key)` | 本仓库存绝对路径，`path_key` 前缀范围同样走索引；加 `rel_path` 要整列回填，收益不抵风险 |
+///
+/// ## 为什么 `idx_photos_taken_id` 是 `(taken_at, id)` 而不是 `(eff_taken_at, name_key)`
+///
+/// v3 的 `idx_photos_eff_taken` 服务于「按拍摄时间排序」的 **OFFSET 分页**。
+/// M3 的虚拟数据源改**键集分页**（`07` §5.2 SCALE-03）：`WHERE (taken_at, id) < (?, ?)`。
+/// 键集分页要求排序键与索引列**逐字一致**才能做元组比较，而 `eff_taken_at` 是
+/// COALESCE 生成列——拿它做键集边界要写两次 COALESCE，SQLite 不会把它优化成索引区间。
+/// 所以另建一条 `(taken_at DESC, id DESC)`，让「所有照片」与「子树按日期」的
+/// 键集查询都有落点。两条索引并存不是浪费：一个服务 OFFSET，一个服务键集。
+const V6: &str = r#"
+-- ------------------------------------------------- 1. 两级校验（07 §3，L1 快筛）
+-- 目录 st_mtime（秒）。NULL = 还没量过 → 视为「需要 L2」，等价于 M2.2 行为。
+ALTER TABLE folders ADD COLUMN dir_mtime   INTEGER;
+-- 递归计数缓存（07 §4，只写不读，P-23 若判定不划算可裁掉这一列）
+ALTER TABLE folders ADD COLUMN total_count INTEGER NOT NULL DEFAULT 0;
+
+-- ------------------------------------------------------- 2. 监视配置（07 §2）
+-- 只存**用户意图**；WatchState（Active/Polling/Overflow/Off）是运行时状态，不入库。
+ALTER TABLE roots ADD COLUMN watch_enabled   INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE roots ADD COLUMN poll_interval_s INTEGER;   -- NULL = 用默认值
+
+-- ------------------------------------- 3. 身份配对辅助（07 §2 WATCH-09/10）
+-- blake3(前 64 KB)，**懒填**：只有 (size, mtime) 出现歧义时才写。
+ALTER TABLE photos ADD COLUMN head_hash BLOB;
+
+-- ------------------------------------------------- 4. 多格式（07-A §4 / 08 §1）
+-- 实际格式（魔数嗅探结果）。枚举见 `picasa_db::PhotoFormat`。
+ALTER TABLE photos ADD COLUMN format     INTEGER NOT NULL DEFAULT 0;
+-- 拍摄时间来源：0 unknown / 1 exif / 2 mtime（枚举见 `TakenFrom`）。
+ALTER TABLE photos ADD COLUMN taken_from INTEGER NOT NULL DEFAULT 0;
+
+-- ------------------------------------------------------------ 5. 设置（key/value）
+-- 07-A §6 假定「settings 表已有」——本仓库实际没有（M2 的设置全在 Preferences JSON 里）。
+-- 两者的分工：**Preferences 存「这台机器的界面状态」**（窗口位置、折叠、上次视图），
+-- **settings 存「跟库走的行为开关」**（怎么排序、要不要递归、缩放多少），
+-- 因为换个窗口大小不该改变「包含子文件夹」这个语义，而它又必须能被迁移脚本预置。
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+) WITHOUT ROWID;
+
+-- --------------------------------------------------------------- 6. 规模索引
+-- 键集分页的两把钥匙（07 §5.2 SCALE-03）
+CREATE INDEX IF NOT EXISTS idx_photos_taken_id ON photos(taken_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_photos_size_mtime ON photos(folder_id, size_bytes, mtime_ns);
+-- L2 全校按 last_verified_at 升序取批次（07 §3.2 VERIFY-03）
+CREATE INDEX IF NOT EXISTS idx_folders_verified ON folders(last_verified_at);
+-- 失败标签按格式筛（07-A FORMAT-02）
+CREATE INDEX IF NOT EXISTS idx_photos_format ON photos(format);
+-- 子树的绝对路径前缀范围查询（07-A §3.3，替代 rel_path）
+CREATE INDEX IF NOT EXISTS idx_folders_root_path ON folders(root_id, path_key);
+
+-- ------------------------------------------------------------- 7. 设置预置行
+-- 07-A §6。「预置成 NULL/0」而不是「等第一次写再插」：
+-- 读取方要能区分「用户没设过」与「设成了默认值」，缺行会让这两件事混成一件。
+INSERT OR IGNORE INTO settings(key, value) VALUES ('grid_cell_px', NULL);
+INSERT OR IGNORE INTO settings(key, value) VALUES ('recurse_subfolders', '0');
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -306,6 +390,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "m22_index_management",
         sql: V5,
     },
+    Migration {
+        version: 6,
+        name: "m3_scale_realtime_formats",
+        sql: V6,
+    },
 ];
 
 /// 数据步骤名（`data_migrations` 的主键）。写成常量，避免调用方手打字符串写错。
@@ -313,6 +402,13 @@ pub const DATA_V2_ROOTS_FOLDERS: &str = "v2_roots_folders";
 /// v5 的失败分类补数（历史 `error_code` 文本 → `kind`）。同样是「数据步骤」，
 /// 用 `data_migrations` 单独守卫，与 DDL 的守卫分开（理由见 `upgrade.rs` 文件头）。
 pub const DATA_V5_FAILURE_KINDS: &str = "v5_failure_kinds";
+/// v6 的补数：`photos.format` 按扩展名预填、`photos.taken_from` 按 EXIF 源回填、
+/// `folders.total_count` 一次递归聚合算出（`07` §8.2）。
+///
+/// 三项放**同一个数据步骤**，因为它们都要求「库已经到 v6」，且都是「每行都要动一次」
+/// 的全表写——拆成三步就要全表扫三遍，100 万张库上差好几分钟。
+/// 幂等靠 `data_migrations` 这一条记录。
+pub const DATA_V6_FORMATS_L1: &str = "v6_formats_l1";
 
 /// 索引任务的七态编码（与 `picasa-core::index::IndexState` 一一对应）。
 ///

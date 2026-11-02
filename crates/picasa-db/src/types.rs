@@ -527,3 +527,285 @@ pub struct CacheStats {
     /// 缩略图 BLOB 总字节数
     pub thumb_bytes: u64,
 }
+
+/// 照片的**实际**格式（`photos.format`，`07-A` §4 / `08` §1 的最终清单）。
+///
+/// ## 为什么存魔数嗅探的结果，而不是扩展名
+///
+/// `07-A` FORMAT-01 的规则是「识别 = 扩展名白名单 ∧ 魔数嗅探」，两者不一致时
+/// **按魔数解码**（一个叫 `.jpg` 的 PNG 是用户改错过后缀，不是坏文件）。
+/// 于是这一列必须记录「解码器实际按什么解的」，否则 M4 的「类型筛选」会把
+/// 那个 PNG 归到 JPEG 组里——那正是用户抱怨「筛出来不对」的来源。
+///
+/// ## 编号是**契约**，不是自增
+///
+/// 编号一旦发版就不能改：v6 升级时按扩展名预填（嗅探留给 L2），若后来给
+/// `png` 换个号，老库里所有 PNG 都会变成未知格式。所以 20 起的 RAW 段留了空档，
+/// 由 `08-B` §A-2 / `08-C` §A-2 追加（`rwl` / `rw2` 是后补的两个厂商容器）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(i64)]
+pub enum PhotoFormat {
+    /// 0 · 还没识别（升级前的行、或嗅探失败）
+    Unknown = 0,
+    /// 1 · JPEG（含 `.jfif`）
+    Jpeg = 1,
+    /// 2 · PNG
+    Png = 2,
+    /// 3 · GIF（**只取第一帧**，动图不播放）
+    Gif = 3,
+    /// 4 · BMP / DIB
+    Bmp = 4,
+    /// 5 · TIFF（基线 + LZW + Deflate）
+    Tiff = 5,
+    /// 6 · WebP（动图取第一帧）
+    Webp = 6,
+    /// 7 · HEIC / HEIF（B 级，feature `heif`）
+    Heic = 7,
+    /// 8 · AVIF（B 级）
+    Avif = 8,
+    /// 9 · SVG（A+ 级，`resvg` 栅格化；矢量，不是照片）
+    Svg = 9,
+    /// 20 · DNG（Leica / 通用原始格式，TIFF 容器）
+    Dng = 20,
+    /// 21 · Canon CR2
+    Cr2 = 21,
+    /// 22 · Nikon NEF
+    Nef = 22,
+    /// 23 · Sony ARW
+    Arw = 23,
+    /// 24 · Canon CR3（ISOBMFF 容器，不是 TIFF）
+    Cr3 = 24,
+    /// 25 · Fuji RAF
+    Raf = 25,
+    /// 26 · Leica / Panasonic RWL
+    Rwl = 26,
+    /// 27 · Panasonic RW2（与 RWL 同一解析器）
+    Rw2 = 27,
+    /// 29 · 其他未单独支持的 RAW 厂商（进 `Unsupported(RawVendor)` 可见队列）
+    RawOther = 29,
+}
+
+impl PhotoFormat {
+    pub fn code(self) -> i64 {
+        self as i64
+    }
+
+    /// 从库里的整数还原。**不猜**：未知编码返回 `Unknown` 而不是随便归一，
+    /// 这样「库比程序新」时会显示成未知格式，而不是错误地当成 JPEG。
+    pub fn from_code(code: i64) -> Self {
+        match code {
+            1 => Self::Jpeg,
+            2 => Self::Png,
+            3 => Self::Gif,
+            4 => Self::Bmp,
+            5 => Self::Tiff,
+            6 => Self::Webp,
+            7 => Self::Heic,
+            8 => Self::Avif,
+            9 => Self::Svg,
+            20 => Self::Dng,
+            21 => Self::Cr2,
+            22 => Self::Nef,
+            23 => Self::Arw,
+            24 => Self::Cr3,
+            25 => Self::Raf,
+            26 => Self::Rwl,
+            27 => Self::Rw2,
+            29 => Self::RawOther,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// 扩展名 → 格式（**迁移预填**与「按扩展名入候选」共用这一张表）。
+    ///
+    /// 注意这是**候选**不是结论：真正的格式以魔数为准（FORMAT-01）。
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        let e = ext.trim_start_matches('.').to_ascii_lowercase();
+        Some(match e.as_str() {
+            "jpg" | "jpeg" | "jpe" | "jfif" => Self::Jpeg,
+            "png" => Self::Png,
+            "gif" => Self::Gif,
+            "bmp" | "dib" => Self::Bmp,
+            "tif" | "tiff" => Self::Tiff,
+            "webp" => Self::Webp,
+            "heic" | "heif" | "hif" => Self::Heic,
+            "avif" => Self::Avif,
+            "svg" | "svgz" => Self::Svg,
+            "dng" => Self::Dng,
+            "cr2" => Self::Cr2,
+            "nef" => Self::Nef,
+            "arw" => Self::Arw,
+            "cr3" => Self::Cr3,
+            "raf" => Self::Raf,
+            "rwl" => Self::Rwl,
+            "rw2" => Self::Rw2,
+            _ => return None,
+        })
+    }
+
+    pub fn extension_list(self) -> &'static [&'static str] {
+        match self {
+            Self::Jpeg => &["jpg", "jpeg", "jpe", "jfif"],
+            Self::Png => &["png"],
+            Self::Gif => &["gif"],
+            Self::Bmp => &["bmp", "dib"],
+            Self::Tiff => &["tif", "tiff"],
+            Self::Webp => &["webp"],
+            Self::Heic => &["heic", "heif", "hif"],
+            Self::Avif => &["avif"],
+            Self::Svg => &["svg", "svgz"],
+            Self::Dng => &["dng"],
+            Self::Cr2 => &["cr2"],
+            Self::Nef => &["nef"],
+            Self::Arw => &["arw"],
+            Self::Cr3 => &["cr3"],
+            Self::Raf => &["raf"],
+            Self::Rwl => &["rwl"],
+            Self::Rw2 => &["rw2"],
+            Self::Unknown | Self::RawOther => &[],
+        }
+    }
+
+    /// 界面文案（**唯一措辞来源**：筛选器与失败列表都用这个）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "未知",
+            Self::Jpeg => "JPEG",
+            Self::Png => "PNG",
+            Self::Gif => "GIF",
+            Self::Bmp => "BMP",
+            Self::Tiff => "TIFF",
+            Self::Webp => "WebP",
+            Self::Heic => "HEIC",
+            Self::Avif => "AVIF",
+            Self::Svg => "SVG",
+            Self::Dng => "DNG",
+            Self::Cr2 => "CR2",
+            Self::Nef => "NEF",
+            Self::Arw => "ARW",
+            Self::Cr3 => "CR3",
+            Self::Raf => "RAF",
+            Self::Rwl => "RWL",
+            Self::Rw2 => "RW2",
+            Self::RawOther => "RAW",
+        }
+    }
+
+    /// 是不是 RAW（筛选器「RAW」聚合项 = 20～29，`08-C` §A-2）。
+    pub fn is_raw(self) -> bool {
+        (20..=29).contains(&self.code())
+    }
+
+    /// 本版**是否真的能解码**。`false` 的格式仍然入库（用户能看见「有这个文件」），
+    /// 只是缩略图进可见失败队列——**静默丢弃才是缺陷**（R-M2-4）。
+    ///
+    /// B/C 级按 P-27 裁决与编译 feature 决定，这里给的是「A 级 + JPEG」的确定答案。
+    pub fn decodable(self) -> bool {
+        matches!(
+            self,
+            Self::Jpeg
+                | Self::Png
+                | Self::Gif
+                | Self::Bmp
+                | Self::Tiff
+                | Self::Webp
+        )
+    }
+}
+
+/// 拍摄时间从哪来（`photos.taken_from`，`07-A` FORMAT-06）。
+///
+/// M4 FILTER-04 的「无日期」筛选就是 `taken_from = 2`——它要找的是
+/// 「EXIF 里没有拍摄时间、只能用文件修改时间凑数」的照片，这批照片的日期不可信。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i64)]
+pub enum TakenFrom {
+    Unknown = 0,
+    Exif = 1,
+    Mtime = 2,
+}
+
+impl TakenFrom {
+    pub fn code(self) -> i64 {
+        self as i64
+    }
+
+    pub fn from_code(code: i64) -> Self {
+        match code {
+            1 => Self::Exif,
+            2 => Self::Mtime,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "未知",
+            Self::Exif => "EXIF",
+            Self::Mtime => "文件时间",
+        }
+    }
+}
+
+/// 「本层数 + 递归数 + 所有照片」的同事务快照（`07` §4.1）。
+///
+/// 三项一起给的理由是**五处一致**（R-M22-6 扩成六处）：
+/// 树节点、树 tooltip、「关注文件夹」行、「所有照片」、组头 N、子树标题计数——
+/// 只要有两个数字来自不同查询，就可能差 1，而用户一眼就能看出「这里 13、那里 12」。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CountSnapshot {
+    /// 每目录**本层**照片数（`folders.direct_count`）
+    pub direct: std::collections::HashMap<i64, u32>,
+    /// 每目录**含子目录**的照片数（由 `direct` 在同一事务里自底向上聚合出来）
+    pub totals: std::collections::HashMap<i64, u32>,
+    /// 「所有照片」：只数 active 根，含失败项与离线项，不含已关闭根
+    pub all_photos: u64,
+}
+
+/// 自底向上把 `direct` 聚合成 `totals`（`07` §4.1）。
+///
+/// 算法：按 `depth` 降序累加到父。SQLite 没有现成的闭包表，
+/// 而递归 CTE 在「每个节点都要一个数」的场合要跑 N 次（每次从该节点向下展开），
+/// 复杂度 O(N·depth)。这里的做法是**一次遍历**：对每个节点，
+/// 沿 parent 链往上加——总代价 O(N·depth)，但常数小得多（纯 HashMap 查），
+/// 10 万目录 × 平均深 4 层 ≈ 40 万次哈希查找，实测亚毫秒。
+///
+/// 为什么不按 depth 排序：那要先算深度（又一次遍历）。直接沿着 parent 链走，
+/// 天然是「自底向上」的——叶子把数给父亲时，父亲自己的数已经收齐了它的所有孩子
+/// （因为每个孩子都只有一条 parent 链，不存在漏加）。
+///
+/// ⚠️ parent 链成环会导致死循环。SQLite 的 `parent_id` 由 `derive_hierarchy` 推导，
+/// 不会成环；但库被手工改过就可能。所以这里加了深度上限兜底——宁可数字不对，
+/// 不能让 UI 线程卡死。
+pub fn aggregate_totals(
+    direct: &std::collections::HashMap<i64, u32>,
+    parents: &std::collections::HashMap<i64, Option<i64>>,
+) -> std::collections::HashMap<i64, u32> {
+    /// 深度上限：正常目录树不超过 12 层（`filters::DEFAULT_MAX_DEPTH`），
+    /// 留 8 倍余量。超了就当根处理，避免环导致死循环。
+    const MAX_WALK: usize = 96;
+
+    let mut totals: std::collections::HashMap<i64, u32> =
+        direct.iter().map(|(id, n)| (*id, *n)).collect();
+
+    // 对每个节点，把自己的数沿 parent 链往上加。
+    for (id, own) in direct {
+        if *own == 0 {
+            continue; // 加 0 不改变任何东西，省掉整条链的遍历
+        }
+        let mut cur = *id;
+        let mut hops = 0;
+        while let Some(Some(parent)) = parents.get(&cur) {
+            let parent = *parent;
+            hops += 1;
+            if hops > MAX_WALK {
+                break;
+            }
+            if let Some(slot) = totals.get_mut(&parent) {
+                *slot = slot.saturating_add(*own);
+            }
+            cur = parent;
+        }
+    }
+    totals
+}

@@ -137,14 +137,37 @@ pub fn active_root_paths(db: &Db) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// 独立判定「这个临时目录所在的卷区不区分大小写」。
+    ///
+    /// ⚠️ 这个函数存在的理由：`probe_case_insensitive` 的期望值**取决于卷的格式**。
+    /// 早先的用例写死 `assert!(!probe_case_insensitive(...))` 并注释「Linux 上的 tmp
+    /// 区分大小写」——在 macOS（APFS 默认**不**区分）上必然失败。
+    /// 那不是代码错了，是用例把平台假设当成了断言。
+    ///
+    /// 现在的做法：用**另一种手段**（`canonicalize` 一个大写变体路径）独立量一次，
+    /// 再断言被测函数与它一致。这样在两种卷上都成立，而且真能发现探测逻辑写反。
+    fn volume_is_case_insensitive(dir: &Path) -> bool {
+        let lower = dir.join("MiXeDcAsE.txt");
+        std::fs::write(&lower, b"x").unwrap();
+        let upper = dir.join("MIXEDCASE.TXT");
+        // `canonicalize` 走的是内核路径解析：区分大小写的卷上它直接 ENOENT，
+        // 不区分时解析回同一个真实文件。
+        match (std::fs::canonicalize(&upper), std::fs::canonicalize(&lower)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+
     #[test]
-    fn case_sensitive_volume_is_detected() {
-        // 在 ext4/APFS(默认) 这种区分大小写的卷上：造 `Photos`，探测应得 false
+    fn case_sensitivity_is_detected_correctly_on_this_volume() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("Photos")).unwrap();
-        assert!(
-            !probe_case_insensitive(dir.path()),
-            "大写变体不存在时，必须判定为区分大小写"
+        // 先独立量出这个卷的真实行为，再要求探测函数与它一致
+        let expected_insensitive = volume_is_case_insensitive(dir.path());
+        assert_eq!(
+            probe_case_insensitive(dir.path()),
+            expected_insensitive,
+            "探测结果必须等于这个卷的真实行为（真实值 = {expected_insensitive}）"
         );
     }
 

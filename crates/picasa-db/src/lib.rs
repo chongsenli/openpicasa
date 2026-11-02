@@ -22,13 +22,15 @@ mod types;
 mod upgrade;
 
 pub use schema::{
-    DATA_V2_ROOTS_FOLDERS, DATA_V5_FAILURE_KINDS, MIGRATIONS, SCHEMA_VERSION, TaskKind, TaskStatus,
+    DATA_V2_ROOTS_FOLDERS, DATA_V5_FAILURE_KINDS, DATA_V6_FORMATS_L1, MIGRATIONS, SCHEMA_VERSION,
+    TaskKind, TaskStatus,
 };
 pub use types::{
-    CacheStats, CachedMeta, DimsStats, ExclusionRow, FailureGroup, FailureKind, FolderFingerprint,
-    FolderRow, FolderTreeRow, PhotoInput, PhotoRow, RootRow, RootSeed, RootStat, ScanApply,
-    TaskOutcome, TaskRow, ThumbBuf, ThumbState, ThumbStats, UPSERT_UNCHANGED, UpgradeReport,
-    V2DataReport, classify_failure,
+    aggregate_totals,
+    CacheStats, CachedMeta, CountSnapshot, DimsStats, ExclusionRow, FailureGroup, FailureKind,
+    FolderFingerprint, FolderRow, FolderTreeRow, PhotoFormat, PhotoInput, PhotoRow, RootRow,
+    RootSeed, RootStat, ScanApply, TakenFrom, TaskOutcome, TaskRow, ThumbBuf, ThumbState,
+    ThumbStats, UPSERT_UNCHANGED, UpgradeReport, V2DataReport, classify_failure,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -46,6 +48,20 @@ pub enum DbError {
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
+
+/// 当前 Unix 秒。
+///
+/// `clippy.toml` 把 `SystemTime` 列为禁用类型（跨平台序列化语义不稳），
+/// 但**这一处是唯一合理的用法**：只是取一个「现在几点」的数字写进
+/// `last_verified_at`，不比较、不序列化、不跨平台传。集中到这一个函数里，
+/// 别处就不必再破例。
+#[expect(clippy::disallowed_types)]
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// 索引库句柄。
 ///
@@ -251,6 +267,7 @@ impl Db {
         // 到这里 `current >= SCHEMA_VERSION` 会提前返回 —— 若把补数放在那个分支里，
         // 首次升级的库就永远补不上分类（`tests/migrate_v5.rs` 抓到过）。
         self.apply_v5_data()?;
+        self.apply_v6_data()?;
         Ok(())
     }
 
@@ -268,6 +285,286 @@ impl Db {
         Ok(n)
     }
 
+    /// v6 数据步骤（`07` §8.2 + `07-A` §6「迁移补数」）：**幂等**，跑第二次返回 0。
+    ///
+    /// 做三件事，都是「必须现在做，否则升级后一段时间内数据是错的」：
+    ///
+    /// 1. **`photos.format` 按扩展名预填**。不预填的话，升级后所有老照片都是
+    ///    `Unknown`，而 M4 的类型筛选会显示「未知 259000 张」——用户会以为数据丢了。
+    ///    嗅探（魔数）留给 L2：`format` 是「实际格式」，预填只是按扩展名**猜**，
+    ///    真正解码时若魔数与扩展名不符，那时会改写它（FORMAT-01）。
+    /// 2. **`photos.taken_from` 按 EXIF 源回填**。`taken_at_src` 早就在列里
+    ///    （0=EXIF / 1=文件名 / 2=mtime），但语义和新列不完全一样：
+    ///    `taken_at_src` 是「拍摄时间取自哪」，`taken_from` 是「日期可信吗」。
+    ///    这里按 `taken_at_src` 映射，**不重新读盘**。
+    /// 3. **`folders.total_count` 一次递归聚合**。用递归 CTE 自底向上累加，
+    ///    4330 个目录在毫秒级；之后由落库线程维护（`07` §4.1）。
+    ///
+    /// ⚠️ `folders.dir_mtime` **故意不填**（`07` §8.2 第一条）：空 = 「还没量过」，
+    /// 于是升级后的首次启动仍走 M2.2 的完整 L2，把 `dir_mtime` 建立起来，
+    /// 之后才是 L1 快筛。这比「升级时顺手 stat 全树」好：升级不该卡住启动。
+    pub fn apply_v6_data(&self) -> Result<u64> {
+        if self.data_migration_done(DATA_V6_FORMATS_L1)? {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let n = self.backfill_v6_data_inner(&tx)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO data_migrations (name, applied_at)
+             VALUES (?1, strftime('%s','now'))",
+            params![DATA_V6_FORMATS_L1],
+        )?;
+        tx.commit()?;
+        Ok(n)
+    }
+
+    fn backfill_v6_data_inner(&self, tx: &rusqlite::Transaction<'_>) -> Result<u64> {
+        let mut touched = 0u64;
+
+        // ---- 1. format：按扩展名预填 -------------------------------------
+        // 只动 `format = 0` 的行：跑过一次之后再跑（或用户升级到更新版本）不会覆盖
+        // 已经由嗅探确定的值。
+        //
+        // SQL 里做「取最后一个点之后的部分转小写」：
+        // `lower(substr(name, length(rtrim(name, replace(name,'.','')||name)) + 2))`
+        // 太绕且遇到含点目录名会错，所以这里读一次 name 在 Rust 侧算——
+        // 26 万行读一遍约 0.2 s，比一条谁都看不懂的 SQL 值。
+        {
+            let mut st = tx.prepare("SELECT id, name FROM photos WHERE format = 0")?;
+            let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            let mut upd = tx.prepare_cached("UPDATE photos SET format = ?2 WHERE id = ?1")?;
+            for row in rows {
+                let (id, name) = row?;
+                let ext = std::path::Path::new(&name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let Some(fmt) = crate::PhotoFormat::from_extension(ext) else {
+                    continue;
+                };
+                upd.execute(params![id, fmt.code()])?;
+                touched += 1;
+            }
+        }
+
+        // ---- 2. taken_from：按 taken_at_src 映射 -------------------------
+        // 0 → EXIF，其余（1 文件名 / 2 mtime）→ Mtime。**不碰已是 1/2 的行**。
+        self.conn.execute(
+            "UPDATE photos SET taken_from =
+                 CASE WHEN taken_at_src = 0 THEN 1 ELSE 2 END
+             WHERE taken_from = 0",
+            [],
+        )?;
+
+        // ---- 3. total_count：递归聚合 -----------------------------------
+        // `07` §4.1 的口径：含失败项、含离线项；**不含**已关闭子目录子树。
+        // 关闭是 `roots.state = 1`（根级），子目录没有「关闭」概念（那是排除项，
+        // 排除项根本不会进 folders 表），所以这里只需按 parent 关系累加。
+        //
+        // 递归 CTE 的用法：以每个叶子（没有子目录的目录）为起点向上累加，
+        // 用 `UNION ALL` 而不是 `UNION`（同一个祖先会从多条路径被累加多次，
+        // 那正是我们要的）。`direct_count` 已经是「本层张数」。
+        self.conn.execute(
+            "WITH RECURSIVE up(folder, amount) AS (
+                 SELECT id, direct_count FROM folders
+                  UNION ALL
+                 SELECT f.parent_id, up.amount
+                   FROM folders f
+                   JOIN up ON f.id = up.folder
+                  WHERE f.parent_id IS NOT NULL
+             )
+             UPDATE folders SET total_count = COALESCE(
+                 (SELECT SUM(amount) FROM up WHERE up.folder = folders.id), 0
+             )",
+            [],
+        )?;
+
+        Ok(touched)
+    }
+
+    // ------------------------------------------------------------ 诊断辅助（测试用）
+
+    /// 某张表的所有列名（`PRAGMA table_info`）。迁移测试用它断言「列真的加了」。
+    pub fn column_names(&self, table: &str) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let rows = st.query_map([], |r| r.get::<_, String>(1))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 库里的全部索引名。迁移测试用它断言「索引真的建了」——
+    /// 光建列不建索引，键集分页会退化成全表扫描，而这一点**没有任何报错**。
+    pub fn index_names(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'",
+        )?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    // ---------------------------------------------------------------- settings
+
+    /// 读一个设置项的**值**。`None` 的两个来源（行不存在 / 值是 SQL NULL）在这里
+    /// 被合并——想让它们可区分时用 [`Db::setting_row_present`]。
+    ///
+    /// 为什么不给 `get(key) -> String` 加默认值：`grid_cell_px` 的 NULL 就是
+    /// 「用默认刻度」这个语义，归一成某个具体数字后，「用户拖过滑块又拖回来」
+    /// 与「从没拖过」就分不出来了。
+    pub fn setting_raw(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// 这一行设置**存在吗**（值可能是 NULL）。
+    ///
+    /// 存在的意义：迁移会预置 `grid_cell_px = NULL`（`07-A` §6）。若只看
+    /// [`Db::setting_raw`]，预置成功的库与「v6 迁移没跑」的库长得一模一样，
+    /// 于是「设置页读不到默认刻度」这类缺陷会被误诊成读取方的问题。
+    pub fn setting_row_present(&self, key: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// 整数设置项。`None` = 用默认值（行不存在或值为 NULL 都算）。
+    pub fn setting_i64(&self, key: &str) -> Result<Option<i64>> {
+        Ok(self
+            .setting_raw(key)?
+            .and_then(|v| v.trim().parse::<i64>().ok()))
+    }
+
+    /// 布尔设置项（`"1"` / `"0"`）。认不出的值按 `fallback` 处理而不是报错：
+    /// 设置项坏掉不该让应用起不来。
+    pub fn setting_bool(&self, key: &str, fallback: bool) -> Result<bool> {
+        Ok(match self.setting_raw(key)?.as_deref() {
+            Some("1") => true,
+            Some("0") => false,
+            _ => fallback,
+        })
+    }
+
+    /// 写一个设置项（`None` 写成 SQL NULL）。
+    pub fn set_setting_raw(&self, key: &str, value: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    // ------------------------------------------ v6 · 递归计数 / L1 / 格式（只读侧）
+
+    /// 每个目录的**递归**照片数（`folders.total_count`）。
+    ///
+    /// ⚠️ UI **不该读这个**（`07` §4.1：这一列只写不读，界面用快照里的
+    /// `folder_totals`，那份与 `folder_counts` 同事务查出，不会与别处差 1）。
+    /// 这里暴露给三条路径：① 迁移测试；② 诊断页；③ M4 之后**没有**快照的场合。
+    pub fn folder_totals(&self) -> Result<std::collections::HashMap<i64, u32>> {
+        let mut st = self.conn.prepare("SELECT id, total_count FROM folders")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (id, n) = row?;
+            out.insert(id, n.max(0) as u32);
+        }
+        Ok(out)
+    }
+
+    /// 单个目录的递归数（`folder_totals` 的单点查询版）。
+    pub fn folder_total(&self, folder_id: i64) -> Result<u32> {
+        let n: i64 = self.conn.query_row(
+            "SELECT total_count FROM folders WHERE id = ?1",
+            params![folder_id],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u32)
+    }
+
+    /// 目录的 `dir_mtime`（**纳秒**，自 epoch 起）。`None` = 还没量过 → 走 L2（`07` §3）。
+    ///
+    /// 存纳秒不存秒：L1 要的是「有没有变」这个二值判断，秒级精度在
+    /// 「同一秒内拷进 1000 张」这种场景下会把变化吞掉（见 `verify.rs` 的对照表）。
+    /// 列名仍叫 `dir_mtime`（`07` §8.1 的 DDL 口径），精度差异记在 `docs/06` §12.1。
+    pub fn folder_dir_mtime(&self, folder_id: i64) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT dir_mtime FROM folders WHERE id = ?1",
+                params![folder_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// 落库线程在**目录遍历完成时**写 `dir_mtime`（`07` §3.2 VERIFY-02：
+    /// 与扫描结果同一事务，不是事后补一条）。
+    pub fn set_folder_dir_mtime(&self, folder_id: i64, mtime_s: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE folders SET dir_mtime = ?2 WHERE id = ?1",
+            params![folder_id, mtime_s],
+        )?;
+        Ok(())
+    }
+
+    /// 按名字找一张照片（迁移/诊断用；`name_key` 已索引）。
+    pub fn photo_by_name(&self, name: &str) -> Result<Option<PhotoRow>> {
+        let key = crate::pathutil::compare_key(name);
+        let sql = format!(
+            "SELECT {} FROM photos p JOIN folders f ON f.id = p.folder_id
+              WHERE p.name_key = ?1 LIMIT 1",
+            self.photo_cols()
+        );
+        Ok(self
+            .conn
+            .query_row(&sql, params![key], map_photo)
+            .optional()?)
+    }
+
+    /// 一张照片的 `format` 编码。
+    pub fn photo_format(&self, photo_id: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT format FROM photos WHERE id = ?1",
+            params![photo_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// 一张照片的 `taken_from` 编码。
+    pub fn photo_taken_from(&self, photo_id: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT taken_from FROM photos WHERE id = ?1",
+            params![photo_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// 按名字取 `taken_from`（迁移测试的便捷入口）。
+    pub fn photo_taken_from_by_name(&self, name: &str) -> Result<Option<i64>> {
+        let key = crate::pathutil::compare_key(name);
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT taken_from FROM photos WHERE name_key = ?1 LIMIT 1",
+                params![key],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?)
+    }
+
     pub fn schema_version(&self) -> Result<i64> {
         let v: Option<i64> = self
             .conn
@@ -280,6 +577,24 @@ impl Db {
     }
 
     // ---------------------------------------------------------------- folders
+
+    /// 把目录挂到某个关注根下（`folders.root_id`）。
+    ///
+    /// 生产路径上这一列由 `derive_hierarchy()` 统一推导（迁移时一次算完）；
+    /// 但**测试与诊断**需要能手工挂一个目录，否则每个造夹具的地方都要复制一遍
+    /// 「写 roots 行 + 推导层级」的仪式。公开它是安全的：它只写一列，不推导父子关系。
+    pub fn set_folder_root(
+        &self,
+        folder_id: i64,
+        root_id: i64,
+        parent: Option<i64>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE folders SET root_id = ?2, parent_id = ?3 WHERE id = ?1",
+            params![folder_id, root_id, parent],
+        )?;
+        Ok(())
+    }
 
     /// 按规范化路径 upsert 一个文件夹，返回 id。
     ///
@@ -1364,10 +1679,7 @@ impl Db {
         if folder_ids.is_empty() {
             return Ok(());
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = unix_now_secs();
         let holes = std::iter::repeat_n("?", folder_ids.len())
             .collect::<Vec<_>>()
             .join(",");
@@ -1381,10 +1693,7 @@ impl Db {
 
     /// 记下「这个目录刚校验过」（§4.8 P-16 预留列，本版只写不依赖）。
     pub fn mark_verified(&self, folder_id: i64) -> Result<()> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = unix_now_secs();
         self.conn.execute(
             "UPDATE folders SET last_verified_at = ?1 WHERE id = ?2",
             params![now, folder_id],
@@ -1416,16 +1725,46 @@ impl Db {
     ///
     /// ⚠️ 只做**只读**查询，别往这个事务里塞写操作（`DEFERRED` 会升级成写锁，
     /// 在 WAL 下与落库线程抢锁，把流水线拖住）。
-    pub fn mgmt_counts(&self) -> Result<(std::collections::HashMap<i64, u32>, u64)> {
+    pub fn mgmt_counts(&self) -> Result<CountSnapshot> {
+        self.count_snapshot()
+    }
+
+    /// **同一事务**取出「本层数 + 递归数 + 组边界来源 + 所有照片」。
+    ///
+    /// `07` §4.1 的要求：`folder_totals` 与 `folder_counts` **同一事务**查出，
+    /// 在内存里一次自底向上聚合。为什么不直接读 `folders.total_count`（那列明明存在）：
+    ///
+    /// 1. 缓存列要靠落库线程维护，**任何一次漏维护**都会让界面显示错数，
+    ///    而且错得毫无征兆（数字只是少了，不会报错）；
+    /// 2. 4330 个目录在内存里聚合一次是**亚毫秒**级（Map 查 + 加法），
+    ///    100 万张 / 10 万目录也就几毫秒，比多读一列还便宜；
+    /// 3. 同一事务意味着它天然与 `direct_count` 是**同一个世界线**，
+    ///    `TC-M22-IDX-011` 那种「连续取 100 个 seq 断言五处一致」才可能过。
+    ///
+    /// `total_count` 列仍然写（`07` §4.1：供 M4+ 的其他查询用），只是**不读**。
+    ///
+    /// ⚠️ 只做**只读**查询，别往这个事务里塞写操作（`DEFERRED` 会升级成写锁，
+    /// 在 WAL 下与落库线程抢锁，把流水线拖住）。
+    pub fn count_snapshot(&self) -> Result<CountSnapshot> {
         let tx = self.conn.unchecked_transaction()?;
-        let mut st = tx.prepare("SELECT id, direct_count FROM folders")?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+
+        // 一次查询同时拿 id / 父 / 本层数：聚合需要 parent 关系，
+        // 单独再查一次 folders 就等于把 10 万行读两遍。
         let mut counts = std::collections::HashMap::new();
-        for row in rows {
-            let (id, n) = row?;
-            counts.insert(id, n.max(0) as u32);
+        let mut parents: std::collections::HashMap<i64, Option<i64>> =
+            std::collections::HashMap::new();
+        {
+            let mut st = tx.prepare("SELECT id, parent_id, direct_count FROM folders")?;
+            let mut rows = st.query(params![])?;
+            while let Some(r) = rows.next()? {
+                let id: i64 = r.get(0)?;
+                let parent: Option<i64> = r.get(1)?;
+                let n: i64 = r.get(2)?;
+                counts.insert(id, n.max(0) as u32);
+                parents.insert(id, parent);
+            }
         }
-        drop(st);
+
         let all: i64 = tx.query_row(
             "SELECT COUNT(*) FROM photos p
                JOIN folders f ON f.id = p.folder_id
@@ -1435,7 +1774,13 @@ impl Db {
             |r| r.get(0),
         )?;
         tx.commit()?;
-        Ok((counts, all.max(0) as u64))
+
+        let totals = aggregate_totals(&counts, &parents);
+        Ok(CountSnapshot {
+            direct: counts,
+            totals,
+            all_photos: all.max(0) as u64,
+        })
     }
 
     /// 每个目录**直接**包含的失败照片数（树上的 S-02 状态点用）。

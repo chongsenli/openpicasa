@@ -161,21 +161,27 @@ fn tc_m22_idx_011_four_places_agree_on_the_same_seq() {
     }
 }
 
-/// §6.1 硬约束：`folder_counts` 与 `all_photos` 必须**同一事务**查出。
+/// §6.1 硬约束：`folder_counts` / `folder_totals` / `all_photos` 必须**同一事务**查出。
 ///
-/// 这条用例验的是接口形状（`mgmt_counts` 一个方法返回两个数），
+/// 这条用例验的是接口形状（`mgmt_counts` **一次**调用返回三项），
 /// 而不是去构造并发——并发下的可串行化由 SQLite 的读事务保证，
 /// 在这里造一个真并发测试只会得到一个 flaky 用例。
+///
+/// ⚠️ M3 起返回值从 `(counts, all)` 变成 `CountSnapshot`（三合一）：
+/// `07` §4 的 `folder_totals` 也必须是同一个世界线，否则「树 tooltip 的 M」
+/// 与「本层 N」会在索引进行中出现差 1。
 #[test]
 fn tc_m22_idx_011_counts_come_from_one_call() {
     let f = fixture();
-    let (counts, all) = f.db.mgmt_counts().unwrap();
-    assert_eq!(counts.len(), 3);
-    assert_eq!(all, 9);
-    // 快照里的两份数必须与这一次调用一致
+    let snap_counts = f.db.mgmt_counts().unwrap();
+    assert_eq!(snap_counts.direct.len(), 3);
+    assert_eq!(snap_counts.totals.len(), 3, "递归数与本层数必须同一批目录");
+    assert_eq!(snap_counts.all_photos, 9);
+    // 快照里的三份数必须与这一次调用一致
     let snap = build_snapshot(&f.db, &input_fresh(1, &default_offline_probe())).unwrap();
-    assert_eq!(snap.folder_counts, counts);
-    assert_eq!(snap.all_photos as u64, all);
+    assert_eq!(snap.folder_counts, snap_counts.direct);
+    assert_eq!(snap.folder_totals, snap_counts.totals);
+    assert_eq!(snap.all_photos as u64, snap_counts.all_photos);
 }
 
 /// PERF-09：只刷新快照**不得**推动数据集版本号（`Layout` 不该重排）。

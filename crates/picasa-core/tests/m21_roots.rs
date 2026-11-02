@@ -68,9 +68,21 @@ fn opening_an_m2_library_moves_roots_into_the_database() {
     let db_roots = lib.db().unwrap().roots(false).unwrap();
     assert_eq!(db_roots.len(), 1);
     assert_eq!(db_roots[0].path, root);
-    assert!(
-        !db_roots[0].case_insensitive,
-        "Linux 上的 tmp 目录区分大小写"
+    // ⚠️ 期望值取决于**卷格式**：APFS（macOS 默认）不区分大小写，ext4 区分。
+    // 早先这里写死 `!case_insensitive` 并注释「Linux 上的 tmp 区分大小写」——
+    // 在 macOS 上必然失败，而代码是对的。这里改成「与卷的真实行为一致」。
+    let expect_insensitive = {
+        let lower = photos.join("MiXeD.txt");
+        std::fs::write(&lower, b"x").unwrap();
+        let upper = photos.join("MIXED.TXT");
+        match (std::fs::canonicalize(&upper), std::fs::canonicalize(&lower)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    };
+    assert_eq!(
+        db_roots[0].case_insensitive, expect_insensitive,
+        "roots.case_insensitive 必须反映这个卷的真实行为"
     );
 
     // ---- 数据步骤只跑一次

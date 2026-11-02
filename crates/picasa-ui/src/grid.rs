@@ -860,7 +860,7 @@ pub fn ellipsize_to_width(ui: &Ui, s: &str, font: &FontId, max_w: f32) -> String
     let mut lo = 0usize;
     let mut hi = chars.len();
     while lo < hi {
-        let mid = (lo + hi + 1) / 2;
+        let mid = (lo + hi).div_ceil(2);
         let mut probe: String = chars[..mid].iter().collect();
         probe.push('…');
         if measure(&probe) <= max_w {
@@ -1119,7 +1119,7 @@ mod tests {
     #[test]
     fn filename_rect_sits_below_the_thumbnail() {
         let photos: Vec<PhotoRow> = (0..3)
-            .map(|i| photo(i, 1_600_000_000 + i as i64))
+            .map(|i| photo(i, 1_600_000_000 + i))
             .collect();
         let layout = GridLayout::build(&photos, 1280.0, Tier::Medium, false);
         for i in 0..3 {

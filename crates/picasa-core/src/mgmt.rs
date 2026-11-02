@@ -300,6 +300,15 @@ pub struct MgmtSnapshot {
     pub folder_states: HashMap<i64, FolderState>,
     /// `direct_count`；树与组头**都**用这个
     pub folder_counts: HashMap<i64, u32>,
+    /// 每目录**含子目录**的照片数（`07` §4，P-07 落定）。
+    ///
+    /// 与 [`Self::folder_counts`] **同一事务**查出（`count_snapshot`），所以
+    /// 「树 tooltip 的 M」与「本层 N」永远自洽。
+    ///
+    /// ⚠️ 树节点**右侧数字仍显示 `direct`**（`07` §4.2，`tree.count_mode`
+    /// 默认 `"direct"`，P-20 待 PM 看图确认原版行为）；`total` 只进 tooltip
+    /// 与「关注文件夹」行。想切换成递归数只改 [`TREE_COUNT_MODE`] 一个常量。
+    pub folder_totals: HashMap<i64, u32>,
     /// 「所有照片」（只数 active 根，含失败项与离线项，不含已关闭子目录）
     pub all_photos: u32,
     /// 五类失败，下标 = `kind - 1`
@@ -501,14 +510,42 @@ pub struct SnapshotInput<'a> {
     pub prev_photo_count: u64,
 }
 
+/// 树节点右侧显示哪一个计数（`07` §4.2 `tree.count_mode`）。
+///
+/// - [`TreeCountMode::Direct`]：本层张数（M2.2 行为，**默认**）
+/// - [`TreeCountMode::Total`]：含子文件夹的递归数
+///
+/// P-20 要 PM 拿 `09-library-zh-full.png` 对照任一有子目录的节点确认原版行为。
+/// 切换只改 [`TREE_COUNT_MODE`] 这一个常量，**不动布局与查询**。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeCountMode {
+    Direct,
+    Total,
+}
+
+impl TreeCountMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Total => "total",
+        }
+    }
+}
+
+/// 树节点计数口径。**P-20 待定，默认 `Direct`**（M2.2 行为不变，零回归风险）。
+pub const TREE_COUNT_MODE: TreeCountMode = TreeCountMode::Direct;
+
 /// 从库里读出一整份快照。
 ///
 /// ⚠️ **UI 线程不许直接调**：这是一次十几个查询的批量读，属于 `ui_guard!`
 /// 要审计的范畴。正常用法是快照线程以 ≤ [`SNAPSHOT_HZ_MAX`] 次/秒调用它，
 /// UI 通过 watch channel 订阅结果。
 pub fn build_snapshot(d: &db::Db, input: &SnapshotInput<'_>) -> Result<MgmtSnapshot> {
-    // ---- 计数：**同一事务**（§6.1 约束 / R-M22-6）
-    let (folder_counts, all_photos_all) = d.mgmt_counts()?;
+    // ---- 计数：**同一事务**（§6.1 约束 / R-M22-6 + 07 §4.1）
+    let counts = d.mgmt_counts()?;
+    let folder_counts = counts.direct.clone();
+    let folder_totals = counts.totals.clone();
+    let all_photos_all = counts.all_photos;
 
     let root_stats = d.root_stats()?;
     let mut roots = Vec::with_capacity(root_stats.len());
@@ -583,6 +620,7 @@ pub fn build_snapshot(d: &db::Db, input: &SnapshotInput<'_>) -> Result<MgmtSnaps
         roots,
         folder_states,
         folder_counts,
+        folder_totals,
         all_photos: all_photos_all.min(u32::MAX as u64) as u32,
         failures_by_kind,
         exclusions,

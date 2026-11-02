@@ -39,9 +39,8 @@ fn main() {
     let mut ticks = 0u64;
     loop {
         ticks += 1;
-        match runner.tick(&db) {
-            picasa_core::verify::VerifyTick::Finished => break,
-            _ => {}
+        if runner.tick(&db) == picasa_core::verify::VerifyTick::Finished {
+            break;
         }
         if ticks > 2_000_000 {
             eprintln!("[verify-probe] tick 次数超上限，退出");

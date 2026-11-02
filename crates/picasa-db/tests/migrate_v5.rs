@@ -64,7 +64,9 @@ fn v4_library_upgrades_to_v5_with_rows_intact() {
     let (db, db_path) = open_fixture(tmp.path());
 
     assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 5);
+    // ⚠️ 这条断言在 M3 从 5 改成 6（`07` §8.1）。它守的是「SCHEMA_VERSION 常量
+    // 与最新一条迁移一致」——与 v5 自己的内容无关，所以跟着版本号走是对的。
+    assert_eq!(SCHEMA_VERSION, 6);
 
     // 行数一条都不能变（只增列，不动数据）
     let n: i64 = db
