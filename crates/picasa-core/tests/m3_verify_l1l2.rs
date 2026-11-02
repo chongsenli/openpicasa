@@ -434,3 +434,151 @@ fn apply_scan_writes_dir_mtime_in_the_same_step() {
         .as_nanos() as i64;
     assert_eq!(stored, actual, "存的必须是这个目录**真实**的 mtime（纳秒）");
 }
+
+// ---------------------------------------------------------------- VERIFY-03：L2 周期调度
+
+#[test]
+fn tc_m3_verify_003_due_folders_come_in_ascending_last_verified_order() {
+    // `07` §3.2 VERIFY-03：按 `last_verified_at` **升序**取目录，每轮 ≤ 200 个。
+    //
+    // 升序的意义是**轮转**：跑完一轮后，最早被校验的又变成最久的，自然轮到它们。
+    // 用 `ORDER BY random()` 或按 id 都会让某些目录永远轮不到——
+    // 而「永远轮不到」在界面上表现为「那几个文件夹的日期一直是错的」。
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let names = ["a", "b", "c", "d", "e"];
+    let (ids, db) = fixture(root, &names, 1);
+
+    // 造出明确的时间差：a 最久（1000），e 最新（5000）
+    for (i, id) in ids.iter().enumerate() {
+        db.set_folder_verified(*id, 1000 + i as i64 * 1000).unwrap();
+    }
+    let now = 6000i64;
+    let due = db.folders_due_for_verify(now, 10).unwrap();
+    // 全部都在 cutoff 之前 → 全取，且按时间升序
+    let order: Vec<i64> = due.iter().map(|(id, _)| *id).collect();
+    let mut expected: Vec<(i64, i64)> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (1000 + i as i64 * 1000, *id))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        order,
+        expected.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+        "★ 必须按 last_verified_at 升序（最久没校验的排最前）"
+    );
+
+    // 只取前 2 个：必须是最久的两个
+    let due2 = db.folders_due_for_verify(now, 2).unwrap();
+    assert_eq!(due2.len(), 2);
+    assert_eq!(due2[0].0, expected[0].1);
+    assert_eq!(due2[1].0, expected[1].1);
+}
+
+#[test]
+fn tc_m3_verify_003_never_verified_folders_come_first() {
+    // `NULL`（从未校验）必须排最前——它们的日期最不可信。
+    let tmp = tempfile::tempdir().unwrap();
+    let (ids, db) = fixture(tmp.path(), &["a", "b"], 1);
+    db.set_folder_verified(ids[0], 5000).unwrap();
+    db.set_folder_verified(ids[1], 5000).unwrap();
+    // 新增一个从未校验的
+    let dir = tmp.path().join("c");
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.to_string_lossy().to_string();
+    let fid = db.upsert_folder(&p, &p.to_lowercase(), None).unwrap();
+
+    let due = db.folders_due_for_verify(9999, 10).unwrap();
+    assert_eq!(due[0].0, fid, "从未校验的必须排最前");
+}
+
+#[test]
+fn tc_m3_verify_003_batch_is_capped_at_200() {
+    // `verify.full_batch = 200` 是**硬上限**：一次全校是 read_dir + 逐文件 stat，
+    // 4330 个目录一口气跑完要几十秒，那几十秒里 UI 只能用旧数据。
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Db::open(tmp.path().join("cap.sqlite")).unwrap();
+    // 直接插 300 个目录行（不需要真实目录：这里只测「取几个」）
+    for i in 0..300 {
+        let p = format!("/fake/dir{i}");
+        db.upsert_folder(&p, &p.to_lowercase(), None).unwrap();
+    }
+    let due = db.folders_due_for_verify(9999, picasa_core::VERIFY_FULL_BATCH).unwrap();
+    assert_eq!(
+        due.len(),
+        picasa_core::VERIFY_FULL_BATCH,
+        "批量上限必须是 {}",
+        picasa_core::VERIFY_FULL_BATCH
+    );
+    assert_eq!(picasa_core::VERIFY_FULL_BATCH, 200);
+}
+
+#[test]
+fn tc_m3_verify_003_polling_roots_shorten_the_l2_interval() {
+    // `07` §3.1：监视 `Active` 时 L2 可以放长（24 h），`Polling` 时必须缩短（6 h）。
+    //
+    // 理由：`Polling` 只能靠目录 mtime 快筛，**原地覆盖根本看不到**
+    // （目录 mtime 不变）。所以只能靠 L2 兜，而兜的间隔决定「用户改了照片
+    // 多久之后日期才会变」。
+    assert_eq!(picasa_core::full_interval_hours(true), 24);
+    assert_eq!(picasa_core::full_interval_hours(false), 6);
+    assert_eq!(picasa_core::VERIFY_FULL_INTERVAL_H, 24);
+    assert_eq!(picasa_core::VERIFY_FULL_INTERVAL_POLLING_H, 6);
+}
+
+#[test]
+fn tc_m3_verify_003_scheduler_waits_for_idle_and_never_runs_twice() {
+    use picasa_core::FullVerifyScheduler;
+    let mut s = FullVerifyScheduler::new();
+    // 从未跑过 → 到期
+    assert!(s.is_due(true, true, false));
+    // 界面忙 → 不跑
+    assert!(!s.is_due(true, false, false));
+    // 已有 L2 在跑 → 不跑
+    assert!(!s.is_due(true, true, true));
+
+    s.note_started(true);
+    // 刚跑过 → 不到期（24 h）
+    assert!(!s.is_due(true, true, false));
+    // 强制到期（手动全量校验 / 测试）
+    s.force_due();
+    assert!(s.is_due(true, true, false));
+}
+
+#[test]
+fn tc_m3_verify_003_scheduler_uses_the_shorter_interval_when_polling() {
+    use picasa_core::FullVerifyScheduler;
+    let mut s = FullVerifyScheduler::new();
+    s.note_started(false); // 记一次「Polling 下跑过」
+    // 刚跑完，不到期
+    assert!(!s.is_due(false, true, false));
+    // 也不可能立刻按 Active 的 24 h 判成到期——两者的 last_run 是同一个，
+    // 但周期不同，所以「切回 Active 之后」应当仍是不到期（24 h 更宽）
+    assert!(!s.is_due(true, true, false));
+}
+#[test]
+fn due_for_verify_query_uses_the_v6_index() {
+    // VERIFY-03 的实现若不走 `idx_folders_verified`，10 万目录的排序会卡住 UI 几百毫秒。
+    // 这条只有执行计划能证明——查询结果对不对与走不走索引无关。
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Db::open(tmp.path().join("p.sqlite")).unwrap();
+    for i in 0..50 {
+        let p = format!("/fake/d{i}");
+        db.upsert_folder(&p, &p.to_lowercase(), None).unwrap();
+    }
+    let plan = db.explain_due_for_verify_plan().unwrap();
+    let text = plan.join(" | ");
+    // 判据是「**按索引顺序**扫」而不是「全表扫再排序」：
+    //   ✅ `SCAN folders USING INDEX idx_folders_verified`（索引本身有序，顺扫即可）
+    //   ❌ `SCAN folders`（无索引，逐行读表）
+    //   ❌ `USE TEMP B-TREE FOR ORDER BY`（读完还要排一遍）
+    assert!(
+        text.contains("USING INDEX idx_folders_verified"),
+        "★ 没走 v6 的 last_verified_at 索引：{text}"
+    );
+    assert!(
+        !text.contains("USE TEMP B-TREE FOR ORDER BY"),
+        "★ 排序没吃到索引的有序性，要额外建临时 B 树：{text}"
+    );
+}

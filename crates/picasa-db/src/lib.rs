@@ -2111,6 +2111,64 @@ impl Db {
         Ok(())
     }
 
+    /// 取一批「最久没校验过」的目录（`07` §3.2 VERIFY-03）。
+    ///
+    /// ## 为什么按 `last_verified_at` 升序
+    ///
+    /// L2 全校的预算是「每轮最多 N 个目录」，而目录总数可能远大于 N。
+    /// 升序取最久没校验的，等价于**轮转**：跑完一轮之后，最早被校验的那些
+    /// 又变成最久的，自然轮到它们。用 `ORDER BY random()` 或「按 id」都会
+    /// 让某些目录永远轮不到。
+    ///
+    /// `NULL`（从未校验）排最前：它们的日期最不可信。
+    ///
+    /// ⚠️ 走 `idx_folders_verified`（v6 建的 `(last_verified_at)` 索引），
+    /// 否则 10 万目录的排序会把 UI 线程卡住几百毫秒。
+    pub fn folders_due_for_verify(
+        &self,
+        older_than_secs: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, path FROM folders
+              WHERE last_verified_at IS NULL OR last_verified_at < ?1
+              -- ⚠️ 不能写成 `ORDER BY last_verified_at IS NOT NULL, last_verified_at`：
+              -- 那个表达式会让 SQLite 放弃索引走 `USE TEMP B-TREE FOR ORDER BY`
+              -- （10 万目录上就是几百毫秒的 UI 卡顿）。而 SQLite 的 ASC 排序
+              -- **本来就把 NULL 排在最前**，正是我们要的语义。
+              ORDER BY last_verified_at ASC, id ASC
+              LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![older_than_secs, limit as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// `folders_due_for_verify` 的执行计划（诊断与回归用）。
+    pub fn explain_due_for_verify_plan(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT id, path FROM folders
+              WHERE last_verified_at IS NULL OR last_verified_at < ?1
+              ORDER BY last_verified_at ASC, id ASC
+              LIMIT 200",
+        )?;
+        let rows = st.query_map(params![0i64], |r| r.get::<_, String>(3))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 有多少目录「该校验了」（任务行显示「还有 N 个目录待校验」用）。
+    pub fn count_folders_due_for_verify(&self, older_than_secs: i64) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM folders
+              WHERE last_verified_at IS NULL OR last_verified_at < ?1",
+            params![older_than_secs],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u64)
+    }
+
     /// 每个目录的 `direct_count`（树与栅格组头共用，**同一事务同一份数**）。
     pub fn folder_counts(&self) -> Result<std::collections::HashMap<i64, u32>> {
         let mut st = self.conn.prepare("SELECT id, direct_count FROM folders")?;

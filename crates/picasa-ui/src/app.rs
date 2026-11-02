@@ -63,6 +63,8 @@ pub struct OpenPicasaApp {
     watch: picasa_core::WatchManager,
     /// 缩略图滑块状态机（`07-A` §2 ZOOM）。连续尺寸 + 回滞 + 拖动中不换纹理。
     zoom: picasa_core::ZoomState,
+    /// L2 全校的周期调度（`07` §3.2 VERIFY-03）。
+    full_verify: picasa_core::FullVerifyScheduler,
     /// 当前显示器的 DPI 缩放（Retina = 2.0）。
     ///
     /// 滑块选档必须用它：**512 逻辑在 2× 屏上要 1024 物理**，
@@ -215,6 +217,7 @@ impl OpenPicasaApp {
             // `settings.grid_cell_px`（`07-A` ZOOM-06）：全局一份，不按文件夹记忆（P-28）。
             // 读库失败/没设过 → 默认刻度（`ZoomState::from_setting(None)`）。
             zoom: picasa_core::ZoomState::from_setting(zoom_setting),
+            full_verify: picasa_core::FullVerifyScheduler::new(),
             dpi_scale: 1.0,
             viewer: None,
             search_buf,
@@ -492,6 +495,75 @@ impl OpenPicasaApp {
                 (p.id, d as u32)
             });
         self.cache.note_viewport(distances);
+    }
+
+    /// L2 全校的周期检查（`07` §3.2 VERIFY-03）。
+    ///
+    /// ## 为什么单独一个函数而不是塞进 `tick_startup_verify`
+    ///
+    /// 两件事的**触发条件完全不同**：启动校验只跑一次、必须等首屏；
+    /// L2 每 6/24 小时一次、必须等界面空闲。混在一起写，两个条件会互相污染
+    /// （比如「启动校验跑完」被误当成「L2 也跑过了」）。
+    ///
+    /// ## 空闲判据
+    ///
+    /// `idle = 没有索引任务在跑 && 启动校验已结束 && 用户没在拖滑块`。
+    /// 前两条是硬要求（抢 IO）；第三条是体验（拖滑块时每帧都在重排，
+    /// 再叠一个 stat 循环会让手感变涩）。
+    fn tick_full_verify(&mut self, ctx: &egui::Context) {
+        // 启动校验还没跑完 → 先让它跑完
+        if self.verify.is_some() || !self.verify_done {
+            return;
+        }
+        let idle = !self.board.snapshot().running() && !self.zoom.is_dragging();
+        let watch_active = self.watch.active_count() > 0;
+        let running = false; // L2 复用 VerifyRunner，同一时刻只会有一个（由 verify 字段管）
+        if !self
+            .full_verify
+            .is_due(watch_active, idle, running)
+        {
+            return;
+        }
+        // 到点了：取这一批目录跑一轮强制 L2
+        let interval_h = picasa_core::full_interval_hours(watch_active);
+        let batch = {
+            let Ok(db) = self.lib.db() else {
+                return;
+            };
+            match picasa_core::FullVerifyScheduler::take_batch(&db, interval_h) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(error = %e, "取 L2 待校验目录失败");
+                    return;
+                }
+            }
+        };
+        if batch.is_empty() {
+            // 全都校验过了：记一次「跑过」，下一轮等周期
+            self.full_verify.note_started(watch_active);
+            return;
+        }
+        tracing::info!(
+            dirs = batch.len(),
+            interval_h,
+            watch_active,
+            "开始一轮 L2 全校校验"
+        );
+        // 复用启动校验的执行器：它本来就是「按目录限速、逐个比对」那一套。
+        // 区别只是范围（这里是「最久没校验的 200 个」，不是全树）。
+        let plan = picasa_core::VerifyPlan::from_root_paths(
+            batch
+                .iter()
+                .map(|(_, p)| std::path::PathBuf::from(p))
+                .collect::<Vec<_>>(),
+        );
+        if !plan.is_empty() {
+            self.verify = Some(picasa_core::verify::VerifyRunner::new_forced_full(plan));
+            self.verify_done = false;
+            self.full_verify.note_started(watch_active);
+            self.full_verify.note_batch(batch.len());
+            ctx.request_repaint();
+        }
     }
 
     /// 索引管理页点出的动作。
@@ -2178,6 +2250,8 @@ impl eframe::App for OpenPicasaApp {
         self.progress.tick(&ctx, &self.board);
         // §4.8 启动增量校验：首屏之后启动，之后每帧推进一步（**内部自己限速**）
         self.tick_startup_verify(&ctx);
+        // M3：L2 周期全校（每 6/24 h 一次，等界面空闲才动手）
+        self.tick_full_verify(&ctx);
 
         // 调试入口：等照片装载好再进查看器（首帧时 photos 还是空的）
         // 45 帧 ≈ 0.7s：扫描是逐目录入库的，太早会拿到半截列表（实测拿到过 3/9）。

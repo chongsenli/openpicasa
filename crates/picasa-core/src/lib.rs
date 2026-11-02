@@ -52,6 +52,10 @@ pub use mgmt::{
     live_task_views, path_is_offline,
 };
 pub use movematch::{FileMeta, MatchOutcome, MoveMatcher, MoveStats, PhotoKey, head_hash};
+pub use verify::{
+    FullVerifyScheduler, VERIFY_FULL_BATCH, VERIFY_FULL_INTERVAL_H,
+    VERIFY_FULL_INTERVAL_POLLING_H, full_interval_hours,
+};
 pub use paths::AppPaths;
 pub use watch_mgr::{RootWatchConfig, WatchManager, WatchOut};
 pub use zoom::{

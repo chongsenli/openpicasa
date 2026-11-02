@@ -436,6 +436,139 @@ impl VerifyRunner {
     }
 }
 
+// ---------------------------------------------------------------- L2 周期调度
+
+/// L2 全校的周期（小时）——`07` 附录 A `verify.full_interval_h`，默认 24（⚠️ 待实测）。
+pub const VERIFY_FULL_INTERVAL_H: u64 = 24;
+
+/// 监视降级为轮询时的 L2 周期（小时）——`07` §3.1：`Polling` 时监视捉不到写事件，
+/// 所以 L2 要更勤（默认 6）。
+pub const VERIFY_FULL_INTERVAL_POLLING_H: u64 = 6;
+
+/// 每轮最多取多少个目录（`07` 附录 A `verify.full_batch = 200`）。
+///
+/// 为什么分批：一次全校是 `read_dir` + 逐文件 `stat`。4330 个目录一口气跑完
+/// 在 SSD 上也要几十秒，而那几十秒里 UI 只能用旧数据。分成 200 个一批，
+/// 每批之间让出，用户看到的进度是**连续前进**而不是「卡住 → 突然完成」。
+pub const VERIFY_FULL_BATCH: usize = 200;
+
+/// 该用哪个 L2 周期（`07` §3.1 的表）。
+///
+/// 判据是「监视有没有在实时工作」：
+/// - `Active`：FSEvents/inotify 能捉到写事件 → L2 可以放长（24 h）
+/// - `Polling`：只能靠目录 mtime 快筛，**原地覆盖根本看不到** → 必须更勤（6 h）
+pub fn full_interval_hours(watch_is_active: bool) -> u64 {
+    if watch_is_active {
+        VERIFY_FULL_INTERVAL_H
+    } else {
+        VERIFY_FULL_INTERVAL_POLLING_H
+    }
+}
+
+/// L2 周期调度器（`07` §3.2 VERIFY-03）。
+///
+/// ## 它只管「什么时候该跑」，不管「怎么跑」
+///
+/// 跑法在 [`VerifyRunner::new_forced_full`] 里（那是启动路径也在用的同一套）。
+/// 这个 struct 只回答一个问题：**现在该不该开始一轮 L2，如果该，取哪些目录**。
+///
+/// ## 为什么要有「空闲」判断
+///
+/// 用户正在滚栅格时跑全校，两个 `stat` 循环会抢同一个盘。所以调度器要等
+/// 「界面安静了」才动手——判据由调用方给（UI 知道有没有滚动、有没有任务在跑），
+/// 这里只接受一个 `idle` 布尔。
+#[derive(Debug)]
+pub struct FullVerifyScheduler {
+    /// 上次真正开始一轮的时刻
+    last_run: Option<Instant>,
+    /// 本轮已跑完多少目录（诊断）
+    pub dirs_done: u64,
+    /// 本轮总共取了多少目录
+    pub dirs_taken: u64,
+    /// 上一轮的周期（变周期时用来判断要不要立刻重排）
+    last_interval_h: u64,
+}
+
+impl Default for FullVerifyScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FullVerifyScheduler {
+    pub fn new() -> Self {
+        Self {
+            last_run: None,
+            dirs_done: 0,
+            dirs_taken: 0,
+            last_interval_h: VERIFY_FULL_INTERVAL_H,
+        }
+    }
+
+    /// 强制「现在就到期」（**测试与「手动全量校验」按钮用**）。
+    pub fn force_due(&mut self) {
+        self.last_run = None;
+    }
+
+    /// 现在该开始一轮吗？
+    ///
+    /// 三个条件全部满足才算到期：
+    /// 1. 距上次开始已超过周期（从未跑过 → 立刻到期）
+    /// 2. 界面空闲（`idle`）
+    /// 3. 周期性（没有正在跑的 L2）
+    pub fn is_due(&self, watch_is_active: bool, idle: bool, running: bool) -> bool {
+        if running || !idle {
+            return false;
+        }
+        let interval = Duration::from_secs(full_interval_hours(watch_is_active) * 3600);
+        match self.last_run {
+            None => true,
+            Some(t) => t.elapsed() >= interval,
+        }
+    }
+
+    /// 记一次「开始了」。
+    pub fn note_started(&mut self, watch_is_active: bool) {
+        self.last_run = Some(Instant::now());
+        self.last_interval_h = full_interval_hours(watch_is_active);
+        self.dirs_done = 0;
+        self.dirs_taken = 0;
+    }
+
+    /// 记一批完成。
+    pub fn note_batch(&mut self, n: usize) {
+        self.dirs_done += n as u64;
+    }
+
+    /// 取这一轮要校验的目录（`07` VERIFY-03：升序、≤ 200）。
+    ///
+    /// 返回 `(目录 id, 路径)`。空 = 全都校验过了。
+    pub fn take_batch(
+        db: &Db,
+        interval_h: u64,
+    ) -> picasa_db::Result<Vec<(i64, String)>> {
+        let cutoff = now_unix() - (interval_h as i64) * 3600;
+        db.folders_due_for_verify(cutoff, VERIFY_FULL_BATCH)
+    }
+
+    /// 诊断文案（任务行用）。
+    pub fn status_text(&self, remaining: u64) -> String {
+        if remaining == 0 {
+            return "全校校验：已全部完成".to_string();
+        }
+        format!(
+            "全校校验：本轮 {} 个目录，还有 {} 个待校验",
+            self.dirs_done, remaining
+        )
+    }
+}
+
+/// 当前 Unix 秒。与 `picasa-db` 里那份是同义——但本 crate 不该为了一个数
+/// 去依赖 db 的内部函数。
+fn now_unix() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
 /// 把 `SystemTime` 转成自 epoch 起的纳秒。
 ///
 /// i64 的容量足够：1.79e18 ns（2026 年）离 9.2e18 的边界还有几十年，
