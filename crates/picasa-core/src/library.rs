@@ -259,7 +259,15 @@ impl Library {
         self.tree_dirty = false;
         self.refresh_roots();
         let folders = self.db()?.all_folders()?;
-        self.total_in_db = folders.iter().map(|f| f.photo_count as u64).sum();
+        // 「所有照片」旁的数字只数**活动关注文件夹**下的照片。
+        // `all_folders()` 是物理全表（含已关闭根目录的行——关闭不删索引，
+        // 那些行必须留着，`m21_nav` 靠它们断言）；直接求和就会让左栏显示
+        // 「所有照片 13」，而栅格按可见口径只画出 3 张。
+        self.total_in_db = folders
+            .iter()
+            .filter(|f| is_under_any_root(&f.path, &self.root_paths))
+            .map(|f| f.photo_count as u64)
+            .sum();
         self.path_to_id = folders.iter().map(|f| (f.path.clone(), f.id)).collect();
 
         // 1) 所有候选路径：roots 本身 + DB 里的目录
@@ -436,14 +444,17 @@ impl Library {
     /// 任何想显示「共 N 张」的地方都要用 `photos_total`，不能用 `photos.len()`。
     pub fn reload_photos(&mut self) -> Result<()> {
         let folder_ids = self.view_folder_ids();
-        let total = self.db()?.count_photos(folder_ids.as_deref())? as usize;
+        // ⚠️ 用 `count_photos_visible` / `photos_from_visible`，**不是**无后缀的那两个：
+        // 后者是「物理全库」，会把已关闭关注文件夹的照片也算进来。
+        // 用户关掉一个关注文件夹后，树里没了、栅格却还在——那正是这条 bug 的形态。
+        let total = self.db()?.count_photos_visible(folder_ids.as_deref())? as usize;
 
         let photos = if self.search.trim().is_empty() {
             match self.view {
                 // 「最近更改」按 `mtime_ns` 排序，有 `idx_photos_mtime`，全库 5 万也只要几毫秒；
                 // 且它本身就是「最近 N 条」的语义，不需要分页补齐。
                 View::Recent => self.db()?.recently_changed(200_000)?,
-                _ => self.db()?.photos_from(
+                _ => self.db()?.photos_from_visible(
                     folder_ids.as_deref(),
                     self.sort,
                     PAGE_FIRST.min(total.max(1)),
@@ -486,7 +497,7 @@ impl Library {
             return Ok(false);
         }
         let folder_ids = self.view_folder_ids();
-        let more = self.db()?.photos_from(
+        let more = self.db()?.photos_from_visible(
             folder_ids.as_deref(),
             self.sort,
             PAGE_STEP,

@@ -523,6 +523,39 @@ impl Db {
 
     // ----------------------------------------------------------------- photos
 
+    /// 「关闭的关注文件夹」在 SQL 侧的过滤条件。
+    ///
+    /// `folders.root_id` 指向 `roots.id`，而关闭根目录只改 `roots.state`（不删索引），
+    /// 所以「用户还能不能看到这张照片」完全由 `roots.state` 决定：
+    ///
+    /// ```text
+    /// EXISTS (SELECT 1 FROM roots r WHERE r.id = f.root_id AND r.state = 0)
+    /// ```
+    ///
+    /// ## 为什么是 EXISTS 而不是 JOIN
+    ///
+    /// 与 `docs/06` §6.5 的 `root_stats` 同一个理由：`JOIN roots` 会让优化器物化整行，
+    /// 而 `EXISTS` 是半连接，且 `roots` 是小表（个位数行）、`idx_roots_key` 之外
+    /// 还有主键索引可用，代价可忽略。`thumbs` 那种 1.26 GB 的 BLOB 表才真正怕 JOIN，
+    /// 这里的 `roots` 怕的是「把一条能走索引的排序查询变成要建临时 B-tree」。
+    ///
+    /// ## 为什么 root_id 为 NULL 的行也算「可见」
+    ///
+    /// `folders.root_id` 由 `derive_hierarchy()` 按**全部** roots（含已关闭的）推导，
+    /// 正常库不会为 NULL。但两种情况下它是 NULL：① 层级还没推导（迁移失败降级运行）；
+    /// ② 用户手动改过库。这时候**判成不可见会让整个图库空掉**——比「多显示几张」
+    /// 糟得多。所以 `COALESCE(f.root_id, 0)` 落到「没有归属根」分支，按可见处理。
+    ///
+    /// ⚠️ 这条过滤**只认 `roots.state`**，不看 `folders.is_online`，
+    /// 也不做任何 `stat`。**离线根（外接盘没插）的照片必须仍然看得到**——
+    /// 那是 P-17 的裁决（「所有照片」包含离线根），与「用户主动关闭」是两件事。
+    fn active_root_clause(&self) -> &'static str {
+        // `f.root_id IS NULL` 必须**判成可见**（见上）。写成裸 `EXISTS` 会让
+        // 所有「还没推导层级」的库整库空白——那比多显示几张糟得多。
+        "(f.root_id IS NULL
+          OR EXISTS (SELECT 1 FROM roots r WHERE r.id = f.root_id AND r.state = 0))"
+    }
+
     /// 当前视图中要显示的照片（按拍摄时间倒序，缺失回退 mtime）。
     ///
     /// `folder_ids` 为 `None` 表示全库（「所有照片」入口）。
@@ -556,20 +589,40 @@ impl Db {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<PhotoRow>> {
+        self.photos_from_scoped(folder_ids, sort, limit, offset, false)
+    }
+
+    /// 同 [`Db::photos_from`]，但**排除已关闭关注文件夹下的照片**。
+    ///
+    /// 这是栅格真正该走的那条：用户关掉一个关注文件夹，就是不想再看到它的照片。
+    /// 与 `photos_from`（物理全库）分开而不是改后者，原因是后者有两个**必须保留
+    /// 物理口径**的使用者：① `m21_nav` 断言「关闭不删索引」（照片行必须还在）；
+    /// ② `c_bench` 的性能基准要压整库。
+    pub fn photos_from_visible(
+        &self,
+        folder_ids: Option<&[i64]>,
+        sort: SortSpec,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<PhotoRow>> {
+        self.photos_from_scoped(folder_ids, sort, limit, offset, true)
+    }
+
+    fn photos_from_scoped(
+        &self,
+        folder_ids: Option<&[i64]>,
+        sort: SortSpec,
+        limit: usize,
+        offset: usize,
+        visible_only: bool,
+    ) -> Result<Vec<PhotoRow>> {
         let mut sql = format!(
             "SELECT {} FROM photos p JOIN folders f ON f.id = p.folder_id",
             self.photo_cols()
         );
-        if let Some(ids) = folder_ids {
-            if ids.is_empty() {
-                return Ok(Vec::new());
-            }
-            let list = ids
-                .iter()
-                .map(|i| i.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            sql.push_str(&format!(" WHERE p.folder_id IN ({list})"));
+        let where_sql = self.build_scope(folder_ids, visible_only);
+        if let Some(w) = where_sql {
+            sql.push_str(&w);
         }
         sql.push_str(" ORDER BY ");
         sql.push_str(&sort.order_by(self.eff_col()));
@@ -585,21 +638,62 @@ impl Db {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// 视图内照片总数（C1 首屏先拿总数，用来判断「要不要继续补」与显示进度）。
-    /// 走 `EXPLAIN QUERY PLAN` 验证过：有 `folder_id` 条件时用 `idx_photos_folder_taken`，
-    /// 无条件时是 `SCAN photos` 的计数优化（SQLite 对无 WHERE 的 `COUNT(*)` 直接读页数）。
-    pub fn count_photos(&self, folder_ids: Option<&[i64]>) -> Result<u64> {
-        let mut sql = String::from("SELECT COUNT(*) FROM photos p");
+    /// 拼 `WHERE` 子句（含前导 ` WHERE `）。返回 `None` 表示不加条件（物理全库）。
+    ///
+    /// `folder_ids == Some(&[])` 是「视图里一个目录都没有」，必须**短路成恒假**，
+    /// 而不是拼出 `IN ()`（那是 SQL 语法错误）。这个短路在这里统一做，
+    /// 免得每个调用点各写一遍、漏一个就 panic。
+    fn build_scope(&self, folder_ids: Option<&[i64]>, visible_only: bool) -> Option<String> {
+        let mut conds: Vec<String> = Vec::new();
         if let Some(ids) = folder_ids {
             if ids.is_empty() {
-                return Ok(0);
+                // 恒假条件：`p.folder_id IN ()` 不合法，用 `0` 代替
+                return Some(" WHERE 0".to_string());
             }
             let list = ids
                 .iter()
                 .map(|i| i.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            sql.push_str(&format!(" WHERE p.folder_id IN ({list})"));
+            conds.push(format!("p.folder_id IN ({list})"));
+        }
+        if visible_only {
+            conds.push(self.active_root_clause().to_string());
+        }
+        if conds.is_empty() {
+            None
+        } else {
+            Some(format!(" WHERE {}", conds.join(" AND ")))
+        }
+    }
+
+    /// 视图内照片总数（C1 首屏先拿总数，用来判断「要不要继续补」与显示进度）。
+    /// 走 `EXPLAIN QUERY PLAN` 验证过：有 `folder_id` 条件时用 `idx_photos_folder_taken`，
+    /// 无条件时是 `SCAN photos` 的计数优化（SQLite 对无 WHERE 的 `COUNT(*)` 直接读页数）。
+    pub fn count_photos(&self, folder_ids: Option<&[i64]>) -> Result<u64> {
+        self.count_photos_scoped(folder_ids, false)
+    }
+
+    /// 同 [`Db::count_photos`]，但排除已关闭关注文件夹。
+    ///
+    /// ⚠️ **必须与 `photos_from_visible` 同口径**，否则会出现「状态栏说 13 张、
+    /// 栅格只画出 1 张」——这正是 `docs/04` §3.2 定为 P0 的那类偏差。
+    pub fn count_photos_visible(&self, folder_ids: Option<&[i64]>) -> Result<u64> {
+        self.count_photos_scoped(folder_ids, true)
+    }
+
+    fn count_photos_scoped(
+        &self,
+        folder_ids: Option<&[i64]>,
+        visible_only: bool,
+    ) -> Result<u64> {
+        let mut sql = String::from("SELECT COUNT(*) FROM photos p");
+        if visible_only {
+            // `COUNT` 的可见口径要 join 到 folders 才拿得到 root_id
+            sql.push_str(" JOIN folders f ON f.id = p.folder_id");
+        }
+        if let Some(w) = self.build_scope(folder_ids, visible_only) {
+            sql.push_str(&w);
         }
         let n: i64 = self.conn.query_row(&sql, [], |r| r.get(0))?;
         Ok(n.max(0) as u64)
@@ -613,9 +707,25 @@ impl Db {
     /// `tests/photo_columns.rs` 可以断言计划里必须出现 `idx_photos_eff_taken`、
     /// 且不出现 `TEMP B-TREE FOR ORDER BY`。
     pub fn explain_photos_plan(&self, sort: SortSpec) -> Result<Vec<String>> {
+        self.explain_photos_plan_scoped(sort, false)
+    }
+
+    /// 同 [`Db::explain_photos_plan`]，但带**可见作用域**（栅格真正走的那条）。
+    ///
+    /// 必须单独有这一条：`explain_photos_plan` 的 SQL 里没有 `active_root` 过滤，
+    /// 它变绿不能证明栅格用的那条没退化——两边的 WHERE 结构不同，
+    /// SQLite 选择索引的方式也就可能不同。`tests/plan_visible_scope.rs` 用它守着。
+    pub fn explain_visible_plan(&self, sort: SortSpec) -> Result<Vec<String>> {
+        self.explain_photos_plan_scoped(sort, true)
+    }
+
+    fn explain_photos_plan_scoped(&self, sort: SortSpec, visible_only: bool) -> Result<Vec<String>> {
+        let where_sql = self
+            .build_scope(None, visible_only)
+            .unwrap_or_default();
         let sql = format!(
             "EXPLAIN QUERY PLAN
-             SELECT p.id FROM photos p JOIN folders f ON f.id = p.folder_id
+             SELECT p.id FROM photos p JOIN folders f ON f.id = p.folder_id{where_sql}
              ORDER BY {} LIMIT 2000",
             sort.order_by(self.eff_col())
         );
@@ -660,6 +770,10 @@ impl Db {
                 .join(",");
             sql.push_str(&format!(" AND p.folder_id IN ({list})"));
         }
+        // 搜索结果同样不许越过「已关闭的关注文件夹」——否则搜一下就能把
+        // 用户明确关掉的目录的照片又翻出来。
+        sql.push_str(" AND ");
+        sql.push_str(self.active_root_clause());
         sql.push_str(&format!(" ORDER BY p.taken_at DESC LIMIT {limit}"));
 
         let mut st = self.conn.prepare(&sql)?;
@@ -694,12 +808,17 @@ impl Db {
     }
 
     /// 「最近更改」入口：按 mtime 倒序（F1-22 的 M1 可用入口之一）。
+    ///
+    /// 只返回**活动关注文件夹**下的照片：关闭一个根目录后，它的照片不该继续
+    /// 出现在「最近更改」里（与「所有照片」同口径）。
     pub fn recently_changed(&self, limit: usize) -> Result<Vec<PhotoRow>> {
         let mut st = self.conn.prepare(&format!(
             "SELECT {}
              FROM photos p JOIN folders f ON f.id = p.folder_id
+             WHERE {}
              ORDER BY p.mtime_ns DESC LIMIT ?1",
-            self.photo_cols()
+            self.photo_cols(),
+            self.active_root_clause()
         ))?;
         let rows = st.query_map(params![limit as i64], map_photo)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
