@@ -336,16 +336,35 @@ fn draw_zoom_pill(
         (minus_r, Icon::Minus, !zoom_min, "缩小缩略图（⌘−）", TopbarAction::ZoomOut),
         (plus_r, Icon::Plus, !zoom_max, "放大缩略图（⌘+）", TopbarAction::ZoomIn),
     ] {
-        let resp = ui.interact(r, ui.scope_id().with(("zoom", tip)), Sense::click());
-        if enabled && resp.hovered() {
+        // 端点只响应悬停：再点不会发出一次无效缩放，光标也不会变成手形。
+        let sense = if enabled { Sense::click() } else { Sense::hover() };
+        let resp = ui.interact(r, ui.scope_id().with(("zoom", tip)), sense);
+        if !enabled {
+            painter.rect_filled(
+                r,
+                rect.height() / 2.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 150),
+            );
+        } else if resp.hovered() {
             painter.rect_filled(r, rect.height() / 2.0, theme.sidebar_hover);
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        let color = if enabled { theme.toolbar_icon } else { theme.text_disabled };
+        let color = if enabled {
+            theme.toolbar_icon
+        } else {
+            theme.text_disabled
+        };
         let inner = Rect::from_center_size(r.center(), vec2(14.0, 14.0));
         icons::draw(painter, icon, inner, color, 1.4);
+        let tip = if enabled {
+            tip
+        } else if matches!(action, TopbarAction::ZoomOut) {
+            "已是最小缩略图"
+        } else {
+            "已是最大缩略图"
+        };
         resp.clone().on_hover_text(tip);
-        if resp.clicked() && enabled {
+        if enabled && resp.clicked() {
             out.actions.push(action);
         }
     }

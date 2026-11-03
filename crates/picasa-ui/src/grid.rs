@@ -61,6 +61,36 @@ pub struct Group {
     pub count: usize,
 }
 
+/// 横向瀑布流的行数。
+///
+/// 两个约束同时成立才不会出现「右侧大片空白、下面一条几乎不能滚的横条」：
+///
+/// 1. 行数不能多于视口高度塞得下的行（这个模式只做横向滚动，超高的行会被裁掉）；
+/// 2. 在此之上尽量少分行，让每一行的平均宽度仍 ≥ 视口宽度。照片不够铺满时退回 1 行。
+fn masonry_h_rows(viewport_w: f32, viewport_h: f32, slot_h: f32, total_w: f32) -> usize {
+    let gap = Metrics::CELL_GAP;
+    let pad = Metrics::GRID_PAD;
+    let mut rows_fit = 1usize;
+    loop {
+        let next = rows_fit + 1;
+        if next > 64 {
+            break;
+        }
+        let h = pad * 2.0 + next as f32 * slot_h + (next - 1) as f32 * gap;
+        if h > viewport_h + 0.5 {
+            break;
+        }
+        rows_fit = next;
+    }
+    let target = (viewport_w - 2.0 * pad).max(slot_h);
+    let rows_fill = (total_w / target).floor() as usize;
+    if rows_fill == 0 {
+        1
+    } else {
+        rows_fill.min(rows_fit).max(1)
+    }
+}
+
 /// 栅格布局（每帧重建；重建代价 O(分组数)，10 万张约 3000 天分组 → 可忽略）。
 pub struct GridLayout {
     pub cell: f32,
@@ -93,6 +123,23 @@ impl GridLayout {
         has_headers: bool,
         mode: ViewMode,
     ) -> Self {
+        // 只有一个尺寸时，横向模式把宽高都当成这个数（单测入口）。
+        // 真正的视口走 [`Self::build_in_viewport`]。
+        Self::build_in_viewport(photos, width, width, cell_px, has_headers, mode)
+    }
+
+    /// `viewport_w` 是可用宽度，`viewport_h` 是可用高度。
+    ///
+    /// 方格 / 纵向只用宽度。横向瀑布流两个都要：行数按「铺满宽度、且不高出视口」来定，
+    /// 不能拿高度当宽度去排成一窄条竖列。
+    pub fn build_in_viewport(
+        photos: &[PhotoRow],
+        viewport_w: f32,
+        viewport_h: f32,
+        cell_px: f32,
+        has_headers: bool,
+        mode: ViewMode,
+    ) -> Self {
         // masonry 下 `cell_px` 语义变为「目标列宽/行高基准」，下限拉到可读的最小值，
         // 避免拖到 22px 时几千列/行直接卡死。
         let cell = if mode == ViewMode::Grid {
@@ -111,9 +158,9 @@ impl GridLayout {
             };
 
         let mut layout = if mode == ViewMode::Grid {
-            Self::build_grid(photos, width, cell, cell_h, has_headers)
+            Self::build_grid(photos, viewport_w, cell, cell_h, has_headers)
         } else {
-            Self::build_masonry(photos, width, cell, mode)
+            Self::build_masonry(photos, viewport_w, viewport_h, cell, mode)
         };
         layout.mode = mode;
         layout
@@ -178,11 +225,18 @@ impl GridLayout {
     ///
     /// - `MasonryV`：列宽 = `cell`，图片按真实宽高比缩放到列宽，放进**最矮的列**；纵向滚动。
     /// - `MasonryH`：行高 = `cell`，图片按真实宽高比缩放到行高，放进**最窄的行**；横向滚动。
+    ///   行数取「平均行宽仍能铺满视口宽度」与「塞进视口高度」的较小值，避免小图库被排成窄竖条。
     ///
     /// 宽高缺失（`width/height` 为 `None`）按 1:1 占位；DimsService 回填后布局重排。
     /// 分组头不画（贪心坐标无法对齐行边界，见 `ViewMode` 文档），`groups` 只放一个
     /// 覆盖全量的哑分组让 `group_of`/`groups_in_range` 继续工作。
-    fn build_masonry(photos: &[PhotoRow], width: f32, cell: f32, mode: ViewMode) -> Self {
+    fn build_masonry(
+        photos: &[PhotoRow],
+        viewport_w: f32,
+        viewport_h: f32,
+        cell: f32,
+        mode: ViewMode,
+    ) -> Self {
         let gap = Metrics::CELL_GAP;
         let pad = Metrics::GRID_PAD;
 
@@ -191,6 +245,7 @@ impl GridLayout {
 
         let (total_w, total_h) = match mode {
             ViewMode::MasonryV => {
+                let width = viewport_w;
                 let usable = (width - 2.0 * pad).max(cell);
                 let cols = (((usable + gap) / (cell + gap)).floor() as usize).max(1);
                 let col_w = ((usable - gap * (cols as f32 - 1.0)) / cols as f32).max(cell * 0.5);
@@ -218,29 +273,39 @@ impl GridLayout {
                 (width, bottom + pad)
             }
             ViewMode::MasonryH => {
-                // 行高 = cell，图片按宽高比得宽；放进当前最窄的行；横向滚动。
-                let rows = (((width - 2.0 * pad) / (cell + gap)).floor() as usize).max(1);
-                let row_h = cell;
+                // 图片行高 = cell；文件名带跟在图下方（与纵向瀑布流同一占位），
+                // 否则文件名会画进图片底边里。
+                let img_h = cell;
+                let slot_h = img_h + Metrics::FILENAME_H;
+                let widths: Vec<f32> = photos
+                    .iter()
+                    .map(|row| {
+                        let ratio = match (row.width, row.height) {
+                            (Some(w), Some(h)) if w > 0 && h > 0 => w as f32 / h as f32,
+                            _ => 1.0,
+                        };
+                        (img_h * ratio).clamp(img_h * 0.3, img_h * 8.0)
+                    })
+                    .collect();
+                let total_w: f32 = widths.iter().map(|w| w + gap).sum();
+                let rows = masonry_h_rows(viewport_w, viewport_h, slot_h, total_w);
                 let mut row_x = vec![pad; rows];
-                for row in photos {
-                    let ratio = match (row.width, row.height) {
-                        (Some(w), Some(h)) if w > 0 && h > 0 => w as f32 / h as f32,
-                        _ => 1.0,
-                    };
-                    let w = (row_h * ratio).clamp(row_h * 0.3, row_h * 8.0);
+                for w in widths {
                     let (ri, x) = row_x
                         .iter()
                         .enumerate()
                         .min_by(|a, b| a.1.total_cmp(b.1).then(a.0.cmp(&b.0)))
                         .map(|(i, x)| (i, *x))
                         .unwrap_or((0, pad));
-                    let y = pad + ri as f32 * (row_h + gap);
+                    let y = pad + ri as f32 * (slot_h + gap);
                     positions.push(egui::vec2(x, y));
-                    sizes.push(egui::vec2(w, row_h));
+                    sizes.push(egui::vec2(w, slot_h));
                     row_x[ri] = x + w + gap;
                 }
                 let right = row_x.iter().copied().fold(pad, f32::max);
-                let content_h = pad * 2.0 + rows as f32 * row_h + (rows.saturating_sub(1)) as f32 * gap;
+                let content_h = pad * 2.0
+                    + rows as f32 * slot_h
+                    + (rows.saturating_sub(1)) as f32 * gap;
                 (right + pad, content_h)
             }
             ViewMode::Grid => unreachable!("build_masonry 只处理瀑布流模式"),
@@ -622,6 +687,8 @@ struct LayoutKey {
     headers: bool,
     /// 视图模式（方格 / 纵向瀑布流 / 横向瀑布流）。
     mode: u8,
+    /// 横向瀑布流的视口高度。行数由它和宽度一起决定，高度变了必须重排。
+    cross_bits: u32,
     /// 宽高签名：masonry 的坐标依赖每张图的宽高，DimsService 回填后必须重排。
     /// 把「可见宽高是否为空」折进 8 位签名：任一格从 None → Some 都会换 key。
     /// （比每帧哈希全部宽高便宜得多，且 masonry 重排本来就是切模式/回填时才发生。）
@@ -659,6 +726,7 @@ impl GridCache {
                 cell_px_bits: 0,
                 headers: false,
                 mode: 0,
+                cross_bits: 0,
                 dims_sig: 0,
                 first_id: 0,
                 last_id: 0,
@@ -669,10 +737,13 @@ impl GridCache {
     }
 
     /// 取（必要时算）当前帧的布局。
+    ///
+    /// `cross` 是视口高度，只对横向瀑布流行数有意义。
     pub fn get(
         &mut self,
         photos: &[PhotoRow],
         width: f32,
+        cross: f32,
         cell_px: f32,
         has_headers: bool,
         mode: ViewMode,
@@ -698,6 +769,11 @@ impl GridCache {
             cell_px_bits: cell_px.to_bits(),
             headers: has_headers,
             mode: mode as u8,
+            cross_bits: if mode == ViewMode::MasonryH {
+                cross.to_bits()
+            } else {
+                0
+            },
             dims_sig,
             first_id: photos.first().map(|p| p.id).unwrap_or(0),
             last_id: photos.last().map(|p| p.id).unwrap_or(0),
@@ -725,7 +801,8 @@ impl GridCache {
         }
 
         // ③ 全量重建
-        self.layout = GridLayout::build(photos, width, cell_px, has_headers, mode);
+        self.layout =
+            GridLayout::build_in_viewport(photos, width, cross, cell_px, has_headers, mode);
         self.built = photos.len();
         self.key = key;
         self.ready = true;
@@ -815,16 +892,12 @@ pub fn show(
     // masonry 下不走进图集：瀑布流的格子是变高的，图集 32² 槽装不下。
     let use_atlas = mode == ViewMode::Grid && picasa_core::uses_atlas(cell_px);
     let avail_w = (ui.available_width() - Metrics::SCROLLBAR).max(120.0);
-    // MasonryH 的「内容宽度」是横向滚出来的，布局输入用视口高度决定行数；
-    // 其余模式用可用宽度。
-    let layout_input = if mode == ViewMode::MasonryH {
-        (ui.available_height() - Metrics::SCROLLBAR).max(120.0)
-    } else {
-        avail_w
-    };
+    // 横向瀑布流的行数同时看宽和高：宽决定要铺满，高决定最多能排几行。
+    // 以前把高度当成唯一输入，小图库会被排成贴左的窄竖条，右侧大片空白。
+    let avail_h = (ui.available_height() - Metrics::SCROLLBAR).max(120.0);
     // 每帧「算布局」在 M2 是 5 万张 110 ms 的开销，而输入几乎每帧都一样——
     // 交给 GridCache，滚动时这一行是 0 代价。
-    let layout = grid.get(photos, layout_input, cell_px, has_headers, mode);
+    let layout = grid.get(photos, avail_w, avail_h, cell_px, has_headers, mode);
     let content_w = avail_w;
     // 正在索引的文件夹（含子目录）：这些目录里 `thumb_state == 0` 的格子只画占位，
     // **不要**再向 ThumbService 要一次缩略图（会和索引线程抢同一张图的解码）。
@@ -1707,6 +1780,61 @@ mod tests {
         assert!(r0.width() > r3.width(), "4:3 应比 9:16 宽：{:?} vs {:?}", r0, r3);
         // 内容比视口宽（需要横向滚动）
         assert!(layout.content_w > 400.0, "content_w={}", layout.content_w);
+        assert!(
+            layout.total_h <= 400.0 + 1.0,
+            "横向模式只横滚，内容不能高出视口：total_h={}",
+            layout.total_h
+        );
+    }
+
+    /// B6：小图库在又宽又高的视口里应沿横向铺开，而不是按高度排成贴左的两列。
+    #[test]
+    fn masonry_h_small_library_fills_width() {
+        let mut photos = same_day(9);
+        for p in photos.iter_mut() {
+            p.width = Some(1000);
+            p.height = Some(1000);
+        }
+        let viewport_w = 960.0;
+        let viewport_h = 800.0;
+        let cell = 128.0;
+        let layout = GridLayout::build_in_viewport(
+            &photos,
+            viewport_w,
+            viewport_h,
+            cell,
+            true,
+            ViewMode::MasonryH,
+        );
+        let r0 = layout.thumb_rect(0).unwrap();
+        assert!(
+            (r0.height() - cell - Metrics::FILENAME_H).abs() < 0.5,
+            "图片行高应≈cell（外加文件名带）：{:?}",
+            r0
+        );
+        assert!(
+            layout.content_w >= viewport_w * 0.85,
+            "横向没铺满宽度：content_w={} viewport={viewport_w}",
+            layout.content_w
+        );
+        let y0 = r0.top();
+        for i in 1..9 {
+            let y = layout.thumb_rect(i).unwrap().top();
+            assert!(
+                (y - y0).abs() < 1.0,
+                "9 张正方形应排成一行而不是多列：index {i} y={y} y0={y0}"
+            );
+        }
+        assert!(
+            layout.total_h <= viewport_h + 1.0,
+            "内容高出视口：total_h={}",
+            layout.total_h
+        );
+        assert!(
+            layout.content_w > viewport_w,
+            "content_w={}",
+            layout.content_w
+        );
     }
 
     /// masonry 下宽高回填（None → Some）必须触发布局重排。
@@ -1719,12 +1847,18 @@ mod tests {
             p.height = None;
         }
         let mut cache = GridCache::new();
-        let before = cache.get(&photos, 1000.0, 128.0, true, ViewMode::MasonryV).thumb_rect(0).unwrap();
+        let before = cache
+            .get(&photos, 1000.0, 800.0, 128.0, true, ViewMode::MasonryV)
+            .thumb_rect(0)
+            .unwrap();
         // 回填第 0 张的宽高（很扁的全景图）
         let mut photos2 = photos.clone();
         photos2[0].width = Some(1000);
         photos2[0].height = Some(300);
-        let after = cache.get(&photos2, 1000.0, 128.0, true, ViewMode::MasonryV).thumb_rect(0).unwrap();
+        let after = cache
+            .get(&photos2, 1000.0, 800.0, 128.0, true, ViewMode::MasonryV)
+            .thumb_rect(0)
+            .unwrap();
         assert!(
             (before.height() - after.height()).abs() > 1.0,
             "宽高回填后 masonry 没重排：before={before:?} after={after:?}"

@@ -47,8 +47,9 @@ pub use mgmt::{
     DECODE_TIMEOUT_MS, HISTORY_KEEP, SNAPSHOT_HZ_MAX, STARTUP_VERIFY_DELAY_MS,
     VERIFY_DIR_INTERVAL_MS, ExclusionView, FolderState, IndexEntryState, MgmtSnapshot,
     MgmtTab, OfflineProbe, RootView, SnapshotInput, StorageView, TREE_COUNT_MODE, TaskView,
-    ThumbStorage, TreeCountMode, VerifyPlan, VerifyProgress, anonymize_path, apply_storage,
-    build_snapshot, check_export_dir, collect_storage, default_offline_probe, diag_filename,
+    ThumbStorage, TreeCountMode, VerifyPlan, VerifyProgress, anonymize_path, apply_diag_cache,
+    apply_storage, build_snapshot, check_export_dir, collect_storage, default_offline_probe,
+    diag_filename,
     live_task_views, path_is_offline,
 };
 pub use movematch::{FileMeta, MatchOutcome, MoveMatcher, MoveStats, PhotoKey, head_hash};
@@ -59,8 +60,8 @@ pub use verify::{
 pub use paths::AppPaths;
 pub use watch_mgr::{RootWatchConfig, WatchManager, WatchOut};
 pub use zoom::{
-    CELL_MAX_PX, CELL_MIN_PX, DEFAULT_CELL_PX, SNAP_POINTS, TexTier, ZoomState, snap_to_point,
-    step_log, tier_for, uses_atlas,
+    CELL_MAX_PX, CELL_MIN_PX, DEFAULT_CELL_PX, SNAP_POINTS, TexTier, ZoomState, at_log_bound,
+    snap_to_point, step_log, tier_for, uses_atlas,
 };
 pub use prefs::Preferences;
 pub use scanner::{CoreEvent, IndexService, ScanHandle, spawn_scan, spawn_scan_with_board};
