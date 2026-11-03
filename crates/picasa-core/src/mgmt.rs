@@ -241,6 +241,20 @@ pub fn collect_storage(d: &db::Db, root_ids: &[i64]) -> Result<ThumbStorage> {
     })
 }
 
+/// 把诊断页的 [`db::CacheStats`] 写进快照。
+///
+/// 诊断窗口走 `Db::cache_stats`（文件大小 / `COUNT(*)` / `SUM(LENGTH(data))`）。
+/// 索引「存储与诊断」必须用**同一组数**，不能另起一套会停在 0 的默认值。
+/// 不改 `by_root`：按根分布仍由 [`apply_storage`] 补。
+pub fn apply_diag_cache(snap: &mut MgmtSnapshot, stats: &db::CacheStats, wal_bytes: u64) {
+    snap.storage.db_bytes = stats.db_bytes;
+    snap.storage.wal_bytes = wal_bytes;
+    snap.storage.photo_count = stats.photo_count;
+    snap.storage.thumb_count = stats.thumb_count;
+    snap.storage.thumb_bytes = stats.thumb_bytes;
+    snap.storage.thumb_stats_known = true;
+}
+
 /// 把后台算出的 [`ThumbStorage`] 合并进快照（UI 每帧刷新后调一次即可，开销为零）。
 pub fn apply_storage(snap: &mut MgmtSnapshot, st: &ThumbStorage) {
     snap.storage.thumb_count = st.thumb_count;
@@ -1063,6 +1077,41 @@ mod tests {
         assert_eq!(t.len(), 2, "失败任务为 0 → 那一行省略");
         assert!(t[0].contains("排除项"));
         assert!(t[1].contains("离线"));
+    }
+
+    /// B4：诊断页的 CacheStats 写进存储页后，照片数 / 库大小 / 缩略图字节必须还在，
+    /// 随后的按根合并不能把它们清成 0。
+    #[test]
+    fn diag_cache_survives_storage_merge() {
+        let mut snap = MgmtSnapshot::default();
+        snap.roots = vec![root(7, "/workspace/test-photos", false, false)];
+        let stats = picasa_db::CacheStats {
+            db_bytes: 176 * 1024,
+            photo_count: 9,
+            thumb_count: 9,
+            thumb_bytes: 64 * 1024,
+        };
+        apply_diag_cache(&mut snap, &stats, 0);
+        assert!(snap.storage.thumb_stats_known);
+        assert_eq!(snap.storage.photo_count, 9);
+        assert_eq!(snap.storage.db_bytes, 176 * 1024);
+        assert_eq!(snap.storage.thumb_bytes, 64 * 1024);
+        apply_storage(
+            &mut snap,
+            &ThumbStorage {
+                thumb_count: 9,
+                thumb_bytes: 64 * 1024,
+                by_root: vec![(7, 64 * 1024)],
+            },
+        );
+        assert_eq!(snap.storage.photo_count, 9, "按根合并不能把照片数清零");
+        assert_eq!(snap.storage.db_bytes, 176 * 1024, "按根合并不能把库大小清零");
+        assert_eq!(snap.storage.wal_bytes, 0);
+        assert_eq!(
+            snap.storage.by_root,
+            vec![("/workspace/test-photos".into(), 64 * 1024)]
+        );
+        assert!(snap.storage.thumb_stats_known);
     }
 
     #[test]

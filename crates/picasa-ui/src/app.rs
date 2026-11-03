@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, vec2};
@@ -426,11 +426,25 @@ impl OpenPicasaApp {
 
     /// 收后台线程的缩略图统计（有结果就贴回当前快照）。每帧调，开销是一次 `try_recv`。
     fn poll_thumb_storage(&mut self) {
-        let got = self.thumb_rx.as_ref().and_then(|rx| rx.try_recv().ok());
-        if let Some(st) = got {
-            self.thumb_rx = None;
-            picasa_core::apply_storage(&mut self.mgmt, &st);
-            self.thumb_storage = Some(st);
+        let Some(rx) = self.thumb_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(st) => {
+                self.thumb_rx = None;
+                // 不覆盖诊断同源的库大小 / 照片数（`apply_storage` 只动缩略图字段）。
+                picasa_core::apply_storage(&mut self.mgmt, &st);
+                self.thumb_storage = Some(st);
+            }
+            Err(TryRecvError::Empty) => {}
+            // 后台拿不到锁就退出、又不发结果时，通道会断开。
+            // 以前把断开也当成「还在算」，`thumb_rx` 永远清不掉，「计算中…」就停住了。
+            Err(TryRecvError::Disconnected) => {
+                self.thumb_rx = None;
+                if self.thumb_storage.is_none() {
+                    self.thumb_req_at = None;
+                }
+            }
         }
     }
 
@@ -464,23 +478,42 @@ impl OpenPicasaApp {
             // ⚠️ **每个根一次短锁，算完立刻放**。
             // 整段只拿一次锁的话，实测会连着占用 2.2 s（3 个根），把 UI 自己的库访问
             // 全堵住——那就只是把死机从 UI 线程挪到了后台，照样卡。
-            // 改成逐根取锁后，单次占用降到 ~0.7 s，且用 `try_lock`：
-            // 拿不到就放弃（下一帧会重试），绝不阻塞等待 UI 放锁。
+            // 逐根 `try_lock`，拿不到就等 25ms 再试。一直拿不到就退出且不 `send`，
+            // UI 把断开的通道清掉后再发起，不会把「计算中…」卡死。
             let mut by_root = Vec::with_capacity(root_ids.len());
+            // 守卫不能逃出闭包（生命周期对不上），所以查询在锁内做完再把结果交出来。
+            fn with_db<T>(
+                db: &Arc<std::sync::Mutex<picasa_db::Db>>,
+                f: impl FnOnce(&picasa_db::Db) -> T,
+            ) -> Option<T> {
+                for _ in 0..40 {
+                    match db.try_lock() {
+                        Ok(guard) => return Some(f(&guard)),
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Err(std::sync::TryLockError::Poisoned(p)) => {
+                            return Some(f(&p.into_inner()));
+                        }
+                    }
+                }
+                None
+            }
             for rid in &root_ids {
-                let bytes = match db.try_lock() {
-                    Ok(d) => d
-                        .root_thumb_bytes(std::slice::from_ref(rid))
+                let Some(bytes) = with_db(&db, |d| {
+                    d.root_thumb_bytes(std::slice::from_ref(rid))
                         .ok()
                         .and_then(|m| m.get(rid).copied())
-                        .unwrap_or(0),
-                    Err(_) => return,
+                        .unwrap_or(0)
+                }) else {
+                    return;
                 };
                 by_root.push((*rid, bytes));
             }
-            let (thumb_count, thumb_bytes) = match db.try_lock() {
-                Ok(d) => d.thumb_cache_stats().ok().unwrap_or((0, 0)),
-                Err(_) => return,
+            let Some((thumb_count, thumb_bytes)) = with_db(&db, |d| {
+                d.thumb_cache_stats().ok().unwrap_or((0, 0))
+            }) else {
+                return;
             };
             let _ = tx.send(picasa_core::ThumbStorage {
                 thumb_count,
@@ -495,6 +528,82 @@ impl OpenPicasaApp {
         self.thumb_storage = None;
         self.thumb_req_at = None;
         self.mgmt.storage.thumb_stats_known = false;
+    }
+
+    /// 存储页还是开窗时的全 0 / 「计算中…」，需要用诊断页同一条查询补上。
+    fn storage_needs_diag_sync(&self) -> bool {
+        let s = &self.mgmt.storage;
+        if !s.thumb_stats_known {
+            return true;
+        }
+        // 库里已经有照片，快照却还是默认的 0 字节 + 0 张。
+        self.lib.photos_total > 0 && s.photo_count == 0 && s.db_bytes == 0
+    }
+
+    /// 把「存储与诊断」对齐到诊断页的 [`picasa_db::Db::cache_stats`]。
+    ///
+    /// 管理快照的库大小 / 照片数要等 `refresh_mgmt`，缩略图字节还要再等后台线程。
+    /// 状态栏点「索引」的那一帧窗口已经画出来了，而 egui 没新输入就不会再出一帧，
+    /// 所以全 0 和「计算中…」会停在屏幕上。这里在数字还没对齐时同步读一次诊断用的那条查询。
+    fn ensure_index_storage(&mut self) {
+        if !self.storage_needs_diag_sync() {
+            return;
+        }
+        let Ok(db) = self.lib.db() else {
+            return;
+        };
+        let Ok(stats) = db.cache_stats() else {
+            return;
+        };
+        let wal = db.wal_bytes();
+        // 小库顺手把按根分布也算了（9 张是毫秒级）。大库留给后台线程，避免开窗卡住。
+        let modest = stats.photo_count <= 20_000;
+        let root_rows = if modest {
+            db.root_stats().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let bytes_map = if modest && !root_rows.is_empty() && root_rows.len() <= 8 {
+            let ids: Vec<i64> = root_rows.iter().map(|r| r.id).collect();
+            db.root_thumb_bytes(&ids).unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
+        drop(db);
+
+        picasa_core::apply_diag_cache(&mut self.mgmt, &stats, wal);
+        if bytes_map.is_empty() {
+            let mut st = self.thumb_storage.clone().unwrap_or_default();
+            st.thumb_count = stats.thumb_count;
+            st.thumb_bytes = stats.thumb_bytes;
+            self.thumb_storage = Some(st);
+            return;
+        }
+        let st = picasa_core::ThumbStorage {
+            thumb_count: stats.thumb_count,
+            thumb_bytes: stats.thumb_bytes,
+            by_root: root_rows
+                .iter()
+                .map(|r| (r.id, bytes_map.get(&r.id).copied().unwrap_or(0)))
+                .collect(),
+        };
+        if !self.mgmt.roots.is_empty() {
+            picasa_core::apply_storage(&mut self.mgmt, &st);
+            // apply_storage 不动库大小和照片数；再写一次，跟诊断保持同一组数。
+            picasa_core::apply_diag_cache(&mut self.mgmt, &stats, wal);
+        } else {
+            self.mgmt.storage.by_root = root_rows
+                .iter()
+                .map(|r| {
+                    (
+                        r.path.clone(),
+                        bytes_map.get(&r.id).copied().unwrap_or(0),
+                    )
+                })
+                .collect();
+        }
+        self.thumb_storage = Some(st);
+        self.thumb_req_at = Some(Instant::now());
     }
 
     /// §4.8 启动增量校验：首屏出图之后才启动，然后每帧推进一步。
@@ -1272,16 +1381,12 @@ impl OpenPicasaApp {
             // 条路径）；`⌘1` = 小一档、`⌘2` = 大一档（旧的三刻度点语义
             // 随「缩略图」按钮一起退役）。
             KeyAction::TierSmall => {
-                let next = picasa_core::step_log(self.zoom.cell_px(), -1);
-                self.zoom.drag_to(next, std::time::Instant::now());
-                self.zoom.end_drag(std::time::Instant::now());
-                self.persist_zoom();
+                self.step_zoom(-1);
+                ctx.request_repaint();
             }
             KeyAction::TierLarge => {
-                let next = picasa_core::step_log(self.zoom.cell_px(), 1);
-                self.zoom.drag_to(next, std::time::Instant::now());
-                self.zoom.end_drag(std::time::Instant::now());
-                self.persist_zoom();
+                self.step_zoom(1);
+                ctx.request_repaint();
             }
             KeyAction::ZoomReset => {
                 self.zoom.reset();
@@ -1316,21 +1421,26 @@ impl OpenPicasaApp {
     }
 
     fn apply_viewer_key(&mut self, action: KeyAction, ctx: &egui::Context) {
+        // 翻页 / 退出要改选择集，不能同时借着 viewer。
+        match action {
+            KeyAction::CloseViewer => {
+                self.close_viewer();
+                return;
+            }
+            KeyAction::Next => {
+                self.nudge_viewer(1);
+                return;
+            }
+            KeyAction::Prev => {
+                self.nudge_viewer(-1);
+                return;
+            }
+            _ => {}
+        }
         let Some(v) = self.viewer.as_mut() else {
             return;
         };
         match action {
-            KeyAction::CloseViewer => self.viewer = None,
-            KeyAction::Next => {
-                if v.index + 1 < self.lib.photos.len() {
-                    v.jump_to(v.index + 1);
-                }
-            }
-            KeyAction::Prev => {
-                if v.index > 0 {
-                    v.jump_to(v.index - 1);
-                }
-            }
             KeyAction::ZoomIn => v.zoom_in(),
             KeyAction::ZoomOut => v.zoom_out(),
             KeyAction::ZoomFit => v.zoom = 0.0001, // 下一帧会被 fit 覆盖
@@ -1355,6 +1465,43 @@ impl OpenPicasaApp {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// 对数档走一步。已经在端点时不再写库。
+    fn step_zoom(&mut self, dir: i32) {
+        if picasa_core::at_log_bound(self.zoom.cell_px(), dir) {
+            return;
+        }
+        let next = picasa_core::step_log(self.zoom.cell_px(), dir);
+        let now = std::time::Instant::now();
+        self.zoom.drag_to(next, now);
+        self.zoom.end_drag(now);
+        self.persist_zoom();
+    }
+
+    /// 查看器翻一页，并把网格选中跟到这一张。
+    fn nudge_viewer(&mut self, delta: isize) {
+        let Some(v) = self.viewer.as_ref() else {
+            return;
+        };
+        let next = v.index as isize + delta;
+        if next < 0 || next >= self.lib.photos.len() as isize {
+            return;
+        }
+        let next = next as usize;
+        if let Some(v) = self.viewer.as_mut() {
+            v.jump_to(next);
+        }
+        self.lib.click_select(next, false, false);
+    }
+
+    /// 退出查看器。网格选中改成最后看的那一张（B10）。
+    fn close_viewer(&mut self) {
+        let idx = self.viewer.as_ref().map(|v| v.index);
+        self.viewer = None;
+        if let Some(idx) = idx {
+            self.lib.click_select(idx, false, false);
         }
     }
 
@@ -1435,8 +1582,8 @@ impl OpenPicasaApp {
                         }
                     }
                 };
-                let zoom_min = self.zoom.cell_px() <= picasa_core::CELL_MIN_PX + 0.5;
-                let zoom_max = self.zoom.cell_px() >= picasa_core::CELL_MAX_PX - 0.5;
+                let zoom_min = picasa_core::at_log_bound(self.zoom.cell_px(), -1);
+                let zoom_max = picasa_core::at_log_bound(self.zoom.cell_px(), 1);
                 let out = toolbar::show(
                     ui,
                     &theme,
@@ -1470,18 +1617,14 @@ impl OpenPicasaApp {
                             self.sidebar_visible = !self.sidebar_visible;
                         }
                         TopbarAction::ZoomOut => {
-                            // 对数档缩小（⌘− 同路径）。按钮已是离散动作，
-                            // 不经过「拖动中不换纹理」的结算窗口。
-                            let next = picasa_core::step_log(self.zoom.cell_px(), -1);
-                            self.zoom.drag_to(next, std::time::Instant::now());
-                            self.zoom.end_drag(std::time::Instant::now());
-                            self.persist_zoom();
+                            // 按钮是在本帧开头按「还没步进」的状态画的。
+                            // 不补一帧的话，点到端点后鼠标不动，−/+ 会一直保持可点的颜色。
+                            self.step_zoom(-1);
+                            ctx.request_repaint();
                         }
                         TopbarAction::ZoomIn => {
-                            let next = picasa_core::step_log(self.zoom.cell_px(), 1);
-                            self.zoom.drag_to(next, std::time::Instant::now());
-                            self.zoom.end_drag(std::time::Instant::now());
-                            self.persist_zoom();
+                            self.step_zoom(1);
+                            ctx.request_repaint();
                         }
                         TopbarAction::PickViewMode(mode) => {
                             self.lib.set_view_mode(mode);
@@ -1585,8 +1728,11 @@ impl OpenPicasaApp {
                     // M2.2 §2.6：唯一入口 → 索引管理页（并自动定位到有问题的标签）。
                     // 旧的 `progress.open_panel()` 不再挂在这里——右下角弹框仍然自己出现
                     // （M2-FD-29~36 保留），但**索引按钮**只剩这一个。
+                    // 先刷快照再开窗：这一帧的「存储与诊断」不能拿默认的全 0。
+                    self.refresh_mgmt();
                     self.index_mgr
                         .open_at(&self.mgmt, self.mgmt.failed_task_count);
+                    ctx.request_repaint();
                 }
                 if out.diag_clicked {
                     // 过渡期：旧的「诊断」页仍从这里打开。它不是"忘了删的旧入口"，
@@ -1934,24 +2080,10 @@ impl OpenPicasaApp {
                 ui.ctx().memory(|m| m.focused()).is_none(),
             );
             match action {
-                Some(ViewerAction::Close) => self.viewer = None,
+                Some(ViewerAction::Close) => self.close_viewer(),
                 Some(ViewerAction::Reveal) => self.reveal_selected(),
-                Some(ViewerAction::Next) => {
-                    if let Some(v) = self.viewer.as_mut()
-                        && v.index + 1 < self.lib.photos.len()
-                    {
-                        let next = v.index + 1;
-                        v.jump_to(next);
-                    }
-                }
-                Some(ViewerAction::Prev) => {
-                    if let Some(v) = self.viewer.as_mut()
-                        && v.index > 0
-                    {
-                        let prev = v.index - 1;
-                        v.jump_to(prev);
-                    }
-                }
+                Some(ViewerAction::Next) => self.nudge_viewer(1),
+                Some(ViewerAction::Prev) => self.nudge_viewer(-1),
                 None => {}
             }
             // 记住信息面板的展开状态（F2-09「可折叠记忆」）
@@ -2530,8 +2662,14 @@ impl OpenPicasaApp {
         // `confirm_delete_index` 置真，下一帧才能画出确认框（同帧画不出来——
         // egui 的 Window 是在调用点当帧绘制的）。
         if self.index_mgr.open {
-            // 缩略图占用是慢查询，只在页面开着时、由后台线程算（死机修复的关键）。
+            // 与诊断页对齐库大小 / 照片数 / 缩略图字节。必须在画窗口之前，
+            // 否则这一帧仍是默认的 0 B / 「计算中…」。
+            self.ensure_index_storage();
+            // 缩略图按根分布是慢查询，只在页面开着时、由后台线程算（死机修复的关键）。
             self.request_thumb_storage(false);
+            if self.thumb_rx.is_some() || !self.mgmt.storage.thumb_stats_known {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
             let now = chrono::Utc::now().timestamp();
             let actions = crate::index_mgr::show(
                 &ctx,

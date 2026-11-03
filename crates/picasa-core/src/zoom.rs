@@ -156,6 +156,15 @@ pub fn snap_to_point(cell_px: f32) -> f32 {
     }
 }
 
+/// 对数档是否已经顶到这一侧（再 [`step_log`] 不会变）。
+///
+/// 顶栏 −/+ 的置灰用这个，而不是把当前值跟 22/512 做一次裸比较：
+/// 按钮实际能走到的端点就是 `step_log` 的不动点。
+pub fn at_log_bound(cell_px: f32, dir: i32) -> bool {
+    let cur = cell_px.clamp(CELL_MIN_PX, CELL_MAX_PX);
+    (step_log(cur, dir) - cur).abs() < 0.5
+}
+
 /// 按一个对数档位跳（`⌘+` / `⌘-`）。
 ///
 /// `dir = 1` 往大跳，`dir = -1` 往小跳。已在端点时返回端点本身（不循环）。
@@ -584,6 +593,29 @@ mod tests {
             v = next;
         }
         assert_eq!(v, CELL_MIN_PX, "到底后停在底");
+    }
+
+    #[test]
+    fn at_log_bound_is_only_the_two_ends() {
+        assert!(at_log_bound(CELL_MIN_PX, -1), "最小档 − 应置灰");
+        assert!(!at_log_bound(CELL_MIN_PX, 1), "最小档 + 仍可点");
+        assert!(at_log_bound(CELL_MAX_PX, 1), "最大档 + 应置灰");
+        assert!(!at_log_bound(CELL_MAX_PX, -1), "最大档 − 仍可点");
+        assert!(!at_log_bound(DEFAULT_CELL_PX, 1));
+        assert!(!at_log_bound(DEFAULT_CELL_PX, -1));
+        let mut v = CELL_MIN_PX;
+        assert!(at_log_bound(v, -1));
+        for _ in 0..LOG_STEPS.len() + 2 {
+            let next = step_log(v, 1);
+            if (next - v).abs() < 0.5 {
+                assert!(at_log_bound(v, 1));
+                break;
+            }
+            assert!(!at_log_bound(v, 1), "{v} 还没到顶，+ 不该置灰");
+            assert!(!at_log_bound(next, -1), "{next} 还能再缩小");
+            v = next;
+        }
+        assert_eq!(v, CELL_MAX_PX);
     }
 
     #[test]
