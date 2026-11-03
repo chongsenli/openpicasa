@@ -52,6 +52,8 @@ pub enum TopbarAction {
     ToggleSortDirection,
     /// 打开筛选面板（原「筛选」按钮）
     ToggleFilterMenu,
+    /// 打开或关闭「…」弹出菜单（与排序/筛选同一套开关，不直接进选目录）
+    ToggleMoreMenu,
     /// 「…」菜单里的动作（见 [`more_menu`]）
     More(MoreAction),
     /// 搜索框内容变化
@@ -77,6 +79,8 @@ pub struct TopbarOutput {
     pub sort_button: Option<Rect>,
     /// 筛选按钮的矩形（App 用它定位面板）
     pub filter_button: Option<Rect>,
+    /// 「…」按钮的矩形（App 用它定位弹出菜单）
+    pub more_button: Option<Rect>,
 }
 
 /// 顶栏入参。能拆成小结构体但参数就 8 个，直接列。
@@ -104,6 +108,7 @@ pub fn show(
         actions: Vec::new(),
         sort_button: None,
         filter_button: None,
+        more_button: None,
     };
     let rect = Rect::from_min_size(
         ui.max_rect().left_top(),
@@ -256,9 +261,13 @@ pub fn show(
     rx = filter_r.right() + 4.0;
 
     let more_r = circle_btn(rx, rect);
+    // 只负责开关菜单。真正的「添加文件夹…」在 [`more_menu`] 里，
+    // 不能在这里直接发 `More(AddFolder)`——那样菜单永远打不开，
+    // 空库时用户也到不了选目录。
     if icon_btn(ui, &painter, more_r, Icon::Ellipsis, theme, true, "更多").clicked() {
-        out.actions.push(TopbarAction::More(MoreAction::AddFolder));
+        out.actions.push(TopbarAction::ToggleMoreMenu);
     }
+    out.more_button = Some(more_r);
 
     out
 }

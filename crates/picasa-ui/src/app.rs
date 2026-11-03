@@ -1461,6 +1461,9 @@ impl OpenPicasaApp {
                 if let Some(rect) = out.filter_button {
                     self.filter_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
                 }
+                if let Some(rect) = out.more_button {
+                    self.more_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
+                }
                 for action in out.actions {
                     match action {
                         TopbarAction::ToggleSidebar => {
@@ -1513,6 +1516,13 @@ impl OpenPicasaApp {
                                     .unwrap_or_default();
                             }
                         }
+                        TopbarAction::ToggleMoreMenu => {
+                            // 与排序/筛选同一套：按钮只开关菜单，不直接进选目录。
+                            self.more_menu_open = !self.more_menu_open;
+                            if self.more_menu_open {
+                                self.more_menu_frame = ctx.cumulative_frame_nr();
+                            }
+                        }
                         TopbarAction::ToggleSearchScope => {
                             if let Err(e) = self.lib.set_search_in_current(!self.lib.search_in_current)
                             {
@@ -1525,6 +1535,7 @@ impl OpenPicasaApp {
                             }
                             self.restore_scroll = Some(0.0);
                         }
+                        // 菜单项动作。按钮本身发的是 ToggleMoreMenu，由 draw_overlays 画菜单。
                         TopbarAction::More(more) => {
                             match more {
                                 MoreAction::AddFolder => self.add_folder(),
@@ -1656,6 +1667,7 @@ impl OpenPicasaApp {
                     &snap,
                     &mut self.atlas,
                     self.zoom.cell_px(),
+                    grid::empty_reason(&self.lib.search, self.lib.filter.as_ref()),
                 );
                 drop(db);
 
@@ -2759,8 +2771,12 @@ impl OpenPicasaApp {
             .first()
             .map(|p| p.parent().unwrap_or(p).to_path_buf())
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Pictures")));
-        // 原生 NSOpenPanel：TCC 授权的唯一正规入口（F10-25 / R-3）
+        // 原生 NSOpenPanel：TCC 授权的唯一正规入口（F10-25 / R-3）。
+        // Linux 冒烟走同一条 `rfd` 路径；没选到路径时不能静默返回。
         let Some(dir) = crate::macos::pick_folder(start.as_deref()) else {
+            let (msg, ttl) = crate::macos::pick_folder_none_toast();
+            tracing::info!(msg, "选择文件夹未返回路径");
+            self.lib.toast = Some((msg.to_string(), ttl));
             return;
         };
         self.lib.add_root(&dir);
