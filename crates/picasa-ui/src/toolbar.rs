@@ -26,6 +26,7 @@ pub fn show(
     ui: &mut Ui,
     theme: &crate::theme::Theme,
     _cell_px: f32,
+    breadcrumb: &[(String, Option<i64>)],
     sort: picasa_db::SortSpec,
     _has_selection: bool,
     search: &mut String,
@@ -42,6 +43,7 @@ pub fn show(
     crate::topbar::show(
         ui,
         theme,
+        breadcrumb,
         view_mode,
         sort,
         filter_active,

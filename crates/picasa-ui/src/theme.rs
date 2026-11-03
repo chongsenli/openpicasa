@@ -96,6 +96,12 @@ pub struct Theme {
     pub sidebar_section_text: Color32,
     /// 左栏悬停底色（浅灰）
     pub sidebar_hover: Color32,
+    /// 排布胶囊选中片（§7.2 像素校准：定稿效果图选中态**偏橙**的淡橙圆）
+    pub seg_active_orange: Color32,
+    /// 白圆钮 / 白胶囊的软阴影（毛玻璃观感的来源）
+    pub control_shadow: egui::Shadow,
+    /// 方格缩略图的软阴影（效果图：圆角 + 极淡落影，无描边）
+    pub thumb_shadow: egui::Shadow,
 }
 
 impl Theme {
@@ -159,6 +165,21 @@ impl Theme {
             toolbar_icon: Color32::from_rgb(0x2A, 0x2A, 0x2A),
             sidebar_section_text: Color32::from_rgb(0x8A, 0x8A, 0x8A),
             sidebar_hover: Color32::from_rgb(0xE9, 0xE7, 0xE3),
+            // 量自定稿效果图（openpicasa-3row-final.jpg 选中片采样 ≈ 251,226,213）
+            seg_active_orange: Color32::from_rgb(0xFB, 0xE2, 0xD5),
+            // 阴影很淡：只为把白色控件从白底上「托」出来（毛玻璃感）
+            control_shadow: egui::Shadow {
+                offset: [0, 1],
+                blur: 3,
+                spread: 0,
+                color: Color32::from_black_alpha(36),
+            },
+            thumb_shadow: egui::Shadow {
+                offset: [0, 1],
+                blur: 4,
+                spread: 0,
+                color: Color32::from_black_alpha(30),
+            },
         }
     }
 }
@@ -217,9 +238,12 @@ impl Metrics {
     pub const CELL_SIZES: [f32; 3] = [85.0, 144.0, 200.0];
 
     // ---- M3.1：macOS「照片」风格顶栏（量自参考截图 2400×1440 ÷2）----
-    /// 顶栏总高：截图 104px ÷ 2 ≈ 52。
-    pub const TOPBAR_H: f32 = 52.0;
-    /// 顶栏图标（圆形热区）直径：截图 76px ÷ 2 = 38。
+    /// 顶栏总高：§7 像素校准改双行——上行面包屑、下行工具钮（量自
+    /// openpicasa-3row-final.jpg：面包屑中线 ≈22、按钮中线 ≈73，整条 ≈96）。
+    pub const TOPBAR_H: f32 = 96.0;
+    /// 顶栏上行（红绿灯 + 双语境面包屑）的高度。
+    pub const TOPBAR_LINE1_H: f32 = 40.0;
+    /// 顶栏图标（圆形热区）直径：截图 ≈40（取 38 沿用旧值，视觉重量一致）。
     pub const TOPBAR_ICON_D: f32 = 38.0;
     /// 左栏默认宽度：截图 432px ÷ 2 = 216（连同最小/最大一起放宽）。
     pub const SIDEBAR_DEFAULT_W: f32 = 216.0;
@@ -235,21 +259,23 @@ impl Metrics {
     pub const SEG_H: f32 = 36.0;
     /// −/+ 胶囊高：与分段控件同高。
     pub const ZOOM_PILL_H: f32 = 36.0;
-    /// U-22：单元格间距（水平/垂直同一个值，**不是均分剩余空间**）
-    pub const CELL_GAP: f32 = 10.0;
-    /// U-23：栅格四周留白
-    pub const GRID_PAD: f32 = 12.0;
+    /// U-22：单元格间距（水平/垂直同一个值，**不是均分剩余空间**）。
+    /// 像素校准：量自定稿效果图 —— 相邻缩略图左沿间距 ≈16（旧值 10 偏挤）。
+    pub const CELL_GAP: f32 = 16.0;
+    /// U-23：栅格四周留白。像素校准：侧栏边到首列缩略图 ≈32-38，取 32。
+    pub const GRID_PAD: f32 = 32.0;
     /// U-30：日期分组头高度
     pub const GROUP_HEADER_H: f32 = 26.0;
-    /// U-26：文件名行高（三档都显示，见 `Tier::shows_filename`）
-    pub const FILENAME_H: f32 = 16.0;
+    /// U-26：文件名行高。像素校准：字号提到 12.5 后行高随之 +2。
+    pub const FILENAME_H: f32 = 18.0;
     /// U-26：文件名字号。
     ///
-    /// 11px 对中档（144px 格）偏大——16px 行高里塞 11px 字只剩 5px 余量，
-    /// Windows 上原版 Picasa 的文件名行也明显小于图标下方留白。取 11 是与
-    /// 侧栏行高一致；这里提成常量是为了让「字号」和「行高」能分开调，
-    /// 回填 U-26 时不必再去 grid.rs 里挖魔法数字。
-    pub const FILENAME_FONT_SIZE: f32 = 11.0;
+    /// 像素校准：定稿效果图的文件名明显比旧值 11 大且更深（近黑、≈13px）。
+    /// 取 12.5 兼顾中档格（144px）的行高余量；行高见 [`Self::FILENAME_H`]。
+    pub const FILENAME_FONT_SIZE: f32 = 12.5;
+
+    /// 方格缩略图圆角半径（量自定稿效果图 ≈8）。
+    pub const THUMB_RADIUS: f32 = 8.0;
 
     /// 滚动条宽度（U-20：细滚动条，不占内容宽度）
     pub const SCROLLBAR: f32 = 8.0;

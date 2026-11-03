@@ -1,20 +1,22 @@
-//! M3.1 §7 定稿顶栏：一行**图标工具栏**（不再是「标题栏」）。
+//! M3.1 §7 定稿顶栏：**双行**——上行双语境路径面包屑，下行图标工具栏。
 //!
-//! 布局（从左到右，量值按 52px 栏高收敛）：
+//! 布局（像素校准，量自 `openpicasa-3row-final.jpg`）：
 //!
 //! ```text
 //! ┌──────────────────────────────────────────────────────────────────────────┐
-//! │ ●●●  [侧栏] [导入][幻灯片][编辑]  [方格|纵瀑|横瀑]  [−|+]  [🔍] [⇅][≡][…] │
+//! │ ●●●  图库 / 旅行 / 京都                                        （上行）  │
+//! │                    [侧栏][导入][幻灯片][编辑] [方格|纵瀑|横瀑] [−|+] [🔍] │
+//! │                                              [⇅][≡][…]     （下行右对齐）│
 //! └──────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! 关键约定（`docs/09` §7.2）：
+//! 关键约定（`docs/09` §7.2 + 像素校准）：
 //!
-//! * 顶栏**不含**大号文件夹标题、不含文件树——标题移到中区左侧、树的上方；
-//! * 导入 / 幻灯片 / 编辑是**无文字圆形图标**；
-//! * 排布是**无文字三图标连体胶囊**（方格 / 纵向瀑布 / 横向瀑布），造型与
-//!   `−|+` 胶囊同一套；**不是**「年 / 月 / 所有照片」时间胶囊；
-//! * 搜索紧接在 `+` 之后（图标按钮；点开后原地展开输入框）。
+//! * 上行：红绿灯 + **双语境面包屑**——文件夹语境画「图库 / 祖先… / 当前」
+//!   （祖先段可点击跳转），根语境弱化为单段「图库」；
+//! * 下行按钮**右对齐**（对齐定稿效果图）；白圆钮 / 白胶囊 + 软阴影（毛玻璃观感）；
+//! * 排布是**无文字三图标连体胶囊**，选中片为**淡橙圆**（定稿截图采样）；
+//! * 搜索紧接在 `+` 之后（点开后输入框在上行右侧原地展开，不挤压下行控件）。
 //!
 //! 排序 / 筛选 / 「…」保留为右侧图标组：它们是既有功能，不能在版式重排里丢。
 
@@ -52,6 +54,8 @@ pub enum TopbarAction {
     ToggleMoreMenu,
     /// 「…」菜单里的动作（见 [`more_menu`]）
     More(MoreAction),
+    /// 面包屑祖先段点击：跳到对应文件夹（顶栏自己不碰状态）
+    PickFolder(i64),
     /// 展开/收起顶栏搜索框（搜索按钮紧接在 `+` 之后）
     ToggleSearch,
     /// 搜索框内容变化
@@ -86,6 +90,8 @@ pub struct TopbarOutput {
 pub fn show(
     ui: &mut Ui,
     theme: &Theme,
+    // 双语境面包屑：`(名称, folder_id)`；根段 id 为 None，最后一段是当前语境
+    breadcrumb: &[(String, Option<i64>)],
     // 排布当前值
     view_mode: ViewMode,
     // 排序（按钮上要显示当前排序的语义）
@@ -122,6 +128,13 @@ pub fn show(
         egui::Stroke::new(1.0, theme.toolbar_border),
     );
 
+    // 两行分区：上行 = 红绿灯 + 面包屑；下行 = 图标工具栏（右对齐）。
+    let line1 = Rect::from_min_max(rect.left_top(), pos2(rect.right(), rect.top() + Metrics::TOPBAR_LINE1_H));
+    let line2 = Rect::from_min_max(
+        pos2(rect.left(), rect.top() + Metrics::TOPBAR_LINE1_H),
+        pos2(rect.right(), rect.bottom()),
+    );
+
     // macOS 下红绿灯占左侧约 80pt。非 macOS 或未启用 fullsize content view 时
     // 这段空间是空的，但也无碍——顶栏是自绘的。
     #[cfg(target_os = "macos")]
@@ -129,14 +142,50 @@ pub fn show(
     #[cfg(not(target_os = "macos"))]
     let traffic_w = 8.0;
 
-    let mut x = rect.left() + traffic_w;
+    // ---- 上行：双语境路径面包屑 ----
+    draw_breadcrumb(ui, &painter, line1, theme, breadcrumb, traffic_w, &mut out);
+
+    // ---- 下行：右对齐图标工具栏 ----
+    // 从右往左排：[…] [筛选] [排序] │ [搜索] [−|+] [排布胶囊] [编辑][幻灯片][导入] [侧栏]
+    let d = Metrics::TOPBAR_ICON_D;
+    let margin = 14.0;
+    let bar2_center = line2.center().y;
+    let circle_at = |right_x: f32| -> Rect {
+        Rect::from_center_size(pos2(right_x - d / 2.0, bar2_center), vec2(d, d))
+    };
+
+    let more_r = circle_at(rect.right() - margin);
+    let filter_r = circle_at(more_r.left() - 4.0);
+    let sort_r = circle_at(filter_r.left() - 4.0);
+    out.more_button = Some(more_r);
+    out.filter_button = Some(filter_r);
+    out.sort_button = Some(sort_r);
+
+    // 主组右缘 = 排序按钮左侧留 14
+    let main_right = sort_r.left() - 14.0;
+    let search_r = circle_at(main_right);
+    let zoom_rect = Rect::from_min_size(
+        pos2(main_right - d - 10.0 - 76.0, bar2_center - Metrics::ZOOM_PILL_H / 2.0),
+        vec2(76.0, Metrics::ZOOM_PILL_H),
+    );
+    let layout_w = 3.0 * 34.0;
+    let layout_rect = Rect::from_min_size(
+        pos2(
+            zoom_rect.left() - 10.0 - layout_w,
+            bar2_center - Metrics::ZOOM_PILL_H / 2.0,
+        ),
+        vec2(layout_w, Metrics::ZOOM_PILL_H),
+    );
+    let edit_r = circle_at(layout_rect.left() - 10.0);
+    let slide_r = circle_at(edit_r.left() - 6.0);
+    let import_r = circle_at(slide_r.left() - 6.0);
+    let side_r = circle_at(import_r.left() - 10.0);
 
     // ---- ① 侧栏开关 ----
-    let side_rect = circle_btn(x, rect);
     if icon_btn(
         ui,
         &painter,
-        side_rect,
+        side_r,
         Icon::SidebarToggle,
         theme,
         true,
@@ -146,69 +195,49 @@ pub fn show(
     {
         out.actions.push(TopbarAction::ToggleSidebar);
     }
-    x = side_rect.right() + 8.0;
 
     // ---- ② 导入 / 幻灯片 / 编辑（无文字圆形图标）----
-    let action_btns: &[(Icon, &'static str, Option<TopbarAction>)] = &[
+    let action_btns: &[(Rect, Icon, &'static str, Option<TopbarAction>)] = &[
         (
+            import_r,
             Icon::Import,
             "导入：添加文件夹…",
             Some(TopbarAction::AddFolder),
         ),
         (
+            slide_r,
             Icon::Slideshow,
             "幻灯片（下一版开放）",
             Some(TopbarAction::Placeholder("幻灯片将在下一版开放")),
         ),
         (
+            edit_r,
             Icon::Edit,
             "编辑（下一版开放）",
             Some(TopbarAction::Placeholder("编辑将在下一版开放")),
         ),
     ];
-    for (icon, tip, action) in action_btns {
-        let r = circle_btn(x, rect);
-        if icon_btn(ui, &painter, r, *icon, theme, true, tip).clicked()
+    for (r, icon, tip, action) in action_btns {
+        if icon_btn(ui, &painter, *r, *icon, theme, true, tip).clicked()
             && let Some(action) = action
         {
             out.actions.push(action.clone());
         }
-        x = r.right() + 4.0;
     }
-    x += 10.0;
 
     // ---- ③ 排布：无文字三图标连体胶囊 ----
-    let layout_w = 3.0 * 34.0;
-    let layout_rect = Rect::from_min_size(
-        pos2(x, rect.center().y - Metrics::ZOOM_PILL_H / 2.0),
-        vec2(layout_w, Metrics::ZOOM_PILL_H),
-    );
     draw_layout_pill(ui, &painter, layout_rect, theme, view_mode, &mut out);
-    x = layout_rect.right() + 8.0;
 
     // ---- ④ −/+ 缩放胶囊 ----
-    let zoom_rect = Rect::from_min_size(
-        pos2(x, rect.center().y - Metrics::ZOOM_PILL_H / 2.0),
-        vec2(76.0, Metrics::ZOOM_PILL_H),
-    );
     draw_zoom_pill(ui, &painter, zoom_rect, theme, zoom_min, zoom_max, &mut out);
-    x = zoom_rect.right() + 8.0;
 
-    // ---- ⑤ 右侧图标组（先量出来，给搜索框留位）----
-    let right_group = Rect::from_min_size(
-        pos2(
-            rect.right() - 12.0 - 3.0 * Metrics::TOPBAR_ICON_D - 8.0,
-            rect.top(),
-        ),
-        vec2(3.0 * Metrics::TOPBAR_ICON_D + 8.0, rect.height()),
-    );
-
-    // ---- ⑥ 搜索：紧接在 + 之后 ----
+    // ---- ⑤ 搜索：紧接在 + 之后（展开时输入框画到上行右侧）----
     if search_open {
-        let max_right = right_group.left() - 10.0;
-        let avail = (max_right - x).max(120.0);
-        let w = 190.0_f32.min(avail);
-        let search_rect = Rect::from_min_size(pos2(x, rect.center().y - 15.0), vec2(w, 30.0));
+        let w = 240.0_f32.min((rect.right() - margin - 240.0).max(160.0));
+        let search_rect = Rect::from_min_size(
+            pos2(rect.right() - margin - w, line1.center().y - 15.0),
+            vec2(w, 30.0),
+        );
         draw_search(
             ui,
             &painter,
@@ -218,19 +247,11 @@ pub fn show(
             search_in_current,
             &mut out,
         );
-        x = search_rect.right();
-    } else {
-        let r = circle_btn(x, rect);
-        if icon_btn(ui, &painter, r, Icon::Search, theme, true, "搜索").clicked() {
-            out.actions.push(TopbarAction::ToggleSearch);
-        }
-        x = r.right();
+    } else if icon_btn(ui, &painter, search_r, Icon::Search, theme, true, "搜索").clicked() {
+        out.actions.push(TopbarAction::ToggleSearch);
     }
-    let _ = x;
 
-    // ---- ⑦ 排序 / 筛选 / 更多 ----
-    let mut rx = right_group.left();
-    let sort_r = circle_btn(rx, rect);
+    // ---- ⑥ 排序 / 筛选 / 更多 ----
     let sort_resp = icon_btn(
         ui,
         &painter,
@@ -261,10 +282,7 @@ pub fn show(
     if sort_resp.clicked() {
         out.actions.push(TopbarAction::ToggleSortMenu);
     }
-    out.sort_button = Some(sort_r);
-    rx = sort_r.right() + 4.0;
 
-    let filter_r = circle_btn(rx, rect);
     let f_resp = icon_btn(
         ui,
         &painter,
@@ -278,35 +296,91 @@ pub fn show(
         out.actions.push(TopbarAction::ToggleFilterMenu);
     }
     if filter_active {
-        painter.rect_filled(filter_r, Metrics::TOPBAR_ICON_D / 2.0, theme.seg_active);
+        // 激活态：白圆上压一圈选中色描边（橙色留给排布选中片，不混用）
         painter.rect_stroke(
             filter_r,
-            Metrics::TOPBAR_ICON_D / 2.0,
+            d / 2.0,
             egui::Stroke::new(1.5, theme.selected),
             egui::StrokeKind::Inside,
         );
     }
-    out.filter_button = Some(filter_r);
-    rx = filter_r.right() + 4.0;
 
-    let more_r = circle_btn(rx, rect);
     if icon_btn(ui, &painter, more_r, Icon::Ellipsis, theme, true, "更多").clicked() {
         out.actions.push(TopbarAction::ToggleMoreMenu);
     }
-    out.more_button = Some(more_r);
 
     out
 }
 
-/// 圆形按钮热区：中心在 `x + 半径`，垂直居中。
-fn circle_btn(x: f32, bar: Rect) -> Rect {
-    Rect::from_center_size(
-        pos2(x + Metrics::TOPBAR_ICON_D / 2.0, bar.center().y),
-        vec2(Metrics::TOPBAR_ICON_D, Metrics::TOPBAR_ICON_D),
-    )
+/// 上行双语境路径面包屑（§7.3）。
+///
+/// * 文件夹语境：`图库 / 祖先… / 当前`——根段与分隔符用次级灰，路径段用主色，
+///   祖先段可点击（悬停变选中色 + 手型光标）；
+/// * 根语境：弱化成单段 `图库`（次级灰，不可点）。
+fn draw_breadcrumb(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    line: Rect,
+    theme: &Theme,
+    breadcrumb: &[(String, Option<i64>)],
+    traffic_w: f32,
+    out: &mut TopbarOutput,
+) {
+    let font = FontId::new(12.5, egui::FontFamily::Proportional);
+    let mut x = line.left() + traffic_w + 16.0;
+    let cy = line.center().y;
+    let n = breadcrumb.len();
+    for (i, (name, folder_id)) in breadcrumb.iter().enumerate() {
+        let current = i + 1 == n;
+        let color = if current || folder_id.is_some() {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        };
+        let galley = painter.layout_no_wrap(name.clone(), font.clone(), color);
+        let seg_rect = Rect::from_min_size(pos2(x, cy - 10.0), galley.size());
+        painter.galley(pos2(x, cy - 10.0), galley, color);
+
+        // 祖先段（非当前、有 id）：整段可点
+        if let Some(id) = folder_id
+            && !current
+        {
+            let hot = seg_rect.expand(4.0);
+            let resp = ui.interact(hot, ui.scope_id().with(("crumb", *id)), Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                painter.rect_filled(hot, 6.0, theme.sidebar_hover);
+                let hover_galley =
+                    painter.layout_no_wrap(name.clone(), font.clone(), theme.selected);
+                painter.galley(pos2(x, cy - 10.0), hover_galley, theme.selected);
+            }
+            if resp.clicked() {
+                out.actions.push(TopbarAction::PickFolder(*id));
+            }
+            resp.clone().on_hover_text(format!("转到「{name}」"));
+        }
+
+        x = seg_rect.right() + 6.0;
+        if !current {
+            // 分隔符「/」
+            painter.text(
+                pos2(x, cy),
+                Align2::LEFT_CENTER,
+                "/",
+                font.clone(),
+                theme.text_disabled,
+            );
+            x += painter
+                .layout_no_wrap("/".to_string(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+                + 6.0;
+        }
+    }
 }
 
-/// 圆形图标按钮：悬停浅灰圆底，无文字。
+/// 圆形图标按钮：**常驻白圆底 + 软阴影**（毛玻璃观感，对齐定稿效果图），
+/// 悬停压浅灰。无文字。
 fn icon_btn(
     ui: &mut Ui,
     painter: &egui::Painter,
@@ -322,8 +396,15 @@ fn icon_btn(
         Sense::hover()
     };
     let resp = ui.interact(rect, ui.scope_id().with(("topbar-btn", tooltip)), sense);
+    // 白圆底 + 软阴影：常驻（毛玻璃的「浮起来」感靠阴影，不靠描边）
+    painter.add(theme.control_shadow.as_shape(rect, Metrics::TOPBAR_ICON_D / 2.0));
+    let fill = if enabled && resp.hovered() {
+        theme.sidebar_hover
+    } else {
+        Color32::WHITE
+    };
+    painter.rect_filled(rect, Metrics::TOPBAR_ICON_D / 2.0, fill);
     if enabled && resp.hovered() {
-        painter.rect_filled(rect, Metrics::TOPBAR_ICON_D / 2.0, theme.sidebar_hover);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let color = if enabled {
@@ -339,7 +420,7 @@ fn icon_btn(
     resp
 }
 
-/// −/+ 缩放胶囊：灰白圆角底、中间 1px 竖线，左右两枚可点。
+/// −/+ 缩放胶囊：**白底圆角胶囊 + 软阴影**（毛玻璃）、中间 1px 竖线，左右两枚可点。
 ///
 /// 点击走**对数档**（`picasa_core::step_log`）——与 ⌘+/⌘− 同一条路径；
 /// 到端点后按钮置灰（截图里按钮永远可见，端点行为由置灰表达）。
@@ -352,7 +433,8 @@ fn draw_zoom_pill(
     zoom_max: bool,
     out: &mut TopbarOutput,
 ) {
-    painter.rect_filled(rect, rect.height() / 2.0, theme.seg_bg);
+    painter.add(theme.control_shadow.as_shape(rect, rect.height() / 2.0));
+    painter.rect_filled(rect, rect.height() / 2.0, Color32::WHITE);
     // 中缝竖线
     let mid_x = rect.center().x;
     painter.line_segment(
@@ -420,7 +502,8 @@ fn draw_zoom_pill(
     }
 }
 
-/// 排布胶囊：三枚无文字图标（方格 / 纵向瀑布 / 横向瀑布），造型对齐 −|+。
+/// 排布胶囊：三枚无文字图标（方格 / 纵向瀑布 / 横向瀑布），**白底胶囊 + 软阴影**，
+/// 选中片为**淡橙圆**（定稿效果图采样，`09` §7.2 像素校准）。
 fn draw_layout_pill(
     ui: &mut Ui,
     painter: &egui::Painter,
@@ -429,7 +512,8 @@ fn draw_layout_pill(
     current: ViewMode,
     out: &mut TopbarOutput,
 ) {
-    painter.rect_filled(rect, rect.height() / 2.0, theme.seg_bg);
+    painter.add(theme.control_shadow.as_shape(rect, rect.height() / 2.0));
+    painter.rect_filled(rect, rect.height() / 2.0, Color32::WHITE);
     // 与 −|+ 同款中缝：未选中的两片之间有一条极淡的竖线。
     let w = rect.width() / 3.0;
     for i in 1..3 {
@@ -451,19 +535,10 @@ fn draw_layout_pill(
         );
         let active = *mode == current;
         if active {
-            let radius = if i == 0 || i == modes.len() - 1 {
-                rect.height() / 2.0
-            } else {
-                8.0
-            };
-            painter.rect_filled(piece.shrink(1.5), radius, theme.seg_active);
-            painter.line_segment(
-                [
-                    pos2(piece.left() + 4.0, piece.bottom() - 1.5),
-                    pos2(piece.right() - 4.0, piece.bottom() - 1.5),
-                ],
-                egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 0, 0, 14)),
-            );
+            // 选中态 = 内切淡橙圆（定稿效果图：橙是圆形浮在白胶囊里，不是整片填充）
+            let d = rect.height() - 6.0;
+            let circle = Rect::from_center_size(piece.center(), vec2(d, d));
+            painter.rect_filled(circle, d / 2.0, theme.seg_active_orange);
         }
         let resp = ui.interact(piece, ui.scope_id().with(("layout", label)), Sense::click());
         let color = if active {

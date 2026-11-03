@@ -1100,12 +1100,10 @@ pub fn show(
                 out.need_dims.push(row.id);
             }
 
-            // ---- 单元格背景（U-24：1px 浅灰框，不是投影）----
-            // 方格模式保留白底（contain 留白区靠它衬托）；masonry 图片填满格子，
-            // 白底只会漏出「白色外框」，改用网格背景色。
-            if mode == ViewMode::Grid {
-                painter.rect_filled(rect, 1.0, Color32::WHITE);
-            } else {
+            // ---- 单元格底（像素校准：定稿效果图方格无白框、无描边——
+            // 白底照片的边界由**软阴影 + 圆角**表达；占位格仍走灰底）----
+            // masonry 图片填满格子，行为不变。
+            if mode != ViewMode::Grid {
                 painter.rect_filled(rect, 1.0, theme.grid_bg);
             }
 
@@ -1116,6 +1114,14 @@ pub fn show(
             let failed = row.thumb_state == 2 || row.thumb_state == 3;
             let placeholder =
                 failed || (row.thumb_state == 0 && indexing_folders.contains(&row.folder_id));
+            // 描边目标：方格 = 实际贴图区（Ready 时是 contain 后的 fitted），
+            // masonry = 去掉文件名带的图区。默认 img_rect，Ready 分支里覆写。
+            let mut frame = img_rect;
+            let frame_radius = if mode == ViewMode::Grid {
+                Metrics::THUMB_RADIUS
+            } else {
+                0.0
+            };
             if placeholder {
                 index_progress::draw_placeholder(&painter, img_rect, theme, failed);
             } else if use_atlas {
@@ -1141,12 +1147,32 @@ pub fn show(
                         } else {
                             img_rect
                         };
-                        painter.image(
-                            tex_id,
-                            fitted,
-                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
+                        frame = fitted;
+                        if mode == ViewMode::Grid {
+                            // 像素校准（§7.4 效果图）：软阴影 + **圆角贴图**，
+                            // 不再画 1px 白框。圆角贴图走 RectShape 的 brush
+                            // 纹理通路（epaint 0.37），代替无圆角的 painter.image。
+                            painter
+                                .add(theme.thumb_shadow.as_shape(fitted, Metrics::THUMB_RADIUS));
+                            painter.add(
+                                egui::epaint::RectShape::filled(
+                                    fitted,
+                                    Metrics::THUMB_RADIUS,
+                                    Color32::WHITE,
+                                )
+                                .with_texture(
+                                    tex_id,
+                                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                                ),
+                            );
+                        } else {
+                            painter.image(
+                                tex_id,
+                                fitted,
+                                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
                     }
                     TexState::Pending => {
                         index_progress::draw_placeholder(&painter, rect, theme, false);
@@ -1161,13 +1187,14 @@ pub fn show(
                 // 占位格：**不可点开、不参与选中**、右键不弹依赖缩略图的菜单。
                 // 只留一个普通描边，让"这是图、但还没做好"一眼可辨。
                 painter.rect_stroke(
-                    rect,
-                    1.0,
+                    img_rect,
+                    frame_radius,
                     Stroke::new(1.0, theme.cell_border),
                     StrokeKind::Inside,
                 );
             } else {
                 // ---- 描边：选中 > 当前 > 悬停 > 常态 ----
+                // 像素校准：方格常态**无描边**（阴影已表达边界）；masonry 保留 1px 灰框。
                 let response = interact_cell(ui, rect, row.id, &painter, theme);
                 let hovered = response.hovered();
                 let stroke = if is_sel {
@@ -1176,10 +1203,14 @@ pub fn show(
                     Stroke::new(1.0, theme.selected)
                 } else if hovered {
                     Stroke::new(1.0, theme.selected.gamma_multiply(0.6))
+                } else if mode == ViewMode::Grid {
+                    Stroke::NONE
                 } else {
                     Stroke::new(1.0, theme.cell_border)
                 };
-                painter.rect_stroke(rect, 1.0, stroke, StrokeKind::Inside);
+                if stroke.color != Color32::TRANSPARENT {
+                    painter.rect_stroke(frame, frame_radius, stroke, StrokeKind::Inside);
+                }
 
                 if hovered {
                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -1204,7 +1235,7 @@ pub fn show(
                 }
             }
 
-            // ---- 文件名（U-26：缩略图下方居中、单行、超出省略）----
+            // ---- 文件名（像素校准：定稿效果图 = 居中、近黑、比旧值大一号）----
             if let Some(fr) = layout.filename_rect(index) {
                 let fr = fr.translate(origin.to_vec2());
                 let font = FontId::new(Metrics::FILENAME_FONT_SIZE, egui::FontFamily::Proportional);
@@ -1217,7 +1248,7 @@ pub fn show(
                     Align2::CENTER_CENTER,
                     text,
                     font,
-                    theme.text_secondary,
+                    theme.text_primary,
                 );
             }
         }

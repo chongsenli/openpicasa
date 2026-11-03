@@ -14,6 +14,7 @@ use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, vec2};
 use picasa_core::thumbs::JobKind;
 use picasa_core::{
     AppPaths, CoreEvent, DimsService, IndexBoard, IndexService, Library, ThumbJob, ThumbService,
+    View,
 };
 use picasa_db::{PhotoRow, SortKey};
 
@@ -108,8 +109,11 @@ pub struct OpenPicasaApp {
     /// 只在重载后重算，避免每帧扫一遍已加载照片。
     view_header_title: String,
     view_header_subtitle: String,
+    /// 顶栏双语境路径面包屑（§7.3；`Library::view_breadcrumb` 的缓存）
+    view_breadcrumb: Vec<(String, Option<i64>)>,
     /// 生成上面两行时的输入签名；不同才重算（避免每帧扫照片算日期跨度）。
-    view_header_key: Option<(String, usize, usize, i64, i64)>,
+    /// 尾部的面包屑末段 id 参与签名：不同文件夹同名时也能触发重算。
+    view_header_key: Option<(String, usize, usize, i64, i64, Option<i64>)>,
     tray_expanded: bool,
     favorites_collapsed: bool,
     folders_collapsed: bool,
@@ -281,6 +285,7 @@ impl OpenPicasaApp {
             grid_show_filename: true,
             view_header_title: String::new(),
             view_header_subtitle: String::new(),
+            view_breadcrumb: Vec::new(),
             view_header_key: None,
             tray_expanded: false,
             favorites_collapsed: false,
@@ -1216,16 +1221,19 @@ impl OpenPicasaApp {
     /// 分页首屏是用户当下最关心的一段，且不额外查库（数据层零新增）。
     fn refresh_view_header(&mut self) {
         let title = self.lib.view_title();
+        let breadcrumb = self.lib.view_breadcrumb();
         let total = self.lib.photos_total.max(self.lib.photos.len());
         let len = self.lib.photos.len();
         let first = self.lib.photos.first().map(|p| p.id).unwrap_or(0);
         let last = self.lib.photos.last().map(|p| p.id).unwrap_or(0);
-        let key = (title.clone(), total, len, first, last);
+        let crumb_tail = breadcrumb.last().and_then(|(_, id)| *id);
+        let key = (title.clone(), total, len, first, last, crumb_tail);
         if self.view_header_key.as_ref() == Some(&key) {
             return;
         }
         self.view_header_key = Some(key);
         self.view_header_title = title;
+        self.view_breadcrumb = breadcrumb;
         self.view_header_subtitle = match photo_date_span(&self.lib.photos) {
             Some(span) => format!("{total} 张 · {span}"),
             None => format!("{total} 张"),
@@ -1606,6 +1614,7 @@ impl OpenPicasaApp {
                     ui,
                     &theme,
                     self.zoom.cell_px(),
+                    &self.view_breadcrumb,
                     self.lib.sort,
                     !self.lib.selection.is_empty(),
                     &mut self.search_buf,
@@ -1632,6 +1641,15 @@ impl OpenPicasaApp {
                     match action {
                         TopbarAction::ToggleSidebar => {
                             self.sidebar_visible = !self.sidebar_visible;
+                        }
+                        TopbarAction::PickFolder(id) => {
+                            // 面包屑祖先段点击：跳到该文件夹（与左栏点击同一条路径）
+                            if let Err(e) = self.lib.set_view(View::Folder(id)) {
+                                tracing::warn!(error = %e, "面包屑跳转失败");
+                            }
+                            self.restore_scroll = Some(0.0);
+                            self.viewer = None;
+                            ctx.request_repaint();
                         }
                         TopbarAction::AddFolder => self.add_folder(),
                         TopbarAction::Placeholder(text) => {
@@ -3068,7 +3086,12 @@ impl eframe::App for OpenPicasaApp {
         // M3.1：macOS 上把红绿灯嵌进自绘顶栏（与 `with_fullsize_content_view`
         // 配套）。AppKit 每次窗口布局都会重置按钮位置，所以**每帧**都要调；
         // 其他平台此调用是空操作。
-        frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, Metrics::TOPBAR_H), 14.0);
+        // 双行顶栏：红绿灯与面包屑同在上行（§7 像素校准）。
+        frame.set_traffic_lights_position(
+            &ctx,
+            egui::Rangef::new(0.0, Metrics::TOPBAR_LINE1_H),
+            14.0,
+        );
 
         self.pump_events(&ctx);
         // M3：监视器同步（幂等，只在根集合真的变了时才装/卸）
