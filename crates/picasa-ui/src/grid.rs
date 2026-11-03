@@ -787,6 +787,8 @@ pub fn show(
     atlas: &mut crate::atlas::ThumbAtlas,
     // 当前格宽（逻辑 px）——由滑块决定，用来判断走不走图集
     cell_px: f32,
+    // 空列表时怎么写：图库是空的，还是搜索/筛选没有命中
+    empty: EmptyReason,
 ) -> GridOutput {
     let mut out = GridOutput {
         clicked: None,
@@ -803,7 +805,7 @@ pub fn show(
     ui.painter().rect_filled(full, 0.0, theme.grid_bg);
 
     if photos.is_empty() {
-        draw_empty_state(ui, full, theme, cache);
+        draw_empty_state(ui, full, theme, cache, empty);
         return out;
     }
 
@@ -1246,20 +1248,64 @@ fn pump_atlas_from_db(
     done
 }
 
-fn draw_empty_state(ui: &mut Ui, full: Rect, theme: &Theme, cache: &mut TextureCache) {
+/// 栅格没有照片时该说什么。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmptyReason {
+    /// 没有搜索、也没有筛选：图库本身是空的。
+    Library,
+    /// 搜索或筛选把结果收成了空。不要引导去添加文件夹。
+    NoMatches,
+}
+
+/// 当前列表是不是被搜索或筛选收窄过。
+///
+/// 默认的 [`picasa_db::PhotoFilter`]（全空）不算筛选——那只是「没设条件」。
+pub fn empty_reason(search: &str, filter: Option<&picasa_db::PhotoFilter>) -> EmptyReason {
+    let searching = !search.trim().is_empty();
+    let filtering = filter.is_some_and(|f| f != &picasa_db::PhotoFilter::default());
+    if searching || filtering {
+        EmptyReason::NoMatches
+    } else {
+        EmptyReason::Library
+    }
+}
+
+/// 空图库第二行。M3.1 起工具栏上的「添加文件夹」按钮已移除，
+/// 入口是顶栏「…」→「添加文件夹…」（与左栏空态同一条路径）。
+const EMPTY_GRID_HINT: &str =
+    "点顶栏「…」→「添加文件夹…」，选一个放照片的目录（只读，不改你的文件）";
+
+const NO_MATCH_TITLE: &str = "没有符合条件的照片";
+const NO_MATCH_HINT: &str = "当前搜索或筛选没有结果";
+
+fn empty_grid_lines(reason: EmptyReason) -> (&'static str, &'static str) {
+    match reason {
+        EmptyReason::Library => ("这里还没有照片", EMPTY_GRID_HINT),
+        EmptyReason::NoMatches => (NO_MATCH_TITLE, NO_MATCH_HINT),
+    }
+}
+
+fn draw_empty_state(
+    ui: &mut Ui,
+    full: Rect,
+    theme: &Theme,
+    cache: &mut TextureCache,
+    reason: EmptyReason,
+) {
     let _ = cache;
+    let (title, hint) = empty_grid_lines(reason);
     let painter = ui.painter_at(full);
     painter.text(
         pos2(full.center().x, full.center().y - 18.0),
         Align2::CENTER_CENTER,
-        "这里还没有照片",
+        title,
         FontId::new(15.0, egui::FontFamily::Proportional),
         theme.text_secondary,
     );
     painter.text(
         pos2(full.center().x, full.center().y + 6.0),
         Align2::CENTER_CENTER,
-        "点上方「添加文件夹」，选一个放照片的目录（我们只读，不改你的文件）",
+        hint,
         FontId::new(12.0, egui::FontFamily::Proportional),
         theme.text_secondary.gamma_multiply(0.85),
     );
@@ -1368,6 +1414,38 @@ mod tests {
         (1..=n as i64)
             .map(|i| photo(i, 1_300_000_000 + i))
             .collect()
+    }
+
+    #[test]
+    fn empty_grid_hint_points_at_more_menu_not_removed_toolbar_button() {
+        let (title, hint) = empty_grid_lines(EmptyReason::Library);
+        assert_eq!(title, "这里还没有照片");
+        assert!(hint.contains("顶栏"));
+        assert!(hint.contains("「…」"));
+        assert!(hint.contains("添加文件夹…"));
+        assert!(!hint.contains("点上方"));
+    }
+
+    #[test]
+    fn search_or_filter_with_no_hits_does_not_ask_to_add_a_folder() {
+        assert_eq!(empty_reason("", None), EmptyReason::Library);
+        assert_eq!(empty_reason("   ", None), EmptyReason::Library);
+        assert_eq!(empty_reason("cat", None), EmptyReason::NoMatches);
+
+        let untouched = picasa_db::PhotoFilter::default();
+        assert_eq!(empty_reason("", Some(&untouched)), EmptyReason::Library);
+        let starred = picasa_db::PhotoFilter {
+            starred_only: true,
+            ..picasa_db::PhotoFilter::default()
+        };
+        assert_eq!(empty_reason("", Some(&starred)), EmptyReason::NoMatches);
+        assert_eq!(empty_reason("cat", Some(&starred)), EmptyReason::NoMatches);
+
+        let (title, hint) = empty_grid_lines(EmptyReason::NoMatches);
+        assert!(title.contains("没有"));
+        assert!(!title.contains("添加文件夹"));
+        assert!(!hint.contains("添加文件夹"));
+        assert!(!hint.contains("点上方"));
     }
 
     #[test]
