@@ -83,6 +83,16 @@ pub struct Db {
     has_starred_col: bool,
 }
 
+/// `photos_filtered` 与 `count_photos_filtered` 共用的 WHERE 形态。
+enum FilterWhere {
+    /// 没有筛选条件，走无筛选查询。
+    Inactive,
+    /// 条件恒假（例如格式 slug 一个都认不出）。
+    Empty,
+    /// 含前导空格的 ` WHERE ...`。
+    Sql(String),
+}
+
 impl Db {
     /// 打开（或创建）索引库并跑迁移。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -1412,32 +1422,70 @@ impl Db {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<PhotoRow>> {
-        let is_empty = filter.taken_range.is_none()
-            && filter.formats.is_empty()
-            && filter.size_class.is_none()
-            && !filter.starred_only
-            && filter.tag.is_none();
-        if is_empty {
-            return self.photos_from_visible(folder_ids, sort, limit, offset);
-        }
+        let where_sql = match self.filter_where(folder_ids, filter) {
+            FilterWhere::Inactive => {
+                return self.photos_from_visible(folder_ids, sort, limit, offset);
+            }
+            // 未知格式名：条件恒假，返回空（防拼出非法 SQL）
+            FilterWhere::Empty => return Ok(Vec::new()),
+            FilterWhere::Sql(sql) => sql,
+        };
 
         let mut sql = format!(
-            "SELECT {} FROM photos p JOIN folders f ON f.id = p.folder_id",
-            self.photo_cols()
+            "SELECT {} FROM photos p JOIN folders f ON f.id = p.folder_id{where_sql}",
+            self.photo_cols(),
         );
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&sort.order_by(self.eff_col()));
+        sql.push_str(&format!(" LIMIT {limit}"));
+        if offset > 0 {
+            sql.push_str(&format!(" OFFSET {offset}"));
+        }
+
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], map_photo)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 与 [`Db::photos_filtered`] **同一套 WHERE** 的行数。
+    ///
+    /// 栅格标题用这个数，不能用「可见全库」的 `count_photos_visible`：
+    /// 两者不一致时，首屏虽然是筛过的，分页补齐却会按无筛选的 OFFSET
+    /// 把其余照片再拼进来。
+    pub fn count_photos_filtered(
+        &self,
+        folder_ids: Option<&[i64]>,
+        filter: &PhotoFilter,
+    ) -> Result<u64> {
+        match self.filter_where(folder_ids, filter) {
+            FilterWhere::Inactive => self.count_photos_visible(folder_ids),
+            FilterWhere::Empty => Ok(0),
+            FilterWhere::Sql(where_sql) => {
+                let sql = format!(
+                    "SELECT COUNT(*) FROM photos p JOIN folders f ON f.id = p.folder_id{where_sql}"
+                );
+                let n: i64 = self.conn.query_row(&sql, [], |r| r.get(0))?;
+                Ok(n.max(0) as u64)
+            }
+        }
+    }
+
+    /// 筛选 WHERE（含前导空格与 `WHERE`）。`photos_filtered` 与计数共用，避免两套条件漂开。
+    fn filter_where(&self, folder_ids: Option<&[i64]>, filter: &PhotoFilter) -> FilterWhere {
+        if !filter.is_active() {
+            return FilterWhere::Inactive;
+        }
         let mut where_sql = self.build_scope(folder_ids, true).unwrap_or_default();
         if !where_sql.contains("WHERE") {
             where_sql.push_str(" WHERE 1=1");
         }
         if let Some((from, to)) = filter.taken_range {
             // 走「有效拍摄时间」（缺失回退 mtime），与排序同口径
-            where_sql.push_str(&format!(
-                " AND {} BETWEEN {from} AND {to}",
-                self.eff_col()
-            ));
+            where_sql.push_str(&format!(" AND {} BETWEEN {from} AND {to}", self.eff_col()));
         }
         if !filter.formats.is_empty() {
-            // 格式名 → 数字编码。RAW 家族合并不进单个数字，用 IN 列表。
+            // 格式名 → 数字编码。UI 的 slug 是 `jpeg` 不是扩展名 `jpg`；
+            // 库里存的是 `photos.format` 的整数（JPEG = 1），两边在 `from_slug` 汇合。
             let codes: Vec<i64> = filter
                 .formats
                 .iter()
@@ -1445,8 +1493,7 @@ impl Db {
                 .map(|pf| pf as i64)
                 .collect();
             if codes.is_empty() {
-                // 未知格式名：条件恒假，返回空（防拼出非法 SQL）
-                return Ok(Vec::new());
+                return FilterWhere::Empty;
             }
             let list = codes.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",");
             where_sql.push_str(&format!(" AND p.format IN ({list})"));
@@ -1463,17 +1510,7 @@ impl Db {
                 sql_text_literal(tag)
             ));
         }
-        sql.push_str(&where_sql);
-        sql.push_str(" ORDER BY ");
-        sql.push_str(&sort.order_by(self.eff_col()));
-        sql.push_str(&format!(" LIMIT {limit}"));
-        if offset > 0 {
-            sql.push_str(&format!(" OFFSET {offset}"));
-        }
-
-        let mut st = self.conn.prepare(&sql)?;
-        let rows = st.query_map([], map_photo)?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        FilterWhere::Sql(where_sql)
     }
 
     /// 拼 `WHERE` 子句（含前导 ` WHERE `）。返回 `None` 表示不加条件（物理全库）。
