@@ -1330,6 +1330,44 @@ impl Library {
         }
     }
 
+    /// 顶栏双语境路径面包屑（`09` §7.3）。
+    ///
+    /// * 文件夹语境：`图库` + 各级祖先名 + 当前文件夹名。除根段外每段都带
+    ///   `folder_id`（祖先可点击跳转；根段只是语境前缀，不可点）。
+    /// * 根语境（所有照片 / 最近更改）：按 §7.3「弱化面包屑」收敛成单段
+    ///   `图库`——语境由左栏标题区表达，顶栏不再重复视图名。
+    ///
+    /// 纯树遍历命名逻辑，不查库、不加数据层能力。
+    pub fn view_breadcrumb(&self) -> Vec<(String, Option<i64>)> {
+        let root_crumb = ("图库".to_string(), None);
+        let View::Folder(id) = self.view else {
+            return vec![root_crumb];
+        };
+        let Some(node) = self.node_by_id(id) else {
+            return vec![root_crumb];
+        };
+        let mut crumbs = vec![root_crumb];
+        let target = node.path.as_str();
+        // 从各根往下按「target 是否在该子树内」逐级下钻，天然得到祖先链。
+        fn walk(nodes: &[FolderNode], target: &str, out: &mut Vec<(String, Option<i64>)>) {
+            for n in nodes {
+                if target == n.path || is_descendant(target, &n.path) {
+                    out.push((n.name.clone(), n.folder_id));
+                    if target != n.path {
+                        walk(&n.children, target, out);
+                    }
+                    return;
+                }
+            }
+        }
+        walk(&self.roots, target, &mut crumbs);
+        // 兜底：树里居然没走到（理论不可达，防御树重建中间态）——至少显示当前文件夹名。
+        if crumbs.len() < 2 || crumbs.last().and_then(|(_, id)| *id) != node.folder_id {
+            crumbs.push((node.name.clone(), node.folder_id));
+        }
+        crumbs
+    }
+
     pub fn photo_at(&self, index: usize) -> Option<&PhotoRow> {
         self.photos.get(index)
     }
