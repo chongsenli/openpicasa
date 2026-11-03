@@ -575,8 +575,29 @@ fn storage_tab(
     row(ui, theme, "照片", &format!("{} 张", s.photo_count));
 
     section(ui, theme, "按根目录分布");
-    for (path, bytes) in &s.by_root {
-        row(ui, theme, path, &human_bytes(*bytes));
+    if s.by_root.is_empty() {
+        // B4′：统计还没回来时也不能给一块空白。用快照里已有的根先占行，
+        // 值明确写「计算中…」，算完后由 `apply_storage` 换成真实字节数。
+        if snap.roots.is_empty() {
+            ui.label(
+                RichText::new("还没有关注文件夹")
+                    .size(11.0)
+                    .color(theme.text_secondary),
+            );
+        } else {
+            for r in &snap.roots {
+                let value = if s.thumb_stats_known {
+                    human_bytes(r.thumb_bytes)
+                } else {
+                    "计算中…".to_string()
+                };
+                row(ui, theme, &r.path, &value);
+            }
+        }
+    } else {
+        for (path, bytes) in &s.by_root {
+            row(ui, theme, path, &human_bytes(*bytes));
+        }
     }
 
     section(ui, theme, "操作");

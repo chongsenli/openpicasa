@@ -1,20 +1,20 @@
-//! 左栏：macOS「照片」风格的侧栏（M3.1 重绘）。
+//! 左栏：中区左侧的「标题 + A 样式文件树」（M3.1 §7 定稿）。
 //!
 //! ## 保留的功能（与 M4 版一致，条目一个不少）
 //!
 //! * 「图库」组：所有照片 / 最近更改 / 星标（→ 只看收藏筛选）
 //! * 时间轴：按拍摄年份筛选（数据来自 `timeline_years`）
-//! * 「文件夹」组：真实目录树（拟物图标换为线性图标，与截图风格一致）
+//! * 「文件夹」组：真实目录树
 //! * 底部照片托盘（收起 / 展开行为不变）
 //!
-//! ## 与旧版的差异（全部是**观感**，不是功能）
+//! ## §7 版式（覆盖 M3.1 早期的 Photos 大行高侧栏）
 //!
-//! | 旧（Picasa XP 风） | 新（macOS 照片风） |
+//! | 项 | 现值 |
 //! | --- | --- |
-//! | 组头渐变白盒 + 绿色折叠钮 | 灰色小字分组标题（"图库"/"文件夹"） |
-//! | 行高 22px、拟物文件夹图标 | 行高 36px、线性描边图标 |
-//! | 选中行钢青蓝 #83A7BD | 选中行浅灰胶囊 + 深字（截图样式） |
-//! | 白底 | 左栏底 #F5F4F2（截图半透灰的实色近似） |
+//! | 标题区 | 文件夹名小标题 + `N 张 · 拍摄日期跨度`，在树**之上** |
+//! | 文件树 | 仿方案 A：文件夹图标、树线、26px 密行高 |
+//! | 选中行 | 浅灰胶囊 + 深字 |
+//! | 左栏底 | #F5F4F2 |
 //!
 //! 截图里的条目（精选集 / 固定 / 相簿列表 / 最近删除等）在本应用**没有对应
 //! 功能**，按用户拍板（2026-11-03）不放假条目：功能集合不变，只是重绘。
@@ -62,9 +62,24 @@ pub struct SidebarCtx<'a> {
     pub snapshot: &'a IndexSnapshot,
 }
 
-pub fn show(ui: &mut Ui, lib: &Library, ctx: &mut SidebarCtx<'_>) -> Vec<SidebarAction> {
+pub fn show(
+    ui: &mut Ui,
+    lib: &Library,
+    ctx: &mut SidebarCtx<'_>,
+    title: &str,
+    subtitle: &str,
+) -> Vec<SidebarAction> {
     let mut actions = Vec::new();
     let theme = *ctx.theme;
+
+    // §7.1/§7.3：中区左侧 = 小标题 + 副标题，**其下**才是文件树。
+    // 标题区属于中区左栏（不通栏），因此放在侧栏面板内部的最上方。
+    egui::Panel::top("sidebar-header")
+        .exact_size(Metrics::SIDEBAR_HEADER_H)
+        .frame(egui::Frame::new().fill(theme.sidebar_bg))
+        .show(ui, |ui| {
+            header(ui, &theme, title, subtitle);
+        });
 
     // 托盘在底部（先占位，保证不被上面内容挤出去）
     egui::Panel::bottom("tray-panel")
@@ -105,13 +120,35 @@ pub fn show(ui: &mut Ui, lib: &Library, ctx: &mut SidebarCtx<'_>) -> Vec<Sidebar
     actions
 }
 
+/// 中区左侧标题：当前文件夹名（正文偏大一档）+ 张数·拍摄日期跨度。
+fn header(ui: &mut Ui, theme: &Theme, title: &str, subtitle: &str) {
+    let rect = ui.max_rect();
+    let painter = ui.painter_at(rect);
+    painter.text(
+        pos2(rect.left() + 16.0, rect.center().y - 9.0),
+        Align2::LEFT_CENTER,
+        title,
+        FontId::new(15.0, egui::FontFamily::Proportional),
+        theme.text_primary,
+    );
+    painter.text(
+        pos2(rect.left() + 16.0, rect.center().y + 10.0),
+        Align2::LEFT_CENTER,
+        subtitle,
+        FontId::new(11.0, egui::FontFamily::Proportional),
+        theme.text_secondary,
+    );
+    painter.line_segment(
+        [
+            pos2(rect.left() + 12.0, rect.bottom() - 0.5),
+            pos2(rect.right() - 8.0, rect.bottom() - 0.5),
+        ],
+        Stroke::new(1.0, theme.toolbar_border),
+    );
+}
+
 /// 分组标题：灰色小字（截图的「相簿」样式），整行可点 = 折叠。
-fn section_title(
-    ui: &mut Ui,
-    title: &str,
-    collapsed: bool,
-    actions: &mut Vec<SidebarAction>,
-) {
+fn section_title(ui: &mut Ui, title: &str, collapsed: bool, actions: &mut Vec<SidebarAction>) {
     let (rect, resp) = ui.allocate_exact_size(
         vec2(ui.available_width(), Metrics::SIDEBAR_SECTION_H),
         Sense::click(),
@@ -126,13 +163,14 @@ fn section_title(
         color,
     );
     // 折叠指示：右端小箭头（截图分组默认展开、悬停才现箭头；这里常显更可用）
-    let chev = Rect::from_center_size(
-        pos2(rect.right() - 14.0, rect.center().y),
-        vec2(9.0, 9.0),
-    );
+    let chev = Rect::from_center_size(pos2(rect.right() - 14.0, rect.center().y), vec2(9.0, 9.0));
     icons::draw(
         &painter,
-        if collapsed { Icon::ChevronRight } else { Icon::ChevronDown },
+        if collapsed {
+            Icon::ChevronRight
+        } else {
+            Icon::ChevronDown
+        },
         chev,
         color.gamma_multiply(0.8),
         1.2,
@@ -182,7 +220,16 @@ fn favorites(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut Vec
     // （2026-11-02 实测：启动首帧 hang 127 s，主线程与 op-index 互锁——
     // 与 `app.rs` new() 里 `enqueue_retry` 那条教训是同一类错误）。
     let count = ctx.db.starred_ids().ok().map(|v| v.len() as u64);
-    let row = fav_row(ui, &t, "星标", count, Icon::Heart, starred_on, true, ctx.has_focus);
+    let row = fav_row(
+        ui,
+        &t,
+        "星标",
+        count,
+        Icon::Heart,
+        starred_on,
+        true,
+        ctx.has_focus,
+    );
     if row.clicked() {
         actions.push(SidebarAction::ToggleStarredFilter);
     }
@@ -199,11 +246,21 @@ fn favorites(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut Vec
         // `lib.timeline_years()`——它内部会 `self.db()` 重入拿锁 = 死锁。
         if let Ok(years) = ctx.db.timeline_years() {
             for (year, n) in years.iter().take(12) {
-                let active = lib.filter.as_ref().is_some_and(|f| {
-                    f.taken_range == Some(year_range(*year))
-                });
+                let active = lib
+                    .filter
+                    .as_ref()
+                    .is_some_and(|f| f.taken_range == Some(year_range(*year)));
                 let label = format!("{year}");
-                let row = fav_row(ui, &t, &label, Some(*n as u64), Icon::Album, active, true, ctx.has_focus);
+                let row = fav_row(
+                    ui,
+                    &t,
+                    &label,
+                    Some(*n as u64),
+                    Icon::Album,
+                    active,
+                    true,
+                    ctx.has_focus,
+                );
                 if row.clicked() {
                     if active {
                         actions.push(SidebarAction::TimelineYear(0)); // 0 = 清除
@@ -236,28 +293,29 @@ fn fav_row(
     _has_focus: bool,
 ) -> egui::Response {
     let row_h = Metrics::SIDEBAR_ROW_H;
-    let (rect, resp) =
-        ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
     let painter = ui.painter_at(rect);
     // 内容区留 6px 左右边距，让选中胶囊不顶满整行（截图样式）
     let pill = rect.shrink2(vec2(6.0, 1.0));
     let icon_color = theme.toolbar_icon;
     if active {
-        painter.rect_filled(pill, 8.0, theme.sidebar_hover);
+        painter.rect_filled(pill, 6.0, theme.sidebar_hover);
     } else if resp.hovered() && enabled {
-        painter.rect_filled(pill, 8.0, theme.sidebar_hover.gamma_multiply(0.6));
+        painter.rect_filled(pill, 6.0, theme.sidebar_hover.gamma_multiply(0.6));
     }
-    let text_color = if enabled { theme.text_primary } else { theme.text_disabled };
-    let icon_rect = Rect::from_center_size(
-        pos2(rect.left() + 24.0, rect.center().y),
-        vec2(17.0, 17.0),
-    );
+    let text_color = if enabled {
+        theme.text_primary
+    } else {
+        theme.text_disabled
+    };
+    let icon_rect =
+        Rect::from_center_size(pos2(rect.left() + 22.0, rect.center().y), vec2(16.0, 16.0));
     icons::draw(&painter, icon, icon_rect, icon_color, 1.3);
     painter.text(
-        pos2(rect.left() + 44.0, rect.center().y),
+        pos2(rect.left() + 40.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        FontId::new(13.0, egui::FontFamily::Proportional),
+        FontId::new(12.5, egui::FontFamily::Proportional),
         text_color,
     );
     if let Some(n) = count {
@@ -309,21 +367,42 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
 
                 // 内容胶囊（与 fav_row 同款留边）
                 let pill = rect.shrink2(vec2(6.0, 1.0));
-                let indent = 6.0 + row.depth as f32 * Metrics::SIDEBAR_INDENT;
+                let indent = 8.0 + row.depth as f32 * Metrics::SIDEBAR_INDENT;
                 if active {
-                    painter.rect_filled(pill, 8.0, t.sidebar_hover);
+                    painter.rect_filled(pill, 6.0, t.sidebar_hover);
                 } else if resp.hovered() {
-                    painter.rect_filled(pill, 8.0, t.sidebar_hover.gamma_multiply(0.6));
+                    painter.rect_filled(pill, 6.0, t.sidebar_hover.gamma_multiply(0.6));
                 }
 
-                // 图标槽：所有行的图标都从 `indent + 28` 起（有折叠箭头的行，
+                // A 样式树线：每个祖先层级一条细竖线，当前行用一段短横线接到折叠箭头/图标槽。
+                let guide = t.separator.gamma_multiply(0.55);
+                for d in 0..row.depth {
+                    let gx = rect.left() + 8.0 + d as f32 * Metrics::SIDEBAR_INDENT + 7.0;
+                    painter.line_segment(
+                        [pos2(gx, rect.top()), pos2(gx, rect.bottom())],
+                        Stroke::new(1.0, guide),
+                    );
+                }
+                if row.depth > 0 {
+                    let gx =
+                        rect.left() + 8.0 + (row.depth - 1) as f32 * Metrics::SIDEBAR_INDENT + 7.0;
+                    painter.line_segment(
+                        [
+                            pos2(gx, rect.center().y),
+                            pos2(rect.left() + indent + 7.0, rect.center().y),
+                        ],
+                        Stroke::new(1.0, guide),
+                    );
+                }
+
+                // 图标槽：所有行的图标都从 `indent + 24` 起（有折叠箭头的行，
                 // 箭头占用前面的槽）——保证父子行的图标**垂直对齐**。
-                let icon_x = rect.left() + indent + 28.0;
+                let icon_x = rect.left() + indent + 24.0;
                 // 折叠箭头（有子目录才出现）
                 if row.has_children {
                     let chev = Rect::from_center_size(
-                        pos2(rect.left() + indent + 12.0, rect.center().y),
-                        vec2(10.0, 10.0),
+                        pos2(rect.left() + indent + 7.0, rect.center().y),
+                        vec2(9.0, 9.0),
                     );
                     icons::draw(
                         &painter,
@@ -334,11 +413,11 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
                         },
                         chev,
                         t.text_secondary,
-                        1.3,
+                        1.2,
                     );
                     // 箭头是可点的：窄区域，避免误触「选中」
                     let chev_rect = Rect::from_center_size(
-                        pos2(rect.left() + indent + 12.0, rect.center().y),
+                        pos2(rect.left() + indent + 7.0, rect.center().y),
                         vec2(14.0, row_h),
                     );
                     let chev_resp = ui.interact(
@@ -352,18 +431,18 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
                     }
                 }
 
-                // 线性文件夹图标（macOS 风格；拟物图标随 XP 工具行一起退役）
+                // 线性文件夹图标（A 样式：描边文件夹 + 树线）
                 let icon_rect =
-                    Rect::from_center_size(pos2(icon_x, rect.center().y), vec2(17.0, 15.0));
+                    Rect::from_center_size(pos2(icon_x, rect.center().y), vec2(16.0, 14.0));
                 draw_folder_icon_line(&painter, icon_rect, t.toolbar_icon);
 
-                // 文字与图标间距：图标右沿 + 8
-                let text_x = icon_x + 17.0 + 8.0;
+                // 文字与图标间距：图标右沿 + 7
+                let text_x = icon_x + 16.0 + 7.0;
                 painter.text(
                     pos2(text_x, rect.center().y),
                     Align2::LEFT_CENTER,
                     &row.name,
-                    FontId::new(13.0, egui::FontFamily::Proportional),
+                    FontId::new(12.5, egui::FontFamily::Proportional),
                     t.text_primary,
                 );
                 // 计数右对齐、灰色；为 0 不显示
@@ -430,8 +509,14 @@ fn draw_folder_icon_line(painter: &egui::Painter, rect: Rect, color: Color32) {
         vec![
             pos2(rect.left(), rect.top() + rect.height() * 0.22),
             pos2(rect.left(), rect.top() + rect.height() * 0.06),
-            pos2(rect.left() + rect.width() * 0.34, rect.top() + rect.height() * 0.06),
-            pos2(rect.left() + rect.width() * 0.44, rect.top() + rect.height() * 0.22),
+            pos2(
+                rect.left() + rect.width() * 0.34,
+                rect.top() + rect.height() * 0.06,
+            ),
+            pos2(
+                rect.left() + rect.width() * 0.44,
+                rect.top() + rect.height() * 0.22,
+            ),
         ],
         egui::epaint::PathStroke::new(1.2, color),
     );

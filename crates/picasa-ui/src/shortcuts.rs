@@ -37,6 +37,8 @@ pub enum KeyAction {
     ToggleRecurse,
     /// `⌘0`：缩略图滑块回默认刻度（`07-A` ZOOM-03）
     ZoomReset,
+    /// `⌘F`：展开并聚焦顶栏搜索（§7.2 搜索紧接在 + 之后）
+    FocusSearch,
 }
 
 /// 收集本帧的按键。`in_viewer` 决定用哪一套映射。
@@ -89,6 +91,10 @@ pub fn collect(ctx: &Context, in_viewer: bool) -> Vec<KeyAction> {
             }
             if cmd && i.key_pressed(Key::Minus) {
                 out.push(KeyAction::TierSmall);
+            }
+            // `⌘F`：展开顶栏搜索框并聚焦（M3.1 既有快捷键，§7 版式下仍适用）
+            if cmd && i.key_pressed(Key::F) {
+                out.push(KeyAction::FocusSearch);
             }
             // `⌘⇧R`：包含子文件夹（`07-A` RECURSE-01）。
             // 用 `shift` 而不是另设 `⌘R`——后者在不少应用里是「刷新」，

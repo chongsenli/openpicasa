@@ -1083,8 +1083,10 @@ mod tests {
     /// 随后的按根合并不能把它们清成 0。
     #[test]
     fn diag_cache_survives_storage_merge() {
-        let mut snap = MgmtSnapshot::default();
-        snap.roots = vec![root(7, "/workspace/test-photos", false, false)];
+        let mut snap = MgmtSnapshot {
+            roots: vec![root(7, "/workspace/test-photos", false, false)],
+            ..Default::default()
+        };
         let stats = picasa_db::CacheStats {
             db_bytes: 176 * 1024,
             photo_count: 9,

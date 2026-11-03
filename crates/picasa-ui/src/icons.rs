@@ -72,6 +72,19 @@ pub enum Icon {
     Video,
     /// 人物头像圆（左栏「人物」）
     Person,
+    // ---- M3.1 §7：首页工具栏（导入 / 幻灯片 / 编辑 / 三种排布）----
+    /// 导入（托盘 + 向下箭头）
+    Import,
+    /// 幻灯片（播放三角）
+    Slideshow,
+    /// 编辑（铅笔）
+    Edit,
+    /// 排布：方格
+    LayoutGrid,
+    /// 排布：纵向瀑布流
+    LayoutMasonryV,
+    /// 排布：横向瀑布流
+    LayoutMasonryH,
 }
 
 /// 在 `rect` 内绘制图标。线条宽度按 `stroke` 缩放（Retina 下自动变细）。
@@ -185,7 +198,13 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
             let c = rect.center();
             painter.circle_stroke(c, rect.width() * 0.4, s);
             painter.line_segment([c, pos2(c.x, c.y - rect.height() * 0.24)], s);
-            painter.line_segment([c, pos2(c.x + rect.width() * 0.18, c.y + rect.height() * 0.08)], s);
+            painter.line_segment(
+                [
+                    c,
+                    pos2(c.x + rect.width() * 0.18, c.y + rect.height() * 0.08),
+                ],
+                s,
+            );
         }
         Icon::Close => {
             painter.line_segment([ip(0.15, 0.15), ip(0.85, 0.85)], s);
@@ -236,19 +255,46 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
         // 排序：上箭头 + 下箭头并列
         Icon::SortArrows => {
             // 上箭头（左列）
-            painter.line_segment([ip(0.32, 0.85), ip(0.32, 0.15)], Stroke::new(stroke * 1.3, color));
-            painter.line_segment([ip(0.32, 0.15), ip(0.14, 0.36)], Stroke::new(stroke * 1.3, color));
-            painter.line_segment([ip(0.32, 0.15), ip(0.5, 0.36)], Stroke::new(stroke * 1.3, color));
+            painter.line_segment(
+                [ip(0.32, 0.85), ip(0.32, 0.15)],
+                Stroke::new(stroke * 1.3, color),
+            );
+            painter.line_segment(
+                [ip(0.32, 0.15), ip(0.14, 0.36)],
+                Stroke::new(stroke * 1.3, color),
+            );
+            painter.line_segment(
+                [ip(0.32, 0.15), ip(0.5, 0.36)],
+                Stroke::new(stroke * 1.3, color),
+            );
             // 下箭头（右列）
-            painter.line_segment([ip(0.68, 0.15), ip(0.68, 0.85)], Stroke::new(stroke * 1.3, color));
-            painter.line_segment([ip(0.68, 0.85), ip(0.5, 0.64)], Stroke::new(stroke * 1.3, color));
-            painter.line_segment([ip(0.68, 0.85), ip(0.86, 0.64)], Stroke::new(stroke * 1.3, color));
+            painter.line_segment(
+                [ip(0.68, 0.15), ip(0.68, 0.85)],
+                Stroke::new(stroke * 1.3, color),
+            );
+            painter.line_segment(
+                [ip(0.68, 0.85), ip(0.5, 0.64)],
+                Stroke::new(stroke * 1.3, color),
+            );
+            painter.line_segment(
+                [ip(0.68, 0.85), ip(0.86, 0.64)],
+                Stroke::new(stroke * 1.3, color),
+            );
         }
         // 列表：三横线，第二行短（截图样式）
         Icon::ListLines => {
-            painter.line_segment([ip(0.1, 0.28), ip(0.9, 0.28)], Stroke::new(stroke * 1.4, color));
-            painter.line_segment([ip(0.1, 0.5), ip(0.9, 0.5)], Stroke::new(stroke * 1.4, color));
-            painter.line_segment([ip(0.1, 0.72), ip(0.62, 0.72)], Stroke::new(stroke * 1.4, color));
+            painter.line_segment(
+                [ip(0.1, 0.28), ip(0.9, 0.28)],
+                Stroke::new(stroke * 1.4, color),
+            );
+            painter.line_segment(
+                [ip(0.1, 0.5), ip(0.9, 0.5)],
+                Stroke::new(stroke * 1.4, color),
+            );
+            painter.line_segment(
+                [ip(0.1, 0.72), ip(0.62, 0.72)],
+                Stroke::new(stroke * 1.4, color),
+            );
         }
         // 省略号：三个点
         Icon::Ellipsis => {
@@ -259,12 +305,30 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
         }
         // 分享：方框 + 从中缝向上的箭头
         Icon::Share => {
-            painter.line_segment([ip(0.22, 0.42), ip(0.22, 0.9)], Stroke::new(stroke * 1.2, color));
-            painter.line_segment([ip(0.22, 0.9), ip(0.78, 0.9)], Stroke::new(stroke * 1.2, color));
-            painter.line_segment([ip(0.78, 0.9), ip(0.78, 0.42)], Stroke::new(stroke * 1.2, color));
-            painter.line_segment([ip(0.5, 0.08), ip(0.5, 0.62)], Stroke::new(stroke * 1.2, color));
-            painter.line_segment([ip(0.5, 0.08), ip(0.32, 0.26)], Stroke::new(stroke * 1.2, color));
-            painter.line_segment([ip(0.5, 0.08), ip(0.68, 0.26)], Stroke::new(stroke * 1.2, color));
+            painter.line_segment(
+                [ip(0.22, 0.42), ip(0.22, 0.9)],
+                Stroke::new(stroke * 1.2, color),
+            );
+            painter.line_segment(
+                [ip(0.22, 0.9), ip(0.78, 0.9)],
+                Stroke::new(stroke * 1.2, color),
+            );
+            painter.line_segment(
+                [ip(0.78, 0.9), ip(0.78, 0.42)],
+                Stroke::new(stroke * 1.2, color),
+            );
+            painter.line_segment(
+                [ip(0.5, 0.08), ip(0.5, 0.62)],
+                Stroke::new(stroke * 1.2, color),
+            );
+            painter.line_segment(
+                [ip(0.5, 0.08), ip(0.32, 0.26)],
+                Stroke::new(stroke * 1.2, color),
+            );
+            painter.line_segment(
+                [ip(0.5, 0.08), ip(0.68, 0.26)],
+                Stroke::new(stroke * 1.2, color),
+            );
         }
         // 心形：两段贝塞尔近似（egui 无贝塞尔，用三点二次近似）
         Icon::Heart => {
@@ -281,13 +345,34 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
         }
         // 相簿/书本：打开的书（两页）
         Icon::Album => {
-            painter.line_segment([ip(0.5, 0.2), ip(0.5, 0.82)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.5, 0.24), ip(0.12, 0.18)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.12, 0.18), ip(0.12, 0.78)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.12, 0.78), ip(0.5, 0.82)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.5, 0.24), ip(0.88, 0.18)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.88, 0.18), ip(0.88, 0.78)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.88, 0.78), ip(0.5, 0.82)], Stroke::new(stroke * 1.1, color));
+            painter.line_segment(
+                [ip(0.5, 0.2), ip(0.5, 0.82)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.5, 0.24), ip(0.12, 0.18)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.12, 0.18), ip(0.12, 0.78)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.12, 0.78), ip(0.5, 0.82)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.5, 0.24), ip(0.88, 0.18)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.88, 0.18), ip(0.88, 0.78)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.88, 0.78), ip(0.5, 0.82)],
+                Stroke::new(stroke * 1.1, color),
+            );
         }
         // 照片堆叠：两张错开的圆角矩形
         Icon::PhotoStack => {
@@ -306,16 +391,46 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
         }
         // 地图：折页三折
         Icon::Map => {
-            painter.line_segment([ip(0.08, 0.22), ip(0.36, 0.12)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.36, 0.12), ip(0.64, 0.22)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.64, 0.22), ip(0.92, 0.12)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.08, 0.22), ip(0.08, 0.86)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.08, 0.86), ip(0.36, 0.76)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.36, 0.76), ip(0.36, 0.12)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.36, 0.76), ip(0.64, 0.86)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.64, 0.86), ip(0.64, 0.22)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.64, 0.86), ip(0.92, 0.76)], Stroke::new(stroke * 1.1, color));
-            painter.line_segment([ip(0.92, 0.76), ip(0.92, 0.12)], Stroke::new(stroke * 1.1, color));
+            painter.line_segment(
+                [ip(0.08, 0.22), ip(0.36, 0.12)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.36, 0.12), ip(0.64, 0.22)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.64, 0.22), ip(0.92, 0.12)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.08, 0.22), ip(0.08, 0.86)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.08, 0.86), ip(0.36, 0.76)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.36, 0.76), ip(0.36, 0.12)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.36, 0.76), ip(0.64, 0.86)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.64, 0.86), ip(0.64, 0.22)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.64, 0.86), ip(0.92, 0.76)],
+                Stroke::new(stroke * 1.1, color),
+            );
+            painter.line_segment(
+                [ip(0.92, 0.76), ip(0.92, 0.12)],
+                Stroke::new(stroke * 1.1, color),
+            );
         }
         // 摄像机：圆角矩形 + 右侧三角镜头
         Icon::Video => {
@@ -326,27 +441,113 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
                 StrokeKind::Middle,
             );
             painter.add(Shape::convex_polygon(
-                vec![ip(0.68, 0.42), ip(0.94, 0.26), ip(0.94, 0.78), ip(0.68, 0.6)],
+                vec![
+                    ip(0.68, 0.42),
+                    ip(0.94, 0.26),
+                    ip(0.94, 0.78),
+                    ip(0.68, 0.6),
+                ],
                 Stroke::NONE.color,
                 Stroke::NONE,
             ));
             painter.add(Shape::line(
-                vec![ip(0.68, 0.42), ip(0.94, 0.26), ip(0.94, 0.78), ip(0.68, 0.6)],
+                vec![
+                    ip(0.68, 0.42),
+                    ip(0.94, 0.26),
+                    ip(0.94, 0.78),
+                    ip(0.68, 0.6),
+                ],
                 egui::epaint::PathStroke::new(stroke * 1.1, color),
             ));
         }
         // 人物：头圆 + 肩弧
         Icon::Person => {
-            painter.circle_stroke(ip(0.5, 0.32), rect.width() * 0.17, Stroke::new(stroke * 1.2, color));
+            painter.circle_stroke(
+                ip(0.5, 0.32),
+                rect.width() * 0.17,
+                Stroke::new(stroke * 1.2, color),
+            );
             painter.line_segment(
                 [ip(0.14, 0.92), ip(0.14, 0.84)],
                 Stroke::new(stroke * 1.2, color),
             );
             // 肩：一条弧线近似（三段折线 + 圆头）
             painter.add(Shape::line(
-                vec![ip(0.14, 0.9), ip(0.24, 0.62), ip(0.5, 0.56), ip(0.76, 0.62), ip(0.86, 0.9)],
+                vec![
+                    ip(0.14, 0.9),
+                    ip(0.24, 0.62),
+                    ip(0.5, 0.56),
+                    ip(0.76, 0.62),
+                    ip(0.86, 0.9),
+                ],
                 egui::epaint::PathStroke::new(stroke * 1.2, color),
             ));
+        }
+        // ---- M3.1 §7：首页工具栏 ----
+        // 导入：托盘开口 + 向下箭头（“放进图库”）
+        Icon::Import => {
+            let s2 = Stroke::new(stroke * 1.2, color);
+            painter.line_segment([ip(0.1, 0.62), ip(0.1, 0.9)], s2);
+            painter.line_segment([ip(0.1, 0.9), ip(0.9, 0.9)], s2);
+            painter.line_segment([ip(0.9, 0.9), ip(0.9, 0.62)], s2);
+            painter.line_segment([ip(0.5, 0.08), ip(0.5, 0.66)], s2);
+            painter.line_segment([ip(0.5, 0.66), ip(0.3, 0.46)], s2);
+            painter.line_segment([ip(0.5, 0.66), ip(0.7, 0.46)], s2);
+        }
+        // 幻灯片：圆角屏幕 + 播放三角
+        Icon::Slideshow => {
+            painter.rect_stroke(
+                Rect::from_min_max(ip(0.06, 0.18), ip(0.94, 0.82)),
+                2.0,
+                Stroke::new(stroke * 1.2, color),
+                StrokeKind::Middle,
+            );
+            painter.add(Shape::convex_polygon(
+                vec![ip(0.42, 0.36), ip(0.42, 0.64), ip(0.68, 0.5)],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        // 编辑：铅笔（斜杆 + 笔尖）
+        Icon::Edit => {
+            let s2 = Stroke::new(stroke * 1.2, color);
+            painter.line_segment([ip(0.18, 0.82), ip(0.72, 0.28)], s2);
+            painter.line_segment([ip(0.72, 0.28), ip(0.84, 0.4)], s2);
+            painter.line_segment([ip(0.84, 0.4), ip(0.3, 0.94)], s2);
+            painter.line_segment([ip(0.3, 0.94), ip(0.18, 0.82)], s2);
+            painter.line_segment([ip(0.18, 0.82), ip(0.3, 0.94)], s2);
+        }
+        // 排布：方格（2×2 圆角方块）
+        Icon::LayoutGrid => {
+            for (x, y) in [(0.08, 0.08), (0.55, 0.08), (0.08, 0.55), (0.55, 0.55)] {
+                painter.rect_filled(
+                    Rect::from_min_max(ip(x, y), ip(x + 0.37, y + 0.37)),
+                    1.5,
+                    color,
+                );
+            }
+        }
+        // 排布：纵向瀑布流（三列高低错落）
+        Icon::LayoutMasonryV => {
+            let col_w = 0.2;
+            for (x, top, bottom) in [(0.08, 0.08, 0.62), (0.40, 0.08, 0.92), (0.72, 0.08, 0.42)] {
+                painter.rect_filled(
+                    Rect::from_min_max(ip(x, top), ip(x + col_w, bottom)),
+                    1.5,
+                    color,
+                );
+            }
+        }
+        // 排布：横向瀑布流（三行宽窄错落）
+        Icon::LayoutMasonryH => {
+            let row_h = 0.2;
+            for (x, top, right) in [(0.08, 0.08, 0.62), (0.08, 0.40, 0.92), (0.08, 0.72, 0.42)] {
+                painter.rect_filled(
+                    Rect::from_min_max(ip(x, top), ip(right, top + row_h)),
+                    1.5,
+                    color,
+                );
+            }
         }
     }
 }

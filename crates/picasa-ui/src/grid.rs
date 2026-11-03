@@ -28,8 +28,8 @@ use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Rect, Response, ScrollArea, Sense, Stroke,
     StrokeKind, Ui, Vec2, pos2, vec2,
 };
-use picasa_core::{IndexSnapshot, ThumbJob, ThumbService, ViewMode, library};
 use picasa_core::thumbs::JobKind;
+use picasa_core::{IndexSnapshot, ThumbJob, ThumbService, ViewMode, library};
 use picasa_db::{Db, PhotoRow};
 
 use crate::icons::{self, Icon};
@@ -140,6 +140,28 @@ impl GridLayout {
         has_headers: bool,
         mode: ViewMode,
     ) -> Self {
+        Self::build_in_viewport_opts(
+            photos,
+            viewport_w,
+            viewport_h,
+            cell_px,
+            has_headers,
+            mode,
+            true,
+        )
+    }
+
+    /// 与 [`Self::build_in_viewport`] 相同，但方格模式可以关掉文件名行
+    /// （§7.4「显示文件名」可选项）。瀑布流保持既有行为。
+    pub fn build_in_viewport_opts(
+        photos: &[PhotoRow],
+        viewport_w: f32,
+        viewport_h: f32,
+        cell_px: f32,
+        has_headers: bool,
+        mode: ViewMode,
+        show_filename: bool,
+    ) -> Self {
         // masonry 下 `cell_px` 语义变为「目标列宽/行高基准」，下限拉到可读的最小值，
         // 避免拖到 22px 时几千列/行直接卡死。
         let cell = if mode == ViewMode::Grid {
@@ -147,18 +169,17 @@ impl GridLayout {
         } else {
             cell_px.max(MASONRY_MIN_CELL)
         };
-        // 连续模式下文件名始终显示（产品定义：三档都显示文件名，文件名是辨认主线索）。
-        // masonry 的图片高度由宽高比决定，文件名行跟在每张图下方（不占统一行高）。
-        let show_filename = true;
+        // 方格文件名是 §7.4 的可选项；瀑布流仍显示（宽高比布局的既有占位）。
+        let show_filename = show_filename && mode == ViewMode::Grid;
         let cell_h = cell
-            + if show_filename && mode == ViewMode::Grid {
+            + if show_filename {
                 Metrics::FILENAME_H
             } else {
                 0.0
             };
 
         let mut layout = if mode == ViewMode::Grid {
-            Self::build_grid(photos, viewport_w, cell, cell_h, has_headers)
+            Self::build_grid(photos, viewport_w, cell, cell_h, has_headers, show_filename)
         } else {
             Self::build_masonry(photos, viewport_w, viewport_h, cell, mode)
         };
@@ -167,7 +188,14 @@ impl GridLayout {
     }
 
     /// 默认等宽等高方格布局（原 `build` 主体）。
-    fn build_grid(photos: &[PhotoRow], width: f32, cell: f32, cell_h: f32, has_headers: bool) -> Self {
+    fn build_grid(
+        photos: &[PhotoRow],
+        width: f32,
+        cell: f32,
+        cell_h: f32,
+        has_headers: bool,
+        show_filename: bool,
+    ) -> Self {
         let gap = Metrics::CELL_GAP;
         let pad = Metrics::GRID_PAD;
 
@@ -212,7 +240,7 @@ impl GridLayout {
             groups,
             total_h,
             content_w: width,
-            show_filename: true,
+            show_filename,
             has_headers,
             mode: ViewMode::Grid,
             masonry: Vec::new(),
@@ -255,8 +283,7 @@ impl GridLayout {
                         (Some(w), Some(h)) if w > 0 && h > 0 => w as f32 / h as f32,
                         _ => 1.0,
                     };
-                    let h = (col_w / ratio).clamp(cell * 0.3, col_w * 4.0)
-                        + Metrics::FILENAME_H; // 文件名行跟在图下方，占位防重叠
+                    let h = (col_w / ratio).clamp(cell * 0.3, col_w * 4.0) + Metrics::FILENAME_H; // 文件名行跟在图下方，占位防重叠
                     // 最矮列贪心放置
                     let (ci, y) = col_y
                         .iter()
@@ -303,9 +330,8 @@ impl GridLayout {
                     row_x[ri] = x + w + gap;
                 }
                 let right = row_x.iter().copied().fold(pad, f32::max);
-                let content_h = pad * 2.0
-                    + rows as f32 * slot_h
-                    + (rows.saturating_sub(1)) as f32 * gap;
+                let content_h =
+                    pad * 2.0 + rows as f32 * slot_h + (rows.saturating_sub(1)) as f32 * gap;
                 (right + pad, content_h)
             }
             ViewMode::Grid => unreachable!("build_masonry 只处理瀑布流模式"),
@@ -573,9 +599,17 @@ impl GridLayout {
             let start = bi * MASONRY_BUCKET;
             let end = (start + MASONRY_BUCKET).min(n);
             for i in start..end {
-                let Some(size) = self.masonry.get(i) else { break };
-                let Some(p) = self.masonry_pos.get(i) else { break };
-                let (a, b) = if vertical { (p.y, p.y + size.y) } else { (p.x, p.x + size.x) };
+                let Some(size) = self.masonry.get(i) else {
+                    break;
+                };
+                let Some(p) = self.masonry_pos.get(i) else {
+                    break;
+                };
+                let (a, b) = if vertical {
+                    (p.y, p.y + size.y)
+                } else {
+                    (p.x, p.x + size.x)
+                };
                 if b >= vlo && a <= vhi {
                     first = first.min(i);
                     last = last.max(i + 1);
@@ -687,6 +721,9 @@ struct LayoutKey {
     headers: bool,
     /// 视图模式（方格 / 纵向瀑布流 / 横向瀑布流）。
     mode: u8,
+    /// 方格模式是否显示文件名（§7.4 可选项）。切换时必须全量重排：
+    /// 文件名行是否占高会改变每行高度。
+    show_filename: bool,
     /// 横向瀑布流的视口高度。行数由它和宽度一起决定，高度变了必须重排。
     cross_bits: u32,
     /// 宽高签名：masonry 的坐标依赖每张图的宽高，DimsService 回填后必须重排。
@@ -726,6 +763,7 @@ impl GridCache {
                 cell_px_bits: 0,
                 headers: false,
                 mode: 0,
+                show_filename: true,
                 cross_bits: 0,
                 dims_sig: 0,
                 first_id: 0,
@@ -748,6 +786,23 @@ impl GridCache {
         has_headers: bool,
         mode: ViewMode,
     ) -> &GridLayout {
+        self.get_with_filename(photos, width, cross, cell_px, has_headers, mode, true)
+    }
+
+    /// 同 [`Self::get`]，但可关闭方格文件名行（§7.4）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_with_filename(
+        &mut self,
+        photos: &[PhotoRow],
+        width: f32,
+        cross: f32,
+        cell_px: f32,
+        has_headers: bool,
+        mode: ViewMode,
+        show_filename: bool,
+    ) -> &GridLayout {
+        // 瀑布流始终显示文件名（布局器内部处理），这里只让方格开关参与缓存键。
+        let show_filename = show_filename && mode == ViewMode::Grid;
         // masonry 坐标依赖宽高：把「可见宽高是否为空」折成签名。
         // 增量回填一张图（None → Some）就换签名 → 全量重排一次（回填是低频事件）。
         let dims_sig = if mode == ViewMode::Grid {
@@ -769,6 +824,7 @@ impl GridCache {
             cell_px_bits: cell_px.to_bits(),
             headers: has_headers,
             mode: mode as u8,
+            show_filename,
             cross_bits: if mode == ViewMode::MasonryH {
                 cross.to_bits()
             } else {
@@ -790,6 +846,7 @@ impl GridCache {
                 && key.width_bits == self.key.width_bits
                 && key.cell_px_bits == self.key.cell_px_bits
                 && key.headers == self.key.headers
+                && key.show_filename == self.key.show_filename
                 && key.first_id == self.key.first_id
                 && photos.len() > self.built;
             if prefix_same {
@@ -801,8 +858,15 @@ impl GridCache {
         }
 
         // ③ 全量重建
-        self.layout =
-            GridLayout::build_in_viewport(photos, width, cross, cell_px, has_headers, mode);
+        self.layout = GridLayout::build_in_viewport_opts(
+            photos,
+            width,
+            cross,
+            cell_px,
+            has_headers,
+            mode,
+            show_filename,
+        );
         self.built = photos.len();
         self.key = key;
         self.ready = true;
@@ -864,6 +928,8 @@ pub fn show(
     atlas: &mut crate::atlas::ThumbAtlas,
     // 当前格宽（逻辑 px）——由滑块决定，用来判断走不走图集
     cell_px: f32,
+    // 方格模式是否显示文件名（§7.4；瀑布流不受此开关影响）
+    show_filename: bool,
     // 空列表时怎么写：图库是空的，还是搜索/筛选没有命中
     empty: EmptyReason,
 ) -> GridOutput {
@@ -897,7 +963,15 @@ pub fn show(
     let avail_h = (ui.available_height() - Metrics::SCROLLBAR).max(120.0);
     // 每帧「算布局」在 M2 是 5 万张 110 ms 的开销，而输入几乎每帧都一样——
     // 交给 GridCache，滚动时这一行是 0 代价。
-    let layout = grid.get(photos, avail_w, avail_h, cell_px, has_headers, mode);
+    let layout = grid.get_with_filename(
+        photos,
+        avail_w,
+        avail_h,
+        cell_px,
+        has_headers,
+        mode,
+        show_filename,
+    );
     let content_w = avail_w;
     // 正在索引的文件夹（含子目录）：这些目录里 `thumb_state == 0` 的格子只画占位，
     // **不要**再向 ThumbService 要一次缩略图（会和索引线程抢同一张图的解码）。
@@ -1012,13 +1086,17 @@ pub fn show(
             let img_rect = if mode == ViewMode::Grid {
                 rect
             } else {
-                Rect::from_min_max(rect.left_top(), pos2(rect.right(), rect.bottom() - Metrics::FILENAME_H))
+                Rect::from_min_max(
+                    rect.left_top(),
+                    pos2(rect.right(), rect.bottom() - Metrics::FILENAME_H),
+                )
             };
 
             // ---- 宽高空着的，报给回填服务（M2.1 B「可见区域按需回填」）----
             // 放在占位分支**之前**：占位格是「缩略图还没好」，与「宽高还不知道」
             // 是两件事——一张图可能缩略图早就有了、宽高却因为当年盘没插而一直缺着。
-            if (row.width.is_none() || row.height.is_none()) && out.need_dims.len() < NEED_DIMS_MAX {
+            if (row.width.is_none() || row.height.is_none()) && out.need_dims.len() < NEED_DIMS_MAX
+            {
                 out.need_dims.push(row.id);
             }
 
@@ -1311,10 +1389,7 @@ fn pump_atlas_from_db(
             image::imageops::FilterType::Triangle,
         );
         let rgba = small.to_rgba8();
-        if atlas
-            .insert(ctx, row.id, rgba.as_raw())
-            .is_some()
-        {
+        if atlas.insert(ctx, row.id, rgba.as_raw()).is_some() {
             done += 1;
         }
     }
@@ -1417,7 +1492,11 @@ pub fn ellipsize_to_width(ui: &Ui, s: &str, font: &FontId, max_w: f32) -> String
         // `layout_no_wrap` 是 `&mut self`（会往字形缓存里插条目），
         // 所以走 `fonts_mut` 而不是 `fonts`。这不影响并发：egui 的字体是
         // 单线程 UI 内共享的，`fonts_mut` 只是把它标成可变借用。
-        ui.fonts_mut(|f| f.layout_no_wrap(t.to_owned(), font.clone(), Color32::WHITE).rect.width())
+        ui.fonts_mut(|f| {
+            f.layout_no_wrap(t.to_owned(), font.clone(), Color32::WHITE)
+                .rect
+                .width()
+        })
     };
     if measure(s) <= max_w {
         return s.to_string();
@@ -1524,8 +1603,20 @@ mod tests {
     #[test]
     fn columns_are_derived_from_width_but_cell_size_is_fixed() {
         let photos = same_day(10);
-        let a = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
-        let b = GridLayout::build(&photos, 2000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
+        let a = GridLayout::build(
+            &photos,
+            1000.0,
+            Metrics::CELL_SIZES[0],
+            true,
+            ViewMode::Grid,
+        );
+        let b = GridLayout::build(
+            &photos,
+            2000.0,
+            Metrics::CELL_SIZES[0],
+            true,
+            ViewMode::Grid,
+        );
         // U-21：单元格边长**不随窗口变化**
         assert_eq!(a.cell, Metrics::CELL_SIZES[0]);
         assert_eq!(b.cell, Metrics::CELL_SIZES[0]);
@@ -1559,7 +1650,13 @@ mod tests {
     #[test]
     fn first_cell_sits_after_padding_and_header() {
         let photos = same_day(4);
-        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[1], true, ViewMode::Grid);
+        let layout = GridLayout::build(
+            &photos,
+            1000.0,
+            Metrics::CELL_SIZES[1],
+            true,
+            ViewMode::Grid,
+        );
         let r = layout.thumb_rect(0).unwrap();
         assert_eq!(r.left(), Metrics::GRID_PAD);
         assert_eq!(r.top(), Metrics::GRID_PAD + Metrics::GROUP_HEADER_H);
@@ -1569,7 +1666,13 @@ mod tests {
     #[test]
     fn cells_are_laid_out_in_rows() {
         let photos = same_day(40);
-        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
+        let layout = GridLayout::build(
+            &photos,
+            1000.0,
+            Metrics::CELL_SIZES[0],
+            true,
+            ViewMode::Grid,
+        );
         let cols = layout.cols;
         assert!(cols >= 3);
         let r0 = layout.thumb_rect(0).unwrap();
@@ -1594,8 +1697,20 @@ mod tests {
 
     #[test]
     fn total_height_grows_with_photos() {
-        let small = GridLayout::build(&same_day(3), 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
-        let big = GridLayout::build(&same_day(300), 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
+        let small = GridLayout::build(
+            &same_day(3),
+            1000.0,
+            Metrics::CELL_SIZES[0],
+            true,
+            ViewMode::Grid,
+        );
+        let big = GridLayout::build(
+            &same_day(300),
+            1000.0,
+            Metrics::CELL_SIZES[0],
+            true,
+            ViewMode::Grid,
+        );
         assert!(big.total_h > small.total_h);
         assert!(small.total_h > 0.0);
     }
@@ -1603,7 +1718,13 @@ mod tests {
     #[test]
     fn visible_range_is_bounded_and_covers_viewport() {
         let photos = same_day(1000);
-        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
+        let layout = GridLayout::build(
+            &photos,
+            1000.0,
+            Metrics::CELL_SIZES[0],
+            true,
+            ViewMode::Grid,
+        );
         let viewport = Rect::from_min_size(pos2(0.0, 500.0), vec2(1000.0, 600.0));
         let (first, last) = layout.visible_index_range(viewport);
         assert!(first < last);
@@ -1625,13 +1746,25 @@ mod tests {
     #[test]
     fn sticky_header_appears_only_after_scrolling_past_it() {
         let photos = same_day(50);
-        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
+        let layout = GridLayout::build(
+            &photos,
+            1000.0,
+            Metrics::CELL_SIZES[0],
+            true,
+            ViewMode::Grid,
+        );
         // 还没滚：分组头就在正常位置，不需要吸顶补画
         assert_eq!(layout.sticky_group(0.0), None);
         // 滚过分组头之后：需要吸顶
         assert_eq!(layout.sticky_group(Metrics::GROUP_HEADER_H + 5.0), Some(0));
         // 关掉分组时不吸顶
-        let plain = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], false, ViewMode::Grid);
+        let plain = GridLayout::build(
+            &photos,
+            1000.0,
+            Metrics::CELL_SIZES[0],
+            false,
+            ViewMode::Grid,
+        );
         assert_eq!(plain.sticky_group(100.0), None);
     }
 
@@ -1639,7 +1772,13 @@ mod tests {
     fn huge_single_group_stays_virtualized() {
         // 「同一天连拍 3000 张」是最坏情况：只有一个分组，按分组边界返回就会整组返回
         let photos = same_day(3000);
-        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
+        let layout = GridLayout::build(
+            &photos,
+            1000.0,
+            Metrics::CELL_SIZES[0],
+            true,
+            ViewMode::Grid,
+        );
         assert_eq!(layout.groups.len(), 1, "构造前提：只有一个分组");
 
         let mid = Rect::from_min_size(pos2(0.0, 5000.0), vec2(1000.0, 800.0));
@@ -1659,7 +1798,13 @@ mod tests {
     #[test]
     fn viewport_below_content_yields_empty_range() {
         let photos = same_day(20);
-        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
+        let layout = GridLayout::build(
+            &photos,
+            1000.0,
+            Metrics::CELL_SIZES[0],
+            true,
+            ViewMode::Grid,
+        );
         let below = Rect::from_min_size(pos2(0.0, layout.total_h + 500.0), vec2(1000.0, 400.0));
         let (first, last) = layout.visible_index_range(below);
         assert_eq!(first, last, "视口在内容下方时应返回空区间");
@@ -1671,7 +1816,13 @@ mod tests {
         let photos: Vec<PhotoRow> = (1..=15i64)
             .map(|i| photo(i, 1_300_000_000 + ((i - 1) / 5) * 86_400))
             .collect();
-        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[0], true, ViewMode::Grid);
+        let layout = GridLayout::build(
+            &photos,
+            1000.0,
+            Metrics::CELL_SIZES[0],
+            true,
+            ViewMode::Grid,
+        );
         assert_eq!(layout.groups.len(), 3, "应分成三天");
         assert_eq!(layout.groups_in_range(0, 5), 0..1);
         assert_eq!(layout.groups_in_range(0, 15), 0..3);
@@ -1683,7 +1834,13 @@ mod tests {
     #[test]
     fn hit_testing_round_trips() {
         let photos = same_day(20);
-        let layout = GridLayout::build(&photos, 1000.0, Metrics::CELL_SIZES[1], true, ViewMode::Grid);
+        let layout = GridLayout::build(
+            &photos,
+            1000.0,
+            Metrics::CELL_SIZES[1],
+            true,
+            ViewMode::Grid,
+        );
         for index in [0usize, 3, 7, 19] {
             let r = layout.thumb_rect(index).unwrap();
             assert_eq!(
@@ -1751,10 +1908,20 @@ mod tests {
         assert_eq!(r0.width(), r1.width());
         // 横图高度 < 竖图高度（同列宽下）
         let r_h = layout.thumb_rect(3).unwrap();
-        assert!(r_h.height() > r0.height(), "9:16 应比 4:3 高：{:?} vs {:?}", r_h, r0);
+        assert!(
+            r_h.height() > r0.height(),
+            "9:16 应比 4:3 高：{:?} vs {:?}",
+            r_h,
+            r0
+        );
         // 高度 = 宽度 / 比例 + 文件名行
         let expect = r0.width() / (400.0 / 300.0) + crate::theme::Metrics::FILENAME_H;
-        assert!((r0.height() - expect).abs() < 0.5, "高度算式不对：{} vs {}", r0.height(), expect);
+        assert!(
+            (r0.height() - expect).abs() < 0.5,
+            "高度算式不对：{} vs {}",
+            r0.height(),
+            expect
+        );
     }
 
     /// 横向瀑布流：按宽高比得宽，横向滚动；总宽 > 视口宽。
@@ -1777,7 +1944,12 @@ mod tests {
         // 同行等高
         assert_eq!(r0.height(), r3.height());
         // 横图比竖图宽（同行高下）
-        assert!(r0.width() > r3.width(), "4:3 应比 9:16 宽：{:?} vs {:?}", r0, r3);
+        assert!(
+            r0.width() > r3.width(),
+            "4:3 应比 9:16 宽：{:?} vs {:?}",
+            r0,
+            r3
+        );
         // 内容比视口宽（需要横向滚动）
         assert!(layout.content_w > 400.0, "content_w={}", layout.content_w);
         assert!(
@@ -1903,6 +2075,35 @@ mod tests {
         assert_eq!(layout.index_at(pos2(99999.0, 99999.0)), None);
     }
 
+    /// 方格文件名是 §7.4 的可选项：关掉后不占行高、不返回文件名 rect；
+    /// 重新打开必须触发布局重算（缓存键包含这个开关）。
+    #[test]
+    fn grid_filename_toggle_changes_layout_and_invalidates_cache() {
+        let photos = same_day(4);
+        let hidden = GridLayout::build_in_viewport_opts(
+            &photos,
+            1000.0,
+            800.0,
+            128.0,
+            true,
+            ViewMode::Grid,
+            false,
+        );
+        assert!(!hidden.show_filename);
+        assert_eq!(hidden.cell_h, 128.0, "关掉文件名后单元格不应再预留行高");
+        assert_eq!(hidden.filename_rect(0), None);
+
+        let mut cache = GridCache::new();
+        let with_name = cache
+            .get_with_filename(&photos, 1000.0, 800.0, 128.0, true, ViewMode::Grid, true)
+            .cell_h;
+        let without = cache
+            .get_with_filename(&photos, 1000.0, 800.0, 128.0, true, ViewMode::Grid, false)
+            .cell_h;
+        assert_eq!(with_name, 128.0 + Metrics::FILENAME_H);
+        assert_eq!(without, 128.0);
+    }
+
     /// masonry：文件名带必须在**格子内部**的底部（图片带的正下方）。
     ///
     /// 守的是「名字被下一张图盖住」：早期实现把文件名画到 `rect.bottom()` 之外，
@@ -1935,10 +2136,14 @@ mod tests {
     /// 文件名 rect 必须在缩略图**正下方**、同宽、高度正确。
     #[test]
     fn filename_rect_sits_below_the_thumbnail() {
-        let photos: Vec<PhotoRow> = (0..3)
-            .map(|i| photo(i, 1_600_000_000 + i))
-            .collect();
-        let layout = GridLayout::build(&photos, 1280.0, Metrics::CELL_SIZES[1], false, ViewMode::Grid);
+        let photos: Vec<PhotoRow> = (0..3).map(|i| photo(i, 1_600_000_000 + i)).collect();
+        let layout = GridLayout::build(
+            &photos,
+            1280.0,
+            Metrics::CELL_SIZES[1],
+            false,
+            ViewMode::Grid,
+        );
         for i in 0..3 {
             let thumb = layout.thumb_rect(i).unwrap();
             let name = layout.filename_rect(i).unwrap();
