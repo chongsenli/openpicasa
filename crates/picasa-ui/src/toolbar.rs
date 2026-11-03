@@ -1,22 +1,18 @@
 //! 顶部工具栏。
 //!
-//! ## M3.1 起的变化（2026-11-03，用户指令）
+//! ## M3.1 §7 定稿（2026-11-03）
 //!
-//! 整体布局除预览图片区域外像素级模仿 macOS「照片」风格参考截图：
-//!
-//! * 单行顶栏（52px，白底 + 发丝线），原 XP 风格的「菜单栏 21px + 工具行 38px +
-//!   文字按钮 + 状态栏滑块」全部废弃；
-//! * 「视图」三子菜单（默认方格 / 纵向瀑布流 / 横向瀑布流）搬进顶栏中央的
-//!   **分段控件**（模仿截图的「年 | 月 | 所有照片」按钮组），弹出菜单移除；
-//! * 「缩略图」循环三刻度按钮**移除**（用户指令：去掉缩略图的按钮）；
-//! * 状态栏缩放滑块**移除**，改为顶栏「− / +」胶囊按钮（用户指令）；
-//! * 原工具栏的真实功能全部保留：添加文件夹（→「…」菜单）、显示位置、排序、
-//!   筛选、搜索范围切换、含子文件夹（→「…」菜单）、全屏（→「…」菜单）。
+//! * 单行、通栏的**图标工具栏**：导入 / 幻灯片 / 编辑（无文字圆形图标）、
+//!   排布三图标连体胶囊、−/+、搜索（紧接在 + 后）；
+//! * 大号文件夹标题与文件树**不在**顶栏——它们移到中区左侧；
+//! * 排序 / 筛选 / 「…」保留在右侧图标组（既有功能不丢）；「…」里承载
+//!   添加文件夹、含子文件夹、方格文件名开关、全屏、关于；
+//! * 「视图」弹出菜单与 XP 菜单栏/工具行已退役。
 //!
 //! 实际绘制在 [`crate::topbar`]，本文件保留筛选面板（弹层）与旧类型转调，
 //! 让 `app.rs` 的改动最小。
 
-use eframe::egui::{self, Color32, Ui, Pos2};
+use eframe::egui::{self, Color32, Pos2, Ui};
 
 use picasa_core::ViewMode;
 
@@ -38,8 +34,7 @@ pub fn show(
     _recurse_available: bool,
     filter_active: bool,
     search_in_current: bool,
-    title: &str,
-    subtitle: &str,
+    search_open: bool,
     view_mode: ViewMode,
     zoom_min: bool,
     zoom_max: bool,
@@ -47,12 +42,11 @@ pub fn show(
     crate::topbar::show(
         ui,
         theme,
-        title,
-        subtitle,
         view_mode,
         sort,
         filter_active,
         search,
+        search_open,
         search_in_current,
         zoom_min,
         zoom_max,
@@ -73,8 +67,9 @@ pub fn more_menu(
     at: Pos2,
     recurse_on: bool,
     recurse_available: bool,
+    show_filename: bool,
 ) -> Vec<TopbarAction> {
-    crate::topbar::more_menu(ui, at, recurse_on, recurse_available)
+    crate::topbar::more_menu(ui, at, recurse_on, recurse_available, show_filename)
 }
 
 /// 筛选面板的动作（M3.1 起与顶栏动作解耦，避免枚举递归）。
@@ -111,7 +106,10 @@ pub fn filter_menu(
             egui::Frame::new()
                 .fill(Color32::WHITE)
                 .corner_radius(8.0)
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 0, 0, 30)))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    Color32::from_rgba_premultiplied(0, 0, 0, 30),
+                ))
                 .shadow(egui::epaint::Shadow {
                     offset: [0, 4],
                     blur: 18,
@@ -195,8 +193,7 @@ pub fn filter_menu(
                             let mut on = draft.size_class == Some(sc);
                             if ui.toggle_value(&mut on, sc.label()).clicked() {
                                 draft.size_class = Some(sc);
-                                action =
-                                    Some(FilterPanelAction::Apply(Box::new(draft.clone())));
+                                action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
                             }
                         }
                     });

@@ -1,6 +1,12 @@
-//! 底部状态栏（U-33~U-35）+ **唯一的索引入口**（M2.2 §2.6）。
+//! 底部状态栏（U-33~U-35）+ **唯一的索引入口**（M2.2 §2.6 / M3.1 §7.5）。
 //!
-//! ## M2.2 的变化：三个入口合成一个（**过渡期：旧「诊断」入口暂时保留**）
+//! ## §7.5 定稿
+//!
+//! * 左：本地信任提示「本地 · 不改原文件」；
+//! * 中：视图语境计数、已选数等（精简，不重复标题副标题）；
+//! * **最右**：「索引管理」——既有索引管理流程的唯一显式按钮入口。
+//!
+//! ## 三个入口合成一个（**过渡期：旧「诊断」入口暂时保留**）
 //!
 //! 之前这里有「索引进度」和「诊断」两个按钮，工具栏还有一个「索引管理」二级菜单。
 //! 三个入口的问题是**功能会漏**（R-M22-5）：加一个操作得记得在三处都加一遍。
@@ -49,7 +55,7 @@ pub struct StatusbarOut {
 }
 
 /// 索引入口按钮宽度（图标 + 文案 + 角标）。定值，避免文字长度影响布局。
-const INDEX_BTN_W: f32 = 96.0;
+const INDEX_BTN_W: f32 = 104.0;
 /// 「诊断」按钮宽度
 const DIAG_BTN_W: f32 = 52.0;
 /// 角标圆点直径
@@ -82,18 +88,37 @@ pub fn show(
 
     let font = FontId::new(11.0, egui::FontFamily::Proportional);
 
-    // 左：「视图名 · N 张」／索引中的文件夹用「已就绪 X / 已发现 Y」
-    // ⚠️ 用 `photos_total` 而不是 `photos.len()`：C 包分页后 `photos` 只是已加载的前几页，
-    // 拿 `len()` 会显示「2000 张」，下一秒补齐又跳成「50000 张」——数字必须是视图总数。
+    // 左：本地信任提示（§7.5，吸收方案 C）——「本地 · 不改原文件」
+    let trust = "本地 · 不改原文件";
+    let trust_galley = painter.layout_no_wrap(trust.to_owned(), font.clone(), theme.status_text);
+    painter.galley(
+        pos2(
+            rect.left() + 10.0,
+            rect.center().y - trust_galley.size().y / 2.0,
+        ),
+        trust_galley.clone(),
+        theme.status_text,
+    );
+    let sep_x = rect.left() + 10.0 + trust_galley.size().x + 10.0;
+    painter.line_segment(
+        [
+            pos2(sep_x, rect.top() + 5.0),
+            pos2(sep_x, rect.bottom() - 5.0),
+        ],
+        egui::Stroke::new(1.0, theme.separator),
+    );
+
+    // 中左：视图语境计数（与标题副标题同口径，但精简，不重复堆砌）。
+    // ⚠️ 用 `photos_total` 而不是 `photos.len()`：C 包分页后 `photos` 只是已加载的前几页。
     let total = lib.photos_total.max(lib.photos.len());
-    let left = match double_count_text(lib, snap) {
+    let view_text = match double_count_text(lib, snap) {
         Some(counts) => format!("{} · {counts}", lib.view_title()),
         None => format!("{} · {total} 张", lib.view_title()),
     };
     painter.text(
-        pos2(rect.left() + 10.0, rect.center().y),
+        pos2(sep_x + 10.0, rect.center().y),
         Align2::LEFT_CENTER,
-        left,
+        view_text,
         font.clone(),
         theme.status_text,
     );
@@ -166,10 +191,12 @@ fn index_entry_button(
     }
 
     let (label, color) = match state {
-        IndexEntryState::Idle => ("索引", theme.status_text),
-        IndexEntryState::Running => ("索引中", theme.progress),
-        IndexEntryState::Paused => ("已暂停", theme.warn),
-        IndexEntryState::Attention => ("需处理", theme.danger),
+        // §7.5：入口文案固定为「索引管理」，状态只体现在颜色/指示器/角标上，
+        // 避免用户找不到「索引管理」四个字。
+        IndexEntryState::Idle => ("索引管理", theme.status_text),
+        IndexEntryState::Running => ("索引管理", theme.progress),
+        IndexEntryState::Paused => ("索引管理", theme.warn),
+        IndexEntryState::Attention => ("索引管理", theme.danger),
     };
 
     // 进行中：轻量环形指示（**无百分比数字**，§2.6）

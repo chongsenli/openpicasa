@@ -223,12 +223,14 @@ impl Metrics {
     pub const TOPBAR_ICON_D: f32 = 38.0;
     /// 左栏默认宽度：截图 432px ÷ 2 = 216（连同最小/最大一起放宽）。
     pub const SIDEBAR_DEFAULT_W: f32 = 216.0;
-    /// 左栏行高：截图 72px ÷ 2 = 36。
-    pub const SIDEBAR_ROW_H: f32 = 36.0;
-    /// 左栏行缩进每级步长。
-    pub const SIDEBAR_INDENT: f32 = 16.0;
-    /// 左栏分组标题（"相簿"）行高：截图上标题行约 30px ÷ 2 = 15 → 取 22 留呼吸。
-    pub const SIDEBAR_SECTION_H: f32 = 30.0;
+    /// 左栏行高（§7.3 A 样式文件树：更密的行高，不是 Photos 大行高列表）。
+    pub const SIDEBAR_ROW_H: f32 = 26.0;
+    /// 左栏行缩进每级步长（A 样式的树线宽度）。
+    pub const SIDEBAR_INDENT: f32 = 14.0;
+    /// 左栏分组标题（"图库"/"文件夹"）行高。
+    pub const SIDEBAR_SECTION_H: f32 = 24.0;
+    /// 中区左侧标题区高度（小标题 + 张数·日期副标题）。
+    pub const SIDEBAR_HEADER_H: f32 = 58.0;
     /// 分段控件高度：截图 72px ÷ 2 = 36。
     pub const SEG_H: f32 = 36.0;
     /// −/+ 胶囊高：与分段控件同高。

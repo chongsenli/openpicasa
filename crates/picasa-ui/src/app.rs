@@ -11,10 +11,10 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, vec2};
+use picasa_core::thumbs::JobKind;
 use picasa_core::{
     AppPaths, CoreEvent, DimsService, IndexBoard, IndexService, Library, ThumbJob, ThumbService,
 };
-use picasa_core::thumbs::JobKind;
 use picasa_db::{PhotoRow, SortKey};
 
 use crate::grid;
@@ -26,9 +26,9 @@ use crate::textures::{TexState, TextureCache};
 use crate::theme::{Metrics, Theme};
 // M3.1：顶栏动作。旧 `ToolbarAction` 已由 `TopbarAction` 接管；
 // 筛选面板单独走 `FilterPanelAction`（与顶栏枚举解耦）。
+use crate::toolbar;
 #[allow(unused_imports)]
 use crate::toolbar::{FilterPanelAction, MoreAction, TopbarAction};
-use crate::toolbar;
 use crate::viewer::{self, Viewer, ViewerAction};
 
 /// 索引管理页数据的刷新间隔（毫秒）。
@@ -83,6 +83,8 @@ pub struct OpenPicasaApp {
 
     // ---- 纯 UI 状态（不进偏好，除非注明）----
     search_buf: String,
+    /// 顶栏搜索框是否展开（§7.2：搜索按钮紧接在 + 之后）
+    search_open: bool,
     sort_menu_open: bool,
     sort_menu_pos: Pos2,
     /// 「更多（…）」弹出菜单开关（M3.1 顶栏）
@@ -100,6 +102,14 @@ pub struct OpenPicasaApp {
     more_menu_frame: u64,
     /// 左栏是否显示（顶栏侧栏开关；不进偏好——会话级）
     sidebar_visible: bool,
+    /// 方格模式是否显示文件名（§7.4，默认开；会话级可选项）
+    grid_show_filename: bool,
+    /// 中区左侧标题/副标题的缓存（`N 张 · 拍摄日期跨度`）。
+    /// 只在重载后重算，避免每帧扫一遍已加载照片。
+    view_header_title: String,
+    view_header_subtitle: String,
+    /// 生成上面两行时的输入签名；不同才重算（避免每帧扫照片算日期跨度）。
+    view_header_key: Option<(String, usize, usize, i64, i64)>,
     tray_expanded: bool,
     favorites_collapsed: bool,
     folders_collapsed: bool,
@@ -256,6 +266,7 @@ impl OpenPicasaApp {
             dpi_scale: 1.0,
             viewer: None,
             search_buf,
+            search_open: false,
             sort_menu_open: false,
             sort_menu_pos: Pos2::ZERO,
             more_menu_open: false,
@@ -267,6 +278,10 @@ impl OpenPicasaApp {
             filter_draft_tag: String::new(),
             sort_menu_frame: u64::MAX,
             sidebar_visible: true,
+            grid_show_filename: true,
+            view_header_title: String::new(),
+            view_header_subtitle: String::new(),
+            view_header_key: None,
             tray_expanded: false,
             favorites_collapsed: false,
             folders_collapsed: false,
@@ -312,6 +327,7 @@ impl OpenPicasaApp {
             frames: 0,
         };
         app.refresh_tray_rows();
+        app.refresh_view_header();
         // 角标要在**第一帧**就有数：用户打开程序的第一眼就该知道"有 970 张坏图"，
         // 而不是等他点开菜单才去算。
         app.refresh_failed_thumbs();
@@ -368,7 +384,10 @@ impl OpenPicasaApp {
                 for (id, path) in &roots {
                     app.index.enqueue_retry(*id, path);
                 }
-                tracing::info!(roots = roots.len(), "解码器升级/欠账：已对全部根触发自动补全");
+                tracing::info!(
+                    roots = roots.len(),
+                    "解码器升级/欠账：已对全部根触发自动补全"
+                );
             }
         }
         app
@@ -460,14 +479,20 @@ impl OpenPicasaApp {
         if self.thumb_rx.is_some() {
             return;
         }
+        let root_ids: Vec<i64> = self.mgmt.roots.iter().map(|r| r.id).collect();
+        if root_ids.is_empty() {
+            return;
+        }
+        // 只要「按根分布」还是空的，就不能拿 TTL 复用缓存——那会把空行钉住 30 秒。
+        let needs_root_breakdown = self
+            .thumb_storage
+            .as_ref()
+            .is_none_or(|st| st.by_root.is_empty());
         if !force
+            && !needs_root_breakdown
             && let Some(at) = self.thumb_req_at
             && at.elapsed() < Duration::from_secs(THUMB_STATS_TTL_SECS)
         {
-            return;
-        }
-        let root_ids: Vec<i64> = self.mgmt.roots.iter().map(|r| r.id).collect();
-        if root_ids.is_empty() {
             return;
         }
         let db = Arc::clone(&self.lib.db);
@@ -510,9 +535,9 @@ impl OpenPicasaApp {
                 };
                 by_root.push((*rid, bytes));
             }
-            let Some((thumb_count, thumb_bytes)) = with_db(&db, |d| {
-                d.thumb_cache_stats().ok().unwrap_or((0, 0))
-            }) else {
+            let Some((thumb_count, thumb_bytes)) =
+                with_db(&db, |d| d.thumb_cache_stats().ok().unwrap_or((0, 0)))
+            else {
                 return;
             };
             let _ = tx.send(picasa_core::ThumbStorage {
@@ -577,6 +602,11 @@ impl OpenPicasaApp {
             st.thumb_count = stats.thumb_count;
             st.thumb_bytes = stats.thumb_bytes;
             self.thumb_storage = Some(st);
+            // ⚠️ B4′：这里**不能**把 `thumb_req_at` 设成 now。
+            // 这条分支意味着「按根分布还没算」，接下来 `request_thumb_storage`
+            // 必须能真的发起后台统计；若把它当成「刚算过」，30 秒 TTL 会把
+            // 「按根目录分布」压成空行（历史 bug）。缩略图总数已是快数，无需缓存。
+            self.thumb_req_at = None;
             return;
         }
         let st = picasa_core::ThumbStorage {
@@ -594,12 +624,7 @@ impl OpenPicasaApp {
         } else {
             self.mgmt.storage.by_root = root_rows
                 .iter()
-                .map(|r| {
-                    (
-                        r.path.clone(),
-                        bytes_map.get(&r.id).copied().unwrap_or(0),
-                    )
-                })
+                .map(|r| (r.path.clone(), bytes_map.get(&r.id).copied().unwrap_or(0)))
                 .collect();
         }
         self.thumb_storage = Some(st);
@@ -729,10 +754,7 @@ impl OpenPicasaApp {
         let idle = !self.board.snapshot().running() && !self.zoom.is_dragging();
         let watch_active = self.watch.active_count() > 0;
         let running = false; // L2 复用 VerifyRunner，同一时刻只会有一个（由 verify 字段管）
-        if !self
-            .full_verify
-            .is_due(watch_active, idle, running)
-        {
+        if !self.full_verify.is_due(watch_active, idle, running) {
             return;
         }
         // 到点了：取这一批目录跑一轮强制 L2
@@ -1136,26 +1158,15 @@ impl OpenPicasaApp {
         let first = self.viewport_top_index.min(self.lib.photos.len());
         let window = crate::atlas::ATLAS_PREFILL_ROWS;
         let from = first.saturating_sub(window / 2);
-        let rows: Vec<&picasa_db::PhotoRow> = self
-            .lib
-            .photos
-            .iter()
-            .skip(from)
-            .take(window)
-            .collect();
+        let rows: Vec<&picasa_db::PhotoRow> =
+            self.lib.photos.iter().skip(from).take(window).collect();
         if rows.is_empty() {
             return;
         }
 
         // ② 装几张（限量，避免一帧建页 + 上传几十张）
         if let Ok(db) = self.lib.db() {
-            let n = crate::grid::pump_atlas_public(
-                ctx,
-                &mut self.atlas,
-                &db,
-                &self.service,
-                &rows,
-            );
+            let n = crate::grid::pump_atlas_public(ctx, &mut self.atlas, &db, &self.service, &rows);
             if n > 0 {
                 tracing::debug!(n, "图集装入一批");
             }
@@ -1167,11 +1178,7 @@ impl OpenPicasaApp {
         // ③ 帧末淘汰：屏距 ≥ 3 的整页作废（与 TextureBudget 同一条线）
         let dropped = self.atlas.evict_pages_farther_than(3);
         if dropped > 0 {
-            tracing::debug!(
-                dropped,
-                pages = self.atlas.page_count(),
-                "图集整页淘汰"
-            );
+            tracing::debug!(dropped, pages = self.atlas.page_count(), "图集整页淘汰");
         }
     }
 
@@ -1201,6 +1208,28 @@ impl OpenPicasaApp {
     fn refresh_tray_rows(&mut self) {
         self.tray_rows = self.lib.tray_photos();
         self.tray_rows_dirty = false;
+    }
+
+    /// 重算中区左侧的小标题与副标题（§7.3）。
+    ///
+    /// 副标题是「N 张 · 拍摄日期跨度」。日期跨度按**已加载**的照片算：
+    /// 分页首屏是用户当下最关心的一段，且不额外查库（数据层零新增）。
+    fn refresh_view_header(&mut self) {
+        let title = self.lib.view_title();
+        let total = self.lib.photos_total.max(self.lib.photos.len());
+        let len = self.lib.photos.len();
+        let first = self.lib.photos.first().map(|p| p.id).unwrap_or(0);
+        let last = self.lib.photos.last().map(|p| p.id).unwrap_or(0);
+        let key = (title.clone(), total, len, first, last);
+        if self.view_header_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.view_header_key = Some(key);
+        self.view_header_title = title;
+        self.view_header_subtitle = match photo_date_span(&self.lib.photos) {
+            Some(span) => format!("{total} 张 · {span}"),
+            None => format!("{total} 张"),
+        };
     }
 
     /// 事件泵：后台线程 → UI 状态。**每帧先跑它**，后面所有绘制都基于最新状态。
@@ -1236,11 +1265,8 @@ impl OpenPicasaApp {
                                 color,
                                 egui::TextureOptions::LINEAR,
                             );
-                            v.compare_tex = Some((
-                                photo_id,
-                                tex,
-                                vec2(size[0] as f32, size[1] as f32),
-                            ));
+                            v.compare_tex =
+                                Some((photo_id, tex, vec2(size[0] as f32, size[1] as f32)));
                         }
                         continue;
                     }
@@ -1347,6 +1373,7 @@ impl OpenPicasaApp {
         if let Err(e) = self.lib.reload_photos() {
             tracing::warn!(error = %e, "刷新照片列表失败");
         }
+        self.refresh_view_header();
     }
 
     // -------------------------------------------------------------- 键盘
@@ -1394,6 +1421,11 @@ impl OpenPicasaApp {
                 self.persist_zoom();
             }
             KeyAction::ToggleRecurse => self.toggle_recurse(),
+            KeyAction::FocusSearch => {
+                self.search_open = true;
+                ctx.memory_mut(|m| m.request_focus(egui::Id::unique("topbar-search")));
+                ctx.request_repaint();
+            }
             KeyAction::ToggleFullscreen => {
                 let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
@@ -1541,6 +1573,9 @@ impl OpenPicasaApp {
     fn draw_library(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let theme = self.theme;
+        // 中区左侧标题可能被任何直接改视图/筛选/搜索的动作改变（不走 reload_dirty），
+        // 每帧用轻量签名兜底；真正重算（扫照片算日期跨度）只在签名变化时发生。
+        self.refresh_view_header();
         // 本帧的进度切片：状态栏/左栏/栅格**读同一份**（`04` §3.2 的四处一致）
         let snap = self.progress.snapshot().clone();
         // ---- M2.2 §6.1：管理快照 ≤ 4 次/秒刷新（PERF-05 的「每帧 ≤ 1 次 DB 查询」）
@@ -1556,32 +1591,15 @@ impl OpenPicasaApp {
             .exact_size(Metrics::TOPBAR_H)
             .frame(egui::Frame::new().fill(theme.toolbar_bg))
             .show(ui, |ui| {
-                let filter_active = self
-                    .lib
-                    .filter
-                    .as_ref()
-                    .is_some_and(|f| {
-                        f.starred_only
-                            || f.tag.is_some()
-                            || f.taken_range.is_some()
-                            || f.size_class.is_some()
-                            || !f.formats.is_empty()
-                    });
-                // 标题两行：视图名 + 副标题。文件夹视图带「含子文件夹」的口径提示，
-                // 与截图的「图库 / 2026年2月18日–5月2日」双行结构对齐。
-                let total = self.lib.photos_total.max(self.lib.photos.len());
-                let title = self.lib.view_title();
-                let subtitle = match self.lib.view {
-                    picasa_core::View::All => format!("{total} 张照片"),
-                    picasa_core::View::Recent => format!("最近 30 天 · {total} 张"),
-                    picasa_core::View::Folder(_) => {
-                        if self.lib.recurse {
-                            format!("含子文件夹 · {total} 张")
-                        } else {
-                            format!("只看本文件夹 · {total} 张")
-                        }
-                    }
-                };
+                let filter_active = self.lib.filter.as_ref().is_some_and(|f| {
+                    f.starred_only
+                        || f.tag.is_some()
+                        || f.taken_range.is_some()
+                        || f.size_class.is_some()
+                        || !f.formats.is_empty()
+                });
+                // §7.2：顶栏只放操作/排布/缩放/搜索，不再放大号标题。
+                // 标题与副标题已移到中区左侧（文件树之上）。
                 let zoom_min = picasa_core::at_log_bound(self.zoom.cell_px(), -1);
                 let zoom_max = picasa_core::at_log_bound(self.zoom.cell_px(), 1);
                 let out = toolbar::show(
@@ -1596,8 +1614,7 @@ impl OpenPicasaApp {
                     self.lib.recurse_available(),
                     filter_active,
                     self.lib.search_in_current,
-                    &title,
-                    &subtitle,
+                    self.search_open,
                     self.lib.view_mode,
                     zoom_min,
                     zoom_max,
@@ -1615,6 +1632,26 @@ impl OpenPicasaApp {
                     match action {
                         TopbarAction::ToggleSidebar => {
                             self.sidebar_visible = !self.sidebar_visible;
+                        }
+                        TopbarAction::AddFolder => self.add_folder(),
+                        TopbarAction::Placeholder(text) => {
+                            self.lib.toast = Some((text.to_string(), 2.5));
+                        }
+                        TopbarAction::ToggleSearch => {
+                            self.search_open = !self.search_open;
+                            if self.search_open {
+                                // 输入框要到下一帧才画出来；先把焦点记在固定 id 上。
+                                ctx.memory_mut(|m| {
+                                    m.request_focus(egui::Id::unique("topbar-search"))
+                                });
+                            } else {
+                                // 收起后必须主动交还焦点，否则快捷键会一直被「焦点在输入框」
+                                // 挡掉（`shortcuts::collect` 见到 focused 就返回空）。
+                                ctx.memory_mut(|m| {
+                                    m.surrender_focus(egui::Id::unique("topbar-search"))
+                                });
+                            }
+                            ctx.request_repaint();
                         }
                         TopbarAction::ZoomOut => {
                             // 按钮是在本帧开头按「还没步进」的状态画的。
@@ -1667,7 +1704,8 @@ impl OpenPicasaApp {
                             }
                         }
                         TopbarAction::ToggleSearchScope => {
-                            if let Err(e) = self.lib.set_search_in_current(!self.lib.search_in_current)
+                            if let Err(e) =
+                                self.lib.set_search_in_current(!self.lib.search_in_current)
                             {
                                 tracing::warn!(error = %e, "切换搜索范围失败");
                             }
@@ -1679,31 +1717,26 @@ impl OpenPicasaApp {
                             self.restore_scroll = Some(0.0);
                         }
                         // 菜单项动作。按钮本身发的是 ToggleMoreMenu，由 draw_overlays 画菜单。
-                        TopbarAction::More(more) => {
-                            match more {
-                                MoreAction::AddFolder => self.add_folder(),
-                                MoreAction::ToggleRecurse => self.toggle_recurse(),
-                                MoreAction::ToggleFullscreen => {
-                                    let fs = ctx
-                                        .input(|i| i.viewport().fullscreen.unwrap_or(false));
-                                    ctx.send_viewport_cmd(
-                                        egui::ViewportCommand::Fullscreen(!fs),
-                                    );
-                                }
-                                MoreAction::About => {
-                                    self.lib.toast = Some((
-                                        format!(
-                                            "OpenPicasa {} · 本地照片库（只读不改原文件）",
-                                            env!("CARGO_PKG_VERSION")
-                                        ),
-                                        3.0,
-                                    ));
-                                }
+                        TopbarAction::More(more) => match more {
+                            MoreAction::AddFolder => self.add_folder(),
+                            MoreAction::ToggleRecurse => self.toggle_recurse(),
+                            MoreAction::ToggleFullscreen => {
+                                let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
                             }
-                        }
-                        TopbarAction::Placeholder(text) => {
-                            self.lib.toast = Some((text.to_string(), 2.5));
-                        }
+                            MoreAction::ToggleShowFilename => {
+                                self.grid_show_filename = !self.grid_show_filename;
+                            }
+                            MoreAction::About => {
+                                self.lib.toast = Some((
+                                    format!(
+                                        "OpenPicasa {} · 本地照片库（只读不改原文件）",
+                                        env!("CARGO_PKG_VERSION")
+                                    ),
+                                    3.0,
+                                ));
+                            }
+                        },
                     }
                 }
             });
@@ -1771,7 +1804,13 @@ impl OpenPicasaApp {
                         has_focus: ctx.memory(|m| m.focused()).is_none(),
                         snapshot: &snap,
                     };
-                    let actions = sidebar::show(ui, &self.lib, &mut sctx);
+                    let actions = sidebar::show(
+                        ui,
+                        &self.lib,
+                        &mut sctx,
+                        &self.view_header_title,
+                        &self.view_header_subtitle,
+                    );
                     drop(db);
                     actions
                 })
@@ -1813,6 +1852,7 @@ impl OpenPicasaApp {
                     &snap,
                     &mut self.atlas,
                     self.zoom.cell_px(),
+                    self.grid_show_filename,
                     grid::empty_reason(&self.lib.search, self.lib.filter.as_ref()),
                 );
                 drop(db);
@@ -2136,6 +2176,7 @@ impl OpenPicasaApp {
                 self.more_menu_pos,
                 self.lib.recurse,
                 self.lib.recurse_available(),
+                self.grid_show_filename,
             );
             if !actions.is_empty() {
                 self.more_menu_open = false;
@@ -2196,7 +2237,11 @@ impl OpenPicasaApp {
                             color: egui::Color32::from_black_alpha(40),
                         })
                         .show(ui, |ui| {
-                            let star_label = if starred { "☆ 取消收藏" } else { "★ 收藏" };
+                            let star_label = if starred {
+                                "☆ 取消收藏"
+                            } else {
+                                "★ 收藏"
+                            };
                             if ui.button(star_label).clicked() {
                                 action = Some(PhotoCtxAction::ToggleStar);
                             }
@@ -2341,18 +2386,16 @@ impl OpenPicasaApp {
                         self.filter_menu_open = false;
                         self.restore_scroll = Some(0.0);
                     }
-                    FilterPanelAction::BatchStar(on) => {
-                        match self.lib.batch_set_starred(on) {
-                            Ok(n) if n > 0 => {
-                                self.lib.toast = Some((
-                                    format!("{} {n} 张照片", if on { "已收藏" } else { "已取消收藏" }),
-                                    2.5,
-                                ));
-                            }
-                            Ok(_) => {}
-                            Err(e) => tracing::warn!(error = %e, "批量收藏失败"),
+                    FilterPanelAction::BatchStar(on) => match self.lib.batch_set_starred(on) {
+                        Ok(n) if n > 0 => {
+                            self.lib.toast = Some((
+                                format!("{} {n} 张照片", if on { "已收藏" } else { "已取消收藏" }),
+                                2.5,
+                            ));
                         }
-                    }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(error = %e, "批量收藏失败"),
+                    },
                     FilterPanelAction::BatchAddTag => {
                         let label = self.filter_draft_tag.trim().to_string();
                         if !label.is_empty() {
@@ -2460,6 +2503,7 @@ impl OpenPicasaApp {
                                         tracing::warn!(error = %e, "刷新目录树失败");
                                     }
                                     let _ = self.lib.reload_photos();
+                                    self.refresh_view_header();
                                     self.viewer = None;
                                     self.restore_scroll = Some(0.0);
                                     close = true;
@@ -2943,7 +2987,10 @@ impl OpenPicasaApp {
             return;
         }
         match self.lib.extend_photos() {
-            Ok(true) => ctx.request_repaint(),
+            Ok(true) => {
+                self.refresh_view_header();
+                ctx.request_repaint();
+            }
             Ok(false) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "分页补齐失败，停止补页");
@@ -2969,6 +3016,40 @@ impl OpenPicasaApp {
     }
 }
 
+/// 已加载照片的拍摄日期跨度（§7.3 副标题）。
+///
+/// 只读 `PhotoRow::effective_taken_at()`，不查库；没有有效拍摄时间时返回 `None`，
+/// 副标题退化为纯张数。同一时刻会先归一化成「YYYY年M月」再比较，避免跨度两端
+/// 落在同一个月却显示成「5月 – 5月」。
+fn photo_date_span(photos: &[PhotoRow]) -> Option<String> {
+    let mut lo = i64::MAX;
+    let mut hi = i64::MIN;
+    for p in photos {
+        let t = p.effective_taken_at();
+        if t > 0 {
+            lo = lo.min(t);
+            hi = hi.max(t);
+        }
+    }
+    if lo == i64::MAX {
+        return None;
+    }
+    let fmt = |secs: i64| {
+        chrono::DateTime::from_timestamp(secs, 0).map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%Y年%-m月")
+                .to_string()
+        })
+    };
+    let a = fmt(lo);
+    let b = fmt(hi);
+    match (a, b) {
+        (Some(a), Some(b)) if a == b => Some(a),
+        (Some(a), Some(b)) => Some(format!("{a} – {b}")),
+        _ => None,
+    }
+}
+
 /// 从 `settings.grid_cell_px` 读滑块值（`07-A` ZOOM-06）。
 ///
 /// 读不到（库没建好 / 值坏）就返回 `None` → 用默认刻度。
@@ -2987,11 +3068,7 @@ impl eframe::App for OpenPicasaApp {
         // M3.1：macOS 上把红绿灯嵌进自绘顶栏（与 `with_fullsize_content_view`
         // 配套）。AppKit 每次窗口布局都会重置按钮位置，所以**每帧**都要调；
         // 其他平台此调用是空操作。
-        frame.set_traffic_lights_position(
-            &ctx,
-            egui::Rangef::new(0.0, Metrics::TOPBAR_H),
-            14.0,
-        );
+        frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, Metrics::TOPBAR_H), 14.0);
 
         self.pump_events(&ctx);
         // M3：监视器同步（幂等，只在根集合真的变了时才装/卸）
