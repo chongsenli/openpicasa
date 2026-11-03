@@ -33,6 +33,7 @@ pub mod statusbar;
 pub mod textures;
 pub mod theme;
 pub mod toolbar;
+pub mod topbar;
 pub mod viewer;
 
 pub use app::OpenPicasaApp;
@@ -54,7 +55,15 @@ pub fn run() -> eframe::Result {
             .with_min_inner_size([900.0, 600.0])
             .with_title("OpenPicasa")
             .with_app_id("app.openpicasa")
-            .with_icon(window_icon()),
+            .with_icon(window_icon())
+            // M3.1：macOS「照片」风格——红绿灯嵌进自绘顶栏。
+            // fullsize_content_view 让窗口内容延伸到标题栏区域；
+            // 每帧用 `Frame::set_traffic_lights_position` 把三枚按钮
+            // 摆在顶栏（TOPBAR_H）的垂直中线、左侧留白处。
+            // titlebar 隐藏系统标题文字（macOS 上栏体自绘）。
+            .with_fullsize_content_view(cfg!(target_os = "macos"))
+            .with_titlebar_shown(!cfg!(target_os = "macos"))
+            .with_title_shown(!cfg!(target_os = "macos")),
         // 02 §5.2.2 方案 ①：把 eframe 的 UI 状态指到 Preferences 侧，
         // 不和索引库混在同一个目录语义里。
         persistence_path: Some(paths.ui_state_file()),

@@ -102,7 +102,7 @@ rfd = "0.17"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
-strip = false   # 临时打开符号用于死锁定位（修复后改回 "symbols"）
+strip = "symbols"   # 控制 .app 体积（M1-P11 ≤ 30MB）
 
 # 图像处理是计算密集型，debug 下也要跑得动
 [profile.dev.package."*"]

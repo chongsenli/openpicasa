@@ -24,7 +24,11 @@ use crate::sidebar::{self, SidebarAction, SidebarCtx};
 use crate::statusbar;
 use crate::textures::{TexState, TextureCache};
 use crate::theme::{Metrics, Theme};
-use crate::toolbar::{self, ToolbarAction};
+// M3.1：顶栏动作。旧 `ToolbarAction` 已由 `TopbarAction` 接管；
+// 筛选面板单独走 `FilterPanelAction`（与顶栏枚举解耦）。
+#[allow(unused_imports)]
+use crate::toolbar::{FilterPanelAction, MoreAction, TopbarAction};
+use crate::toolbar;
 use crate::viewer::{self, Viewer, ViewerAction};
 
 /// 索引管理页数据的刷新间隔（毫秒）。
@@ -81,23 +85,21 @@ pub struct OpenPicasaApp {
     search_buf: String,
     sort_menu_open: bool,
     sort_menu_pos: Pos2,
-    /// 「视图」弹出菜单开关（默认 / 纵向瀑布流 / 横向瀑布流）
-    view_menu_open: bool,
-    view_menu_pos: Pos2,
+    /// 「更多（…）」弹出菜单开关（M3.1 顶栏）
+    more_menu_open: bool,
+    more_menu_pos: Pos2,
     /// 「筛选」弹出面板开关与打开帧（豁免逻辑同视图菜单）
     filter_menu_open: bool,
     filter_menu_frame: u64,
     filter_menu_pos: Pos2,
     /// 筛选面板的草稿状态（点「应用」才提交，避免每点一下就重查全库）
     filter_draft_tag: String,
-    /// 批量标签输入框内容
-    batch_tag_buf: String,
-    /// 打开视图菜单的帧号：同一帧的点击事件必须豁免，否则菜单刚开就被
-    /// 「点空白就关」检测当成「点在菜单外」立刻关掉——表现是按钮点了没反应。
-    /// 排序菜单的同款机制见 `sort_menu_frame`。
-    view_menu_frame: u64,
     /// 排序菜单打开的帧号，用途同 `folder_ctx_frame`（点按钮也是 click，同一帧会被误关）
     sort_menu_frame: u64,
+    /// 「…」菜单打开的帧号（同上豁免）
+    more_menu_frame: u64,
+    /// 左栏是否显示（顶栏侧栏开关；不进偏好——会话级）
+    sidebar_visible: bool,
     tray_expanded: bool,
     favorites_collapsed: bool,
     folders_collapsed: bool,
@@ -256,15 +258,15 @@ impl OpenPicasaApp {
             search_buf,
             sort_menu_open: false,
             sort_menu_pos: Pos2::ZERO,
-            view_menu_open: false,
-            view_menu_pos: Pos2::ZERO,
-            view_menu_frame: u64::MAX,
+            more_menu_open: false,
+            more_menu_pos: Pos2::ZERO,
+            more_menu_frame: u64::MAX,
             filter_menu_open: false,
             filter_menu_frame: u64::MAX,
             filter_menu_pos: Pos2::ZERO,
             filter_draft_tag: String::new(),
-            batch_tag_buf: String::new(),
             sort_menu_frame: u64::MAX,
+            sidebar_visible: true,
             tray_expanded: false,
             favorites_collapsed: false,
             folders_collapsed: false,
@@ -932,17 +934,10 @@ impl OpenPicasaApp {
         }
     }
 
-    /// 跳到某个刻度点（`07-A` ZOOM-02：`⌘1` 小 / `⌘2` 大）。
-    fn set_zoom_point(&mut self, index: usize) {
-        let px = picasa_core::SNAP_POINTS[index.min(2)];
-        self.zoom.drag_to(px, std::time::Instant::now());
-        self.zoom.end_drag(std::time::Instant::now());
-        self.persist_zoom();
-    }
-
-    /// 把滑块值写进 `settings.grid_cell_px`（`07-A` ZOOM-06：全局一份，重启恢复）。
+    /// 把缩放值写进 `settings.grid_cell_px`（`07-A` ZOOM-06：全局一份，重启恢复）。
     ///
-    /// 写入是**低频**的（只在松手 / 刻度变化时），不会每帧写一次库。
+    /// 写入是**低频**的（只在按钮/快捷键动作时），不会每帧写一次库。
+    /// M3.1：滑块已退役，本方法只剩「动作后落库」一个调用语义。
     fn persist_zoom(&mut self) {
         if let Ok(db) = self.lib.db() {
             let _ = db.set_grid_cell_px(self.zoom.to_setting());
@@ -1273,11 +1268,21 @@ impl OpenPicasaApp {
                     self.lib.toast = Some((format!("已放入托盘 {n} 张"), 2.5));
                 }
             }
-            // M3 ZOOM：`⌘1` / `⌘2` 从「三档」改成「滑块刻度点」。
-            // 功能没丢（R-M22-5）：它们仍然改变缩略图尺寸，只是从离散三档变成
-            // 连续滑块上的两个刻度点；`⌘0` 回默认刻度。
-            KeyAction::TierSmall => self.set_zoom_point(0),
-            KeyAction::TierLarge => self.set_zoom_point(2),
+            // M3.1：`⌘1`/`⌘2`/`⌘+`/`⌘−` 全部走对数档步进（与顶栏 −/+ 同一
+            // 条路径）；`⌘1` = 小一档、`⌘2` = 大一档（旧的三刻度点语义
+            // 随「缩略图」按钮一起退役）。
+            KeyAction::TierSmall => {
+                let next = picasa_core::step_log(self.zoom.cell_px(), -1);
+                self.zoom.drag_to(next, std::time::Instant::now());
+                self.zoom.end_drag(std::time::Instant::now());
+                self.persist_zoom();
+            }
+            KeyAction::TierLarge => {
+                let next = picasa_core::step_log(self.zoom.cell_px(), 1);
+                self.zoom.drag_to(next, std::time::Instant::now());
+                self.zoom.end_drag(std::time::Instant::now());
+                self.persist_zoom();
+            }
             KeyAction::ZoomReset => {
                 self.zoom.reset();
                 self.zoom.end_drag(std::time::Instant::now());
@@ -1399,10 +1404,10 @@ impl OpenPicasaApp {
             self.refresh_mgmt();
         }
 
-        // ① 顶部工具栏
+        // ① 顶部工具栏（M3.1：macOS「照片」风格单行顶栏）
         egui::Panel::top("toolbar-panel")
-            .exact_size(Metrics::TOOLBAR_H)
-            .frame(egui::Frame::new().fill(theme.chrome_bg))
+            .exact_size(Metrics::TOPBAR_H)
+            .frame(egui::Frame::new().fill(theme.toolbar_bg))
             .show(ui, |ui| {
                 let filter_active = self
                     .lib
@@ -1415,6 +1420,23 @@ impl OpenPicasaApp {
                             || f.size_class.is_some()
                             || !f.formats.is_empty()
                     });
+                // 标题两行：视图名 + 副标题。文件夹视图带「含子文件夹」的口径提示，
+                // 与截图的「图库 / 2026年2月18日–5月2日」双行结构对齐。
+                let total = self.lib.photos_total.max(self.lib.photos.len());
+                let title = self.lib.view_title();
+                let subtitle = match self.lib.view {
+                    picasa_core::View::All => format!("{total} 张照片"),
+                    picasa_core::View::Recent => format!("最近 30 天 · {total} 张"),
+                    picasa_core::View::Folder(_) => {
+                        if self.lib.recurse {
+                            format!("含子文件夹 · {total} 张")
+                        } else {
+                            format!("只看本文件夹 · {total} 张")
+                        }
+                    }
+                };
+                let zoom_min = self.zoom.cell_px() <= picasa_core::CELL_MIN_PX + 0.5;
+                let zoom_max = self.zoom.cell_px() >= picasa_core::CELL_MAX_PX - 0.5;
                 let out = toolbar::show(
                     ui,
                     &theme,
@@ -1427,40 +1449,58 @@ impl OpenPicasaApp {
                     self.lib.recurse_available(),
                     filter_active,
                     self.lib.search_in_current,
+                    &title,
+                    &subtitle,
+                    self.lib.view_mode,
+                    zoom_min,
+                    zoom_max,
                 );
-                let sort_btn_rect = out.sort_button.as_ref().map(|r| r.rect);
-                if let Some(new_search) = out.search_changed {
-                    if let Err(e) = self.lib.set_search(new_search) {
-                        tracing::warn!(error = %e, "搜索失败");
-                    }
-                    self.restore_scroll = Some(0.0);
-                }
-                if let Some(rect) = sort_btn_rect {
+                if let Some(rect) = out.sort_button {
                     self.sort_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
-                }
-                if let Some(rect) = out.view_button {
-                    self.view_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
                 }
                 if let Some(rect) = out.filter_button {
                     self.filter_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
                 }
                 for action in out.actions {
                     match action {
-                        ToolbarAction::AddFolder => self.add_folder(),
-                        ToolbarAction::RevealCurrent => self.reveal_selected(),
-                        ToolbarAction::ToggleSortMenu => {
+                        TopbarAction::ToggleSidebar => {
+                            self.sidebar_visible = !self.sidebar_visible;
+                        }
+                        TopbarAction::ZoomOut => {
+                            // 对数档缩小（⌘− 同路径）。按钮已是离散动作，
+                            // 不经过「拖动中不换纹理」的结算窗口。
+                            let next = picasa_core::step_log(self.zoom.cell_px(), -1);
+                            self.zoom.drag_to(next, std::time::Instant::now());
+                            self.zoom.end_drag(std::time::Instant::now());
+                            self.persist_zoom();
+                        }
+                        TopbarAction::ZoomIn => {
+                            let next = picasa_core::step_log(self.zoom.cell_px(), 1);
+                            self.zoom.drag_to(next, std::time::Instant::now());
+                            self.zoom.end_drag(std::time::Instant::now());
+                            self.persist_zoom();
+                        }
+                        TopbarAction::PickViewMode(mode) => {
+                            self.lib.set_view_mode(mode);
+                            // 切布局等于换了一个视图：滚动位置回顶，避免落在空洞处
+                            self.restore_scroll = Some(0.0);
+                        }
+                        TopbarAction::ToggleSortMenu => {
                             self.sort_menu_open = !self.sort_menu_open;
                             if self.sort_menu_open {
                                 self.sort_menu_frame = ctx.cumulative_frame_nr();
                             }
                         }
-                        ToolbarAction::ToggleViewMenu => {
-                            self.view_menu_open = !self.view_menu_open;
-                            if self.view_menu_open {
-                                self.view_menu_frame = ctx.cumulative_frame_nr();
-                            }
+                        TopbarAction::PickSortKey(key) => {
+                            self.pick_sort(key);
+                            self.sort_menu_open = false;
                         }
-                        ToolbarAction::ToggleFilterMenu => {
+                        TopbarAction::ToggleSortDirection => {
+                            let key = self.lib.sort.key;
+                            self.pick_sort(key);
+                            self.sort_menu_open = false;
+                        }
+                        TopbarAction::ToggleFilterMenu => {
                             self.filter_menu_open = !self.filter_menu_open;
                             if self.filter_menu_open {
                                 self.filter_menu_frame = ctx.cumulative_frame_nr();
@@ -1473,96 +1513,42 @@ impl OpenPicasaApp {
                                     .unwrap_or_default();
                             }
                         }
-                        ToolbarAction::ClearFilter => {
-                            if let Err(e) = self.lib.set_filter(None) {
-                                tracing::warn!(error = %e, "清除筛选失败");
-                            }
-                            self.restore_scroll = Some(0.0);
-                        }
-                        ToolbarAction::ApplyFilter(f) => {
-                            let f = *f;
-                            let has = f.starred_only
-                                || f.tag.is_some()
-                                || f.taken_range.is_some()
-                                || f.size_class.is_some()
-                                || !f.formats.is_empty();
-                            if let Err(e) = self.lib.set_filter(has.then_some(f)) {
-                                tracing::warn!(error = %e, "应用筛选失败");
-                            }
-                            self.filter_menu_open = false;
-                            self.restore_scroll = Some(0.0);
-                        }
-                        ToolbarAction::ToggleSearchScope => {
+                        TopbarAction::ToggleSearchScope => {
                             if let Err(e) = self.lib.set_search_in_current(!self.lib.search_in_current)
                             {
                                 tracing::warn!(error = %e, "切换搜索范围失败");
                             }
                         }
-                        ToolbarAction::BatchStar(on) => {
-                            match self.lib.batch_set_starred(on) {
-                                Ok(n) if n > 0 => {
-                                    self.lib.toast =
-                                        Some((format!("{} {} 张照片", if on { "已收藏" } else { "已取消收藏" }, n), 2.5));
-                                }
-                                Ok(_) => {}
-                                Err(e) => tracing::warn!(error = %e, "批量收藏失败"),
+                        TopbarAction::SearchChanged(text) => {
+                            if let Err(e) = self.lib.set_search(text) {
+                                tracing::warn!(error = %e, "搜索失败");
                             }
-                        }
-                        ToolbarAction::BatchAddTag => {
-                            let label = self.batch_tag_buf.trim().to_string();
-                            if label.is_empty() {
-                                self.lib.toast = Some(("先输入标签名".into(), 2.0));
-                            } else {
-                                match self.lib.batch_add_tag(&label) {
-                                    Ok(n) if n > 0 => {
-                                        self.lib.toast =
-                                            Some((format!("已为 {n} 张打上「{label}」"), 2.5));
-                                        self.batch_tag_buf.clear();
-                                    }
-                                    Ok(_) => {}
-                                    Err(e) => tracing::warn!(error = %e, "批量加标签失败"),
-                                }
-                            }
-                        }
-                        ToolbarAction::PickViewMode(mode) => {
-                            self.lib.set_view_mode(mode);
-                            // 切布局等于换了一个视图：滚动位置回顶，避免落在空洞处
                             self.restore_scroll = Some(0.0);
                         }
-                        ToolbarAction::PickSort(key) => {
-                            self.pick_sort(key);
-                            self.sort_menu_open = false;
+                        TopbarAction::More(more) => {
+                            match more {
+                                MoreAction::AddFolder => self.add_folder(),
+                                MoreAction::ToggleRecurse => self.toggle_recurse(),
+                                MoreAction::ToggleFullscreen => {
+                                    let fs = ctx
+                                        .input(|i| i.viewport().fullscreen.unwrap_or(false));
+                                    ctx.send_viewport_cmd(
+                                        egui::ViewportCommand::Fullscreen(!fs),
+                                    );
+                                }
+                                MoreAction::About => {
+                                    self.lib.toast = Some((
+                                        format!(
+                                            "OpenPicasa {} · 本地照片库（只读不改原文件）",
+                                            env!("CARGO_PKG_VERSION")
+                                        ),
+                                        3.0,
+                                    ));
+                                }
+                            }
                         }
-                        ToolbarAction::ToggleSortDirection => {
-                            let key = self.lib.sort.key;
-                            self.pick_sort(key);
-                            self.sort_menu_open = false;
-                        }
-                        // RECURSE-01（U-70）：切换「包含子文件夹」
-                        ToolbarAction::ToggleRecurse => self.toggle_recurse(),
-                        // ZOOM-02：工具栏「缩略图」按钮保留为「循环三刻度点」
-                        // （48/128/256，对应 SNAP_POINTS）。M3 下布局由连续
-                        // `cell_px` 驱动，按钮只是把滑块跳到三个习惯刻度。
-                        ToolbarAction::CycleTier => {
-                            self.zoom.cycle_point();
-                            self.persist_zoom();
-                        }
-                        ToolbarAction::ToggleFullscreen => {
-                            let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
-                        }
-                        ToolbarAction::Quit => {
-                            // 菜单「档案 → 退出」。走正常退出路径，on_exit 会存偏好。
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        ToolbarAction::About => {
-                            self.lib.toast = Some((
-                                format!(
-                                    "OpenPicasa {} · 本地照片库（只读不改原文件）",
-                                    env!("CARGO_PKG_VERSION")
-                                ),
-                                3.0,
-                            ));
+                        TopbarAction::Placeholder(text) => {
+                            self.lib.toast = Some((text.to_string(), 2.5));
                         }
                     }
                 }
@@ -1582,15 +1568,8 @@ impl OpenPicasaApp {
                     &self.verify_text,
                     self.zoom.cell_px(),
                 );
-                // 拖动中只改布局、**不换纹理**（ZOOM-04）。
-                // 松手后交给 `settle`：它在 150 ms 静默之后才决定要不要换档。
-                if let Some(px) = out.zoom_drag {
-                    let now = std::time::Instant::now();
-                    self.zoom.drag_to(px, now);
-                }
-                if out.zoom_released {
-                    self.zoom.end_drag(std::time::Instant::now());
-                }
+                // M3.1：状态栏滑块已移除（顶栏 −/+ 按钮替代），
+                // zoom_drag / zoom_released 分支随之退役。
                 if out.index_clicked {
                     // M2.2 §2.6：唯一入口 → 索引管理页（并自动定位到有问题的标签）。
                     // 旧的 `progress.open_panel()` 不再挂在这里——右下角弹框仍然自己出现
@@ -1607,40 +1586,50 @@ impl OpenPicasaApp {
                 }
             });
 
-        // ② 左栏（含底部托盘）
-        let sidebar_resp = egui::Panel::left("sidebar-panel")
-            .default_size(self.lib.prefs.sidebar_width)
-            .size_range(Metrics::SIDEBAR_MIN..=Metrics::SIDEBAR_MAX)
-            .resizable(true)
-            .frame(egui::Frame::new().fill(theme.sidebar_bg))
-            .show(ui, |ui| {
-                let db_arc = self.lib.db.clone();
-                let db = db_arc.lock().expect("db 锁");
-                let mut sctx = SidebarCtx {
-                    theme: &theme,
-                    db: &db,
-                    service: &self.service,
-                    cache: &mut self.cache,
-                    tray_rows: &self.tray_rows,
-                    tray_expanded: self.tray_expanded,
-                    favorites_collapsed: self.favorites_collapsed,
-                    folders_collapsed: self.folders_collapsed,
-                    has_focus: ctx.memory(|m| m.focused()).is_none(),
-                    snapshot: &snap,
-                };
-                let actions = sidebar::show(ui, &self.lib, &mut sctx);
-                drop(db);
-                actions
-            });
+        // ② 左栏（含底部托盘）。M3.1：顶栏侧栏开关可整体收起
+        //（`show_collapsible` 会留抓握条，这里直接不建面板更干净）。
+        let sidebar_resp = self.sidebar_visible.then(|| {
+            egui::Panel::left("sidebar-panel")
+                .default_size(if self.lib.prefs.sidebar_width < Metrics::SIDEBAR_MIN {
+                    Metrics::SIDEBAR_DEFAULT_W
+                } else {
+                    self.lib.prefs.sidebar_width
+                })
+                .size_range(Metrics::SIDEBAR_MIN..=Metrics::SIDEBAR_MAX)
+                .size_range(Metrics::SIDEBAR_MIN..=Metrics::SIDEBAR_MAX)
+                .resizable(true)
+                .frame(egui::Frame::new().fill(theme.sidebar_bg))
+                .show(ui, |ui| {
+                    let db_arc = self.lib.db.clone();
+                    let db = db_arc.lock().expect("db 锁");
+                    let mut sctx = SidebarCtx {
+                        theme: &theme,
+                        db: &db,
+                        service: &self.service,
+                        cache: &mut self.cache,
+                        tray_rows: &self.tray_rows,
+                        tray_expanded: self.tray_expanded,
+                        favorites_collapsed: self.favorites_collapsed,
+                        folders_collapsed: self.folders_collapsed,
+                        has_focus: ctx.memory(|m| m.focused()).is_none(),
+                        snapshot: &snap,
+                    };
+                    let actions = sidebar::show(ui, &self.lib, &mut sctx);
+                    drop(db);
+                    actions
+                })
+        });
 
         // 左栏宽度持久化（U-03：左栏宽度固定，栅格吸收剩余宽度）
-        let w = sidebar_resp.response.rect.width();
-        if (w - self.lib.prefs.sidebar_width).abs() > 0.5 {
-            self.lib.prefs.sidebar_width = w;
-            self.lib.mark_prefs_dirty();
-        }
-        for action in sidebar_resp.inner {
-            self.apply_sidebar_action(action, &ctx);
+        if let Some(sidebar_resp) = &sidebar_resp {
+            let w = sidebar_resp.response.rect.width();
+            if (w - self.lib.prefs.sidebar_width).abs() > 0.5 {
+                self.lib.prefs.sidebar_width = w;
+                self.lib.mark_prefs_dirty();
+            }
+            for action in sidebar_resp.inner.clone() {
+                self.apply_sidebar_action(action, &ctx);
+            }
         }
 
         // ③ 中央栅格
@@ -1971,8 +1960,8 @@ impl OpenPicasaApp {
         if self.sort_menu_open && self.viewer.is_none() {
             if let Some(action) = toolbar::sort_menu(ui, self.sort_menu_pos, self.lib.sort) {
                 match action {
-                    ToolbarAction::PickSort(key) => self.pick_sort(key),
-                    ToolbarAction::ToggleSortDirection => {
+                    crate::topbar::TopbarAction::PickSortKey(key) => self.pick_sort(key),
+                    crate::topbar::TopbarAction::ToggleSortDirection => {
                         let key = self.lib.sort.key;
                         self.pick_sort(key);
                     }
@@ -1993,24 +1982,52 @@ impl OpenPicasaApp {
             }
         }
 
-        // 视图菜单（默认 / 纵向瀑布流 / 横向瀑布流）
-        if self.view_menu_open && self.viewer.is_none() {
-            if let Some(action) = toolbar::view_menu(ui, self.view_menu_pos, self.lib.view_mode) {
-                if let ToolbarAction::PickViewMode(mode) = action {
-                    self.lib.set_view_mode(mode);
-                    self.restore_scroll = Some(0.0);
-                }
-                self.view_menu_open = false;
+        // 视图菜单已在 M3.1 移除：三个视图模式改为顶栏分段控件
+        //（TopbarAction::PickViewMode 直接切，无弹层）。
+
+        // 「…」弹出菜单（M3.1 顶栏）
+        if self.more_menu_open && self.viewer.is_none() {
+            let actions = toolbar::more_menu(
+                ui,
+                self.more_menu_pos,
+                self.lib.recurse,
+                self.lib.recurse_available(),
+            );
+            if !actions.is_empty() {
+                self.more_menu_open = false;
             }
-            // 打开帧豁免（与排序菜单同款）：那一帧的 click 就是「点按钮」本身
-            if self.view_menu_frame != ctx.cumulative_frame_nr()
+            for a in actions {
+                use crate::topbar::MoreAction;
+                match a {
+                    crate::topbar::TopbarAction::More(MoreAction::AddFolder) => self.add_folder(),
+                    crate::topbar::TopbarAction::More(MoreAction::ToggleRecurse) => {
+                        self.toggle_recurse()
+                    }
+                    crate::topbar::TopbarAction::More(MoreAction::ToggleFullscreen) => {
+                        let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
+                    }
+                    crate::topbar::TopbarAction::More(MoreAction::About) => {
+                        self.lib.toast = Some((
+                            format!(
+                                "OpenPicasa {} · 本地照片库（只读不改原文件）",
+                                env!("CARGO_PKG_VERSION")
+                            ),
+                            3.0,
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            // 打开帧豁免 + 点空白关闭（与排序菜单同款机制）
+            if self.more_menu_frame != ctx.cumulative_frame_nr()
                 && ctx.input(|i| i.pointer.any_click())
             {
                 let pos = ctx.input(|i| i.pointer.interact_pos());
                 if let Some(p) = pos
-                    && !Rect::from_min_size(self.view_menu_pos, vec2(160.0, 120.0)).contains(p)
+                    && !Rect::from_min_size(self.more_menu_pos, vec2(200.0, 140.0)).contains(p)
                 {
-                    self.view_menu_open = false;
+                    self.more_menu_open = false;
                 }
             }
         }
@@ -2160,7 +2177,7 @@ impl OpenPicasaApp {
             }
             if let Some(action) = action {
                 match action {
-                    ToolbarAction::ApplyFilter(f) => {
+                    FilterPanelAction::Apply(f) => {
                         let f = *f;
                         let has = f.starred_only
                             || f.tag.is_some()
@@ -2173,14 +2190,14 @@ impl OpenPicasaApp {
                         self.filter_menu_open = false;
                         self.restore_scroll = Some(0.0);
                     }
-                    ToolbarAction::ClearFilter => {
+                    FilterPanelAction::Clear => {
                         if let Err(e) = self.lib.set_filter(None) {
                             tracing::warn!(error = %e, "清除筛选失败");
                         }
                         self.filter_menu_open = false;
                         self.restore_scroll = Some(0.0);
                     }
-                    ToolbarAction::BatchStar(on) => {
+                    FilterPanelAction::BatchStar(on) => {
                         match self.lib.batch_set_starred(on) {
                             Ok(n) if n > 0 => {
                                 self.lib.toast = Some((
@@ -2192,7 +2209,7 @@ impl OpenPicasaApp {
                             Err(e) => tracing::warn!(error = %e, "批量收藏失败"),
                         }
                     }
-                    ToolbarAction::BatchAddTag => {
+                    FilterPanelAction::BatchAddTag => {
                         let label = self.filter_draft_tag.trim().to_string();
                         if !label.is_empty() {
                             match self.lib.batch_add_tag(&label) {
@@ -2205,7 +2222,6 @@ impl OpenPicasaApp {
                             }
                         }
                     }
-                    _ => {}
                 }
             }
             if self.filter_menu_frame != ctx.cumulative_frame_nr()
@@ -2810,9 +2826,18 @@ fn load_zoom_setting(lib: &Library) -> Option<f32> {
 }
 
 impl eframe::App for OpenPicasaApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.theme = Theme::picasa();
+
+        // M3.1：macOS 上把红绿灯嵌进自绘顶栏（与 `with_fullsize_content_view`
+        // 配套）。AppKit 每次窗口布局都会重置按钮位置，所以**每帧**都要调；
+        // 其他平台此调用是空操作。
+        frame.set_traffic_lights_position(
+            &ctx,
+            egui::Rangef::new(0.0, Metrics::TOPBAR_H),
+            14.0,
+        );
 
         self.pump_events(&ctx);
         // M3：监视器同步（幂等，只在根集合真的变了时才装/卸）

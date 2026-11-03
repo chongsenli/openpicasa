@@ -80,6 +80,22 @@ pub struct Theme {
     pub header_border: Color32,
     /// 组头折叠钮的 Picasa 绿
     pub disclosure_green: Color32,
+
+    // ---- M3.1：macOS「照片」风格（量自参考截图 2400×1440 ÷2）----
+    /// 顶栏底色（截图上没有独立顶栏底，就是窗口白）
+    pub toolbar_bg: Color32,
+    /// 顶栏底边发丝线（半透明灰）
+    pub toolbar_border: Color32,
+    /// 分段控件胶囊底（灰白）
+    pub seg_bg: Color32,
+    /// 分段控件选中片白底
+    pub seg_active: Color32,
+    /// 顶栏图标主色（近黑）
+    pub toolbar_icon: Color32,
+    /// 左栏分组标题（"相簿"/"固定"，灰色小字）
+    pub sidebar_section_text: Color32,
+    /// 左栏悬停底色（浅灰）
+    pub sidebar_hover: Color32,
 }
 
 impl Theme {
@@ -89,12 +105,12 @@ impl Theme {
         Self {
             // TODO(U-43-①): 待取色。目测 ≈ #F0F0F0
             chrome_bg: Color32::from_rgb(0xF0, 0xF0, 0xF0),
-            // ② 栅格背景：量自 09-library-zh-full.png（242,242,242）
-            grid_bg: Color32::from_rgb(0xF2, 0xF2, 0xF2),
+            // M3.1：栅格背景 = 窗口白（截图的内容区就是白底）
+            grid_bg: Color32::WHITE,
             // TODO(U-43-④): 待取色。目测 ≈ #D6D6D6
             header_bg: Color32::from_rgb(0xD8, 0xD8, 0xD8),
-            // 侧栏底：量自 09-library-zh-full.png（243,243,243）
-            sidebar_bg: Color32::from_rgb(0xF3, 0xF3, 0xF3),
+            // M3.1：侧栏底（截图半透灰的实色近似，比窗口白深一档）
+            sidebar_bg: Color32::from_rgb(0xF5, 0xF4, 0xF2),
 
             separator: Color32::from_rgb(0xC8, 0xC8, 0xC8),
             cell_border: Color32::from_rgb(0xCF, 0xCF, 0xCF),
@@ -134,6 +150,15 @@ impl Theme {
             ok: Color32::from_rgb(0x3E, 0x8E, 0x3E),
             overlay_bg: Color32::from_rgb(0xFB, 0xFB, 0xFB),
             placeholder_bg: Color32::from_rgb(0xE4, 0xE4, 0xE4),
+
+            // M3.1（量自参考截图）：窗口白、发丝线、灰白胶囊
+            toolbar_bg: Color32::WHITE,
+            toolbar_border: Color32::from_rgba_premultiplied(0, 0, 0, 26),
+            seg_bg: Color32::from_rgb(0xEB, 0xE9, 0xE5),
+            seg_active: Color32::WHITE,
+            toolbar_icon: Color32::from_rgb(0x2A, 0x2A, 0x2A),
+            sidebar_section_text: Color32::from_rgb(0x8A, 0x8A, 0x8A),
+            sidebar_hover: Color32::from_rgb(0xE9, 0xE7, 0xE3),
         }
     }
 }
@@ -190,6 +215,24 @@ impl Metrics {
 
     /// U-21：三档单元格边长（与 `picasa_core::library::CELL_SIZES` 必须一致）
     pub const CELL_SIZES: [f32; 3] = [85.0, 144.0, 200.0];
+
+    // ---- M3.1：macOS「照片」风格顶栏（量自参考截图 2400×1440 ÷2）----
+    /// 顶栏总高：截图 104px ÷ 2 ≈ 52。
+    pub const TOPBAR_H: f32 = 52.0;
+    /// 顶栏图标（圆形热区）直径：截图 76px ÷ 2 = 38。
+    pub const TOPBAR_ICON_D: f32 = 38.0;
+    /// 左栏默认宽度：截图 432px ÷ 2 = 216（连同最小/最大一起放宽）。
+    pub const SIDEBAR_DEFAULT_W: f32 = 216.0;
+    /// 左栏行高：截图 72px ÷ 2 = 36。
+    pub const SIDEBAR_ROW_H: f32 = 36.0;
+    /// 左栏行缩进每级步长。
+    pub const SIDEBAR_INDENT: f32 = 16.0;
+    /// 左栏分组标题（"相簿"）行高：截图上标题行约 30px ÷ 2 = 15 → 取 22 留呼吸。
+    pub const SIDEBAR_SECTION_H: f32 = 30.0;
+    /// 分段控件高度：截图 72px ÷ 2 = 36。
+    pub const SEG_H: f32 = 36.0;
+    /// −/+ 胶囊高：与分段控件同高。
+    pub const ZOOM_PILL_H: f32 = 36.0;
     /// U-22：单元格间距（水平/垂直同一个值，**不是均分剩余空间**）
     pub const CELL_GAP: f32 = 10.0;
     /// U-23：栅格四周留白

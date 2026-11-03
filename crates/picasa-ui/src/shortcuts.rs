@@ -79,9 +79,16 @@ pub fn collect(ctx: &Context, in_viewer: bool) -> Vec<KeyAction> {
             if cmd && i.key_pressed(Key::Num2) {
                 out.push(KeyAction::TierLarge);
             }
-            // `⌘0`：滑块回默认刻度（`07-A` ZOOM-03）
+            // `⌘0`：缩略图尺寸回默认刻度（`07-A` ZOOM-03）
             if cmd && i.key_pressed(Key::Num0) {
                 out.push(KeyAction::ZoomReset);
+            }
+            // M3.1：`⌘+` / `⌘−` 与顶栏 −/+ 按钮同一条路径（对数档）。
+            if cmd && (i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals)) {
+                out.push(KeyAction::TierLarge);
+            }
+            if cmd && i.key_pressed(Key::Minus) {
+                out.push(KeyAction::TierSmall);
             }
             // `⌘⇧R`：包含子文件夹（`07-A` RECURSE-01）。
             // 用 `shift` 而不是另设 `⌘R`——后者在不少应用里是「刷新」，

@@ -1,584 +1,89 @@
-//! 顶部工具栏：图标在上、文案在下，按钮之间以竖线分组（U-06~U-12）。
+//! 顶部工具栏。
 //!
-//! ## 红线 R-2 在这里的体现
+//! ## M3.1 起的变化（2026-11-03，用户指令）
 //!
-//! **M1 的工具栏里没有「编辑」「编辑室」「星标」按钮。** 不是置灰，是**不存在**
-//! （01 U-12 的验收判据就是「全量截图核对无编辑入口」）。
+//! 整体布局除预览图片区域外像素级模仿 macOS「照片」风格参考截图：
 //!
-//! 唯一保留的置灰入口是左栏的「星标」——它是版式的一部分（U-19 的例外说明）。
+//! * 单行顶栏（52px，白底 + 发丝线），原 XP 风格的「菜单栏 21px + 工具行 38px +
+//!   文字按钮 + 状态栏滑块」全部废弃；
+//! * 「视图」三子菜单（默认方格 / 纵向瀑布流 / 横向瀑布流）搬进顶栏中央的
+//!   **分段控件**（模仿截图的「年 | 月 | 所有照片」按钮组），弹出菜单移除；
+//! * 「缩略图」循环三刻度按钮**移除**（用户指令：去掉缩略图的按钮）；
+//! * 状态栏缩放滑块**移除**，改为顶栏「− / +」胶囊按钮（用户指令）；
+//! * 原工具栏的真实功能全部保留：添加文件夹（→「…」菜单）、显示位置、排序、
+//!   筛选、搜索范围切换、含子文件夹（→「…」菜单）、全屏（→「…」菜单）。
+//!
+//! 实际绘制在 [`crate::topbar`]，本文件保留筛选面板（弹层）与旧类型转调，
+//! 让 `app.rs` 的改动最小。
 
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Ui, pos2, vec2};
+use eframe::egui::{self, Color32, Ui, Pos2};
+
 use picasa_core::ViewMode;
-use picasa_db::SortKey;
 
-use crate::icons::{self, Icon};
-use crate::theme::{Metrics, Theme};
+pub use crate::topbar::{MoreAction, TopbarAction, TopbarOutput};
 
-/// 工具栏产出的动作。App 负责执行（工具栏自己不碰状态）。
-#[derive(Clone, Debug, PartialEq)]
-pub enum ToolbarAction {
-    AddFolder,
-    RevealCurrent,
-    ToggleSortMenu,
-    PickSort(SortKey),
-    ToggleSortDirection,
-    CycleTier,
-    /// 打开/关闭「视图」弹出菜单（默认 / 纵向瀑布流 / 横向瀑布流）
-    ToggleViewMenu,
-    /// 打开/关闭「筛选」弹出面板（日期/类型/尺寸/标签/收藏）
-    ToggleFilterMenu,
-    /// 清除全部筛选
-    ClearFilter,
-    /// 设置筛选条件（面板点选后整包提交）
-    ApplyFilter(Box<picasa_db::PhotoFilter>),
-    /// 切换搜索范围（当前文件夹 ↔ 全部图库）
-    ToggleSearchScope,
-    /// 批量收藏（当前选择集）
-    BatchStar(bool),
-    /// 批量加标签（当前选择集）
-    BatchAddTag,
-    /// 选择一个视图模式（M3 瀑布流）
-    PickViewMode(ViewMode),
-    /// 切换「包含子文件夹」（`07-A` RECURSE-01 / U-70）
-    ToggleRecurse,
-    ToggleFullscreen,
-    /// 菜单「档案 → 退出」（Ctrl+Q 同款路径）
-    Quit,
-    /// 菜单「说明 → 关于」：App 用 toast 回应（不做独立窗口）
-    About,
-}
-
-/// 「索引管理」二级菜单里的动作。
+/// 顶栏（转调 [`crate::topbar::show`]）。
 ///
-/// 这里**只放用户真的需要在主界面随手点到的两件事**：修坏图、看进度。
-/// 暂停/删除索引属于「看着进度决定」的操作，留在进度面板里，
-/// 主界面不再单开「索引管理」入口 —— M2.2 §2.6 起，状态栏是唯一入口。
-pub struct ToolbarOutput {
-    pub actions: Vec<ToolbarAction>,
-    /// 搜索框内容（双向绑定由 App 处理）
-    pub search_changed: Option<String>,
-    pub sort_button: Option<Response>,
-    /// 「视图」按钮的矩形（App 用它定位弹出菜单）
-    pub view_button: Option<egui::Rect>,
-    /// 「筛选」按钮的矩形（App 用它定位弹出菜单）
-    pub filter_button: Option<egui::Rect>,
-}
-
+/// 保留原函数名与近似签名，`app.rs` 只需换枚举处理分支。
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
-    theme: &Theme,
-    cell_px: f32,
+    theme: &crate::theme::Theme,
+    _cell_px: f32,
     sort: picasa_db::SortSpec,
-    has_selection: bool,
+    _has_selection: bool,
     search: &mut String,
-    sort_menu_open: bool,
-    // 「包含子文件夹」当前状态与可用性（`07-A` RECURSE-01/09）
+    _sort_menu_open: bool,
+    _recurse_on: bool,
+    _recurse_available: bool,
+    filter_active: bool,
+    search_in_current: bool,
+    title: &str,
+    subtitle: &str,
+    view_mode: ViewMode,
+    zoom_min: bool,
+    zoom_max: bool,
+) -> TopbarOutput {
+    crate::topbar::show(
+        ui,
+        theme,
+        title,
+        subtitle,
+        view_mode,
+        sort,
+        filter_active,
+        search,
+        search_in_current,
+        zoom_min,
+        zoom_max,
+    )
+}
+
+// ⚠️ M2.2 §2.6：原「索引管理」二级菜单已整体移除；
+// M3.1 起整个 XP 工具行也由单行顶栏替代（见文件头）。不留残骸。
+
+/// 排序弹出菜单：转调顶栏版本（观感与截图一致）。
+pub fn sort_menu(ui: &mut Ui, at: Pos2, current: picasa_db::SortSpec) -> Option<TopbarAction> {
+    crate::topbar::sort_menu(ui, at, current)
+}
+
+/// 「…」弹出菜单：转调顶栏版本。
+pub fn more_menu(
+    ui: &mut Ui,
+    at: Pos2,
     recurse_on: bool,
     recurse_available: bool,
-    // M4：筛选是否有激活条件（按钮高亮用）
-    filter_active: bool,
-    // M4：搜索范围（true = 当前文件夹，false = 全部图库）
-    search_in_current: bool,
-) -> ToolbarOutput {
-    let mut out = ToolbarOutput {
-        actions: Vec::new(),
-        search_changed: None,
-        sort_button: None,
-        view_button: None,
-        filter_button: None,
-    };
-    let rect = Rect::from_min_size(
-        ui.max_rect().left_top(),
-        vec2(ui.max_rect().width(), Metrics::TOOLBAR_H),
-    );
-    let _ = ui.allocate_space(vec2(rect.width(), rect.height()));
-
-    // ---- 段 1：菜单栏（21px，白→淡蓝渐变，底边 #B6BCCC）----
-    // 量自 09-library-zh-full.png y=20..40。原版有 8 个菜单（档案…说明），
-    // 我们只放**有真实功能项**的三个 —— R-2 红线：编辑(E)/建立(C) 是编辑入口，
-    // M1 判据「无编辑入口」照旧适用，版式照抄不等于照抄功能。
-    let mb = Rect::from_min_size(rect.left_top(), vec2(rect.width(), Metrics::MENUBAR_H));
-    draw_menubar(ui, mb, theme, &mut out);
-    painter_line(
-        ui,
-        pos2(mb.left(), mb.bottom() + 0.5),
-        pos2(mb.right(), mb.bottom() + 0.5),
-        Metrics::MENUBAR_BORDER,
-    );
-
-    // ---- 段 2：工具行（38px，#E8E8E8 底，横排小按钮 + 右侧搜索框）----
-    let tr = Rect::from_min_size(
-        pos2(rect.left(), mb.bottom() + 1.0),
-        vec2(rect.width(), Metrics::TOOLROW_H),
-    );
-    let painter = ui.painter_at(tr);
-    painter.rect_filled(tr, 0.0, Metrics::TOOLROW_BG);
-    painter.line_segment(
-        [tr.left_bottom(), tr.right_bottom()],
-        egui::Stroke::new(1.0, Metrics::TOOLROW_BORDER),
-    );
-
-    let mut x = tr.left() + 6.0;
-    let btn_h = 26.0;
-    let btn_y = tr.top() + (Metrics::TOOLROW_H - btn_h) * 0.5;
-
-    // 组 1：返回（M1 恒禁用，U-09 保留占位）
-    let back_rect = Rect::from_min_size(pos2(x, btn_y), vec2(30.0, btn_h));
-    row_button(
-        ui,
-        &painter,
-        back_rect,
-        Icon::Back,
-        "",
-        false,
-        "返回图库（M1 无其他视图）",
-        theme,
-    );
-    x = back_rect.right() + 6.0;
-    x = draw_sep(&painter, x, tr);
-
-    // 组 2：添加文件夹 / 显示位置
-    let add_rect = Rect::from_min_size(pos2(x, btn_y), vec2(88.0, btn_h));
-    if row_button(
-        ui,
-        &painter,
-        add_rect,
-        Icon::AddFolder,
-        "添加文件夹",
-        true,
-        "把一个照片目录加入图库（只读，不改你的文件）",
-        theme,
-    ) {
-        out.actions.push(ToolbarAction::AddFolder);
-    }
-    x = add_rect.right() + 4.0;
-    let reveal_rect = Rect::from_min_size(pos2(x, btn_y), vec2(76.0, btn_h));
-    if row_button(
-        ui,
-        &painter,
-        reveal_rect,
-        Icon::Reveal,
-        "显示位置",
-        has_selection,
-        "在 Finder 中显示选中照片（Ctrl+Enter）",
-        theme,
-    ) {
-        out.actions.push(ToolbarAction::RevealCurrent);
-    }
-    x = reveal_rect.right() + 6.0;
-    x = draw_sep(&painter, x, tr);
-
-    // 组 3：排序 / 缩略图大小
-    let sort_rect = Rect::from_min_size(pos2(x, btn_y), vec2(78.0, btn_h));
-    let sort_label = sort_label(sort.key, sort.descending);
-    let sort_resp = row_button_resp(
-        ui,
-        &painter,
-        sort_rect,
-        Icon::Sort,
-        sort_label,
-        true,
-        "排序方式",
-        theme,
-        sort_menu_open,
-    );
-    if sort_resp.clicked() {
-        out.actions.push(ToolbarAction::ToggleSortMenu);
-    }
-    out.sort_button = Some(sort_resp);
-    x = sort_rect.right() + 4.0;
-    let size_rect = Rect::from_min_size(pos2(x, btn_y), vec2(72.0, btn_h));
-    if row_button(
-        ui,
-        &painter,
-        size_rect,
-        Icon::GridSize,
-        "缩略图",
-        true,
-        "切换缩略图大小（Ctrl+1 小 / Ctrl+2 大）",
-        theme,
-    ) {
-        out.actions.push(ToolbarAction::CycleTier);
-    }
-    x = size_rect.right() + 4.0;
-
-    // M3 追加：视图切换（默认 / 纵向瀑布流 / 横向瀑布流）。弹出菜单由 App 画。
-    let view_rect = Rect::from_min_size(pos2(x, btn_y), vec2(64.0, btn_h));
-    if row_button(
-        ui,
-        &painter,
-        view_rect,
-        Icon::GridSize,
-        "视图",
-        true,
-        "切换视图布局（默认方格 / 瀑布流）",
-        theme,
-    ) {
-        out.actions.push(ToolbarAction::ToggleViewMenu);
-    }
-    out.view_button = Some(view_rect);
-    x = view_rect.right() + 4.0;
-
-    // M4：筛选按钮（日期/类型/尺寸/标签）。有激活条件时按钮保持按下态。
-    let filter_rect = Rect::from_min_size(pos2(x, btn_y), vec2(64.0, btn_h));
-    if row_button(
-        ui,
-        &painter,
-        filter_rect,
-        Icon::Sort,
-        "筛选",
-        true,
-        "按拍摄日期 / 类型 / 尺寸 / 标签筛选",
-        theme,
-    ) {
-        out.actions.push(ToolbarAction::ToggleFilterMenu);
-    }
-    out.filter_button = Some(filter_rect);
-    let _ = filter_active; // 高亮由 row_button_resp 的 pressed 参数承担（下方重画）
-    x = filter_rect.right() + 4.0;
-
-    // M4：搜索范围切换（搜索框左边的小按钮）
-    let scope_label = if search_in_current { "当前文件夹" } else { "全部图库" };
-    let scope_rect = Rect::from_min_size(pos2(x, btn_y), vec2(88.0, btn_h));
-    if row_button(
-        ui,
-        &painter,
-        scope_rect,
-        Icon::Search,
-        scope_label,
-        true,
-        if search_in_current {
-            "搜索范围：当前文件夹。点击改为搜索全部图库"
-        } else {
-            "搜索范围：全部图库。点击改回当前文件夹"
-        },
-        theme,
-    ) {
-        out.actions.push(ToolbarAction::ToggleSearchScope);
-    }
-    x = scope_rect.right() + 4.0;
-
-    // M3 RECURSE-01（U-70）：工具栏「包含子文件夹」切换钮。
-    //
-    // 「所有照片」视图下置灰（RECURSE-09：语义重叠——它本来就是全库）。
-    let rec_rect = Rect::from_min_size(pos2(x, btn_y), vec2(86.0, btn_h));
-    let rec_resp = row_button_resp(
-        ui,
-        &painter,
-        rec_rect,
-        Icon::Folder,
-        "含子文件夹",
-        recurse_available,
-        if recurse_available {
-            "显示选中文件夹及其所有子文件夹里的照片（Ctrl+Shift+R）"
-        } else {
-            "「所有照片」视图下不适用"
-        },
-        theme,
-        recurse_on,
-    );
-    if rec_resp.clicked() && recurse_available {
-        out.actions.push(ToolbarAction::ToggleRecurse);
-    }
-    x = rec_rect.right() + 6.0;
-    x = draw_sep(&painter, x, tr);
-
-    // 组 4：全屏
-    let fs_rect = Rect::from_min_size(pos2(x, btn_y), vec2(56.0, btn_h));
-    if row_button(
-        ui,
-        &painter,
-        fs_rect,
-        Icon::Fullscreen,
-        "全屏",
-        true,
-        "全屏（F11）",
-        theme,
-    ) {
-        out.actions.push(ToolbarAction::ToggleFullscreen);
-    }
-
-    // ---- 右侧：搜索框（参考图 x=1250 处：#7F9DB9 边 + 白芯，高 23px）----
-    let search_w = 200.0_f32.min(tr.width() * 0.30);
-    let search_rect = Rect::from_min_size(
-        pos2(tr.right() - search_w - 12.0, tr.center().y - 11.5),
-        vec2(search_w, 23.0),
-    );
-    painters_search_box(ui, &painter, search_rect, theme, search, &mut out);
-
-    // 档位提示（搜索框左侧小字；M3 ZOOM-01：显示连续滑块值，而非离散档）
-    painter.text(
-        pos2(search_rect.left() - 8.0, tr.center().y),
-        Align2::RIGHT_CENTER,
-        format!("{}px", cell_px.round() as i32),
-        FontId::new(10.0, egui::FontFamily::Proportional),
-        theme.text_secondary,
-    );
-
-    out
+) -> Vec<TopbarAction> {
+    crate::topbar::more_menu(ui, at, recurse_on, recurse_available)
 }
 
-/// 一个菜单项：`(标题, 可用, 点击后发出的动作)`。
-type MenuItem<'a> = (&'a str, bool, ToolbarAction);
-/// 一个菜单：`(菜单名, 菜单项列表)`。
-type MenuDef<'a> = (&'a str, &'a [MenuItem<'a>]);
-
-/// 菜单栏：渐变底 + 文字菜单（egui `menu_button`，静止态透明底、悬停才亮）。
-fn draw_menubar(ui: &mut Ui, rect: Rect, _theme: &Theme, out: &mut ToolbarOutput) {
-    let painter = ui.painter_at(rect);
-    // 三段渐变：顶 #FEFEFF → 中 #D4DBEE → 底 #E1E6F6（两个三角带）
-    use eframe::epaint::Mesh;
-    let mut mesh = Mesh::default();
-    let mid_y = rect.top() + rect.height() * 0.45;
-    for (p, c) in [
-        (pos2(rect.left(), rect.top()), Metrics::MENUBAR_TOP),
-        (pos2(rect.right(), rect.top()), Metrics::MENUBAR_TOP),
-        (pos2(rect.right(), mid_y), Metrics::MENUBAR_MID),
-        (pos2(rect.left(), mid_y), Metrics::MENUBAR_MID),
-        (pos2(rect.right(), rect.bottom()), Metrics::MENUBAR_BOT),
-        (pos2(rect.left(), rect.bottom()), Metrics::MENUBAR_BOT),
-    ] {
-        mesh.colored_vertex(p, c);
-    }
-    // 上下两个四边形（顶点 0-1-2-3 与 2-3-4-5）
-    for (a, b, c) in [(0, 1, 2), (0, 2, 3), (2, 4, 5), (2, 5, 3)] {
-        mesh.add_triangle(a, b, c);
-    }
-    painter.add(egui::Shape::Mesh(std::sync::Arc::new(mesh)));
-
-    // 菜单项。egui menu_button 的字色跟 override_text_color 走（#202020），静止底透明。
-    let menus: &[MenuDef] = &[
-        (
-            "档案(F)",
-            &[
-                ("添加文件夹", true, ToolbarAction::AddFolder),
-                ("在 Finder 中显示", false, ToolbarAction::RevealCurrent),
-            ],
-        ),
-        (
-            "视图(V)",
-            &[
-                ("排序方式…", true, ToolbarAction::ToggleSortMenu),
-                ("切换缩略图大小", true, ToolbarAction::CycleTier),
-                ("全屏", true, ToolbarAction::ToggleFullscreen),
-            ],
-        ),
-        (
-            "说明(H)",
-            &[("关于 OpenPicasa", true, ToolbarAction::About)],
-        ),
-    ];
-    for (title, items) in menus {
-        ui.menu_button(*title, |ui| {
-            for (label, enabled, action) in *items {
-                if ui
-                    .add_enabled(*enabled, egui::Button::new(*label))
-                    .clicked()
-                {
-                    out.actions.push(action.clone());
-                    ui.close();
-                }
-            }
-        });
-    }
-}
-
-fn sort_label(key: SortKey, desc: bool) -> &'static str {
-    match key {
-        SortKey::TakenAt => {
-            if desc {
-                "按日期"
-            } else {
-                "按日期↑"
-            }
-        }
-        SortKey::Name => {
-            if desc {
-                "按名称↓"
-            } else {
-                "按名称"
-            }
-        }
-        SortKey::ModifiedAt => "修改时间",
-        SortKey::Size => "文件大小",
-        SortKey::Dimensions => "尺寸",
-    }
-}
-
-fn painter_line(ui: &Ui, a: Pos2, b: Pos2, color: Color32) {
-    ui.painter()
-        .line_segment([a, b], egui::Stroke::new(1.0, color));
-}
-
-/// 工具行组间竖线，返回推进后的 x。
-fn draw_sep(painter: &egui::Painter, x: f32, rect: Rect) -> f32 {
-    painter.line_segment(
-        [pos2(x, rect.top() + 7.0), pos2(x, rect.bottom() - 7.0)],
-        egui::Stroke::new(1.0, Color32::from_rgb(0xC8, 0xC8, 0xC8)),
-    );
-    x + 6.0
-}
-
-/// 工具行按钮：图标在左、文字在右（一行内横排，区别于旧版的上下堆叠）。
-#[allow(clippy::too_many_arguments)]
-fn row_button(
-    ui: &mut Ui,
-    painter: &egui::Painter,
-    rect: Rect,
-    icon: Icon,
-    label: &str,
-    enabled: bool,
-    tooltip: &str,
-    theme: &Theme,
-) -> bool {
-    row_button_resp(
-        ui, painter, rect, icon, label, enabled, tooltip, theme, false,
-    )
-    .clicked()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn row_button_resp(
-    ui: &mut Ui,
-    painter: &egui::Painter,
-    rect: Rect,
-    icon: Icon,
-    label: &str,
-    enabled: bool,
-    tooltip: &str,
-    theme: &Theme,
-    pressed: bool,
-) -> Response {
-    let sense = if enabled {
-        Sense::click()
-    } else {
-        Sense::hover()
-    };
-    let resp = ui.interact(rect, ui.scope_id().with(("toolrow", label)), sense);
-    let hovered = enabled && resp.hovered();
-
-    if pressed || hovered {
-        painter.rect_filled(rect, 3.0, theme.cell_hover);
-    }
-
-    let color = if enabled {
-        theme.text_primary
-    } else {
-        theme.text_disabled
-    };
-    let mut cx = rect.left() + 6.0;
-    if !label.is_empty() {
-        let icon_rect = Rect::from_center_size(pos2(cx, rect.center().y), vec2(14.0, 14.0));
-        icons::draw(painter, icon, icon_rect, color, 1.3);
-        cx += 18.0;
-        painter.text(
-            pos2(cx, rect.center().y),
-            Align2::LEFT_CENTER,
-            label,
-            FontId::new(11.5, egui::FontFamily::Proportional),
-            color,
-        );
-    } else {
-        let icon_rect =
-            Rect::from_center_size(pos2(rect.center().x, rect.center().y), vec2(14.0, 14.0));
-        icons::draw(painter, icon, icon_rect, color, 1.3);
-    }
-
-    if hovered || !enabled {
-        resp.clone().on_hover_text(tooltip);
-    }
-    resp
-}
-
-/// 搜索框：白底、#7F9DB9 蓝灰边（量自参考图 x=1250，XP 经典风格）、左侧放大镜。
-fn painters_search_box(
-    ui: &mut Ui,
-    painter: &egui::Painter,
-    rect: Rect,
-    theme: &Theme,
-    search: &mut String,
-    out: &mut ToolbarOutput,
-) {
-    painter.rect_filled(rect, 2.0, Color32::WHITE);
-    painter.rect_stroke(
-        rect,
-        2.0,
-        egui::Stroke::new(1.0, Metrics::SEARCH_BORDER),
-        egui::StrokeKind::Inside,
-    );
-    let icon_rect =
-        Rect::from_center_size(pos2(rect.left() + 10.0, rect.center().y), vec2(12.0, 12.0));
-    icons::draw(painter, Icon::Search, icon_rect, theme.text_secondary, 1.2);
-
-    let edit_rect = Rect::from_min_max(
-        pos2(rect.left() + 20.0, rect.top() + 2.0),
-        pos2(rect.right() - 4.0, rect.bottom() - 2.0),
-    );
-    let id = ui.scope_id().with("search-box");
-    let mut buf = search.clone();
-    let resp = ui.put(
-        edit_rect,
-        egui::TextEdit::singleline(&mut buf)
-            .id(id)
-            .frame(egui::Frame::NONE)
-            .margin(egui::Margin::symmetric(2, 3))
-            .hint_text("搜索文件名 / 文件夹 / 日期")
-            .text_color(theme.text_primary),
-    );
-    if resp.changed() {
-        *search = buf.clone();
-        out.search_changed = Some(buf);
-    }
-}
-
-/// 排序弹出菜单（由 App 画，因为它要管开关状态）。
-pub fn sort_menu(ui: &mut Ui, at: Pos2, current: picasa_db::SortSpec) -> Option<ToolbarAction> {
-    let mut action = None;
-    egui::Area::new(ui.scope_id().with("sort-menu"))
-        .fixed_pos(at)
-        .order(egui::Order::Foreground)
-        .show(ui.ctx(), |ui| {
-            egui::Frame::new()
-                .fill(Color32::WHITE)
-                .stroke(egui::Stroke::new(1.0, Color32::from_gray(0xC0)))
-                .corner_radius(3.0)
-                .inner_margin(egui::Margin::same(4))
-                .shadow(egui::epaint::Shadow {
-                    offset: [1, 2],
-                    blur: 6,
-                    spread: 0,
-                    color: Color32::from_black_alpha(40),
-                })
-                .show(ui, |ui| {
-                    ui.set_min_width(150.0);
-                    for (key, label) in [
-                        (SortKey::TakenAt, "拍摄日期"),
-                        (SortKey::Name, "文件名"),
-                        (SortKey::ModifiedAt, "修改日期"),
-                        (SortKey::Size, "文件大小"),
-                        (SortKey::Dimensions, "图片尺寸"),
-                    ] {
-                        let mark = if current.key == key { "√ " } else { "   " };
-                        if ui
-                            .add(egui::Button::new(format!("{mark}{label}")).frame(false))
-                            .clicked()
-                        {
-                            action = Some(ToolbarAction::PickSort(key));
-                        }
-                    }
-                    ui.separator();
-                    let dir = if current.descending {
-                        "↓ 降序（点击切换为升序）"
-                    } else {
-                        "↑ 升序（点击切换为降序）"
-                    };
-                    if ui.add(egui::Button::new(dir).frame(false)).clicked() {
-                        action = Some(ToolbarAction::ToggleSortDirection);
-                    }
-                });
-        });
-    action
+/// 筛选面板的动作（M3.1 起与顶栏动作解耦，避免枚举递归）。
+#[derive(Clone, Debug)]
+pub enum FilterPanelAction {
+    Apply(Box<picasa_db::PhotoFilter>),
+    Clear,
+    BatchStar(bool),
+    BatchAddTag,
 }
 
 /// 筛选弹出面板（M4 #5/#9：日期 / 类型 / 尺寸 / 标签 / 收藏）。
@@ -586,13 +91,15 @@ pub fn sort_menu(ui: &mut Ui, at: Pos2, current: picasa_db::SortSpec) -> Option<
 /// 面板自己维护草稿（`draft_tag`），点「应用」才把整包 [`picasa_db::PhotoFilter`]
 /// 交给 App 提交——每点一个勾就重查全库会让筛选面板变得不可用。
 /// 返回 `(可能的动作, 草稿标签回写)`——标签输入框的内容要跨帧保存在 App 里。
+///
+/// M3.1 起观感改为 macOS 弹层（白卡、圆角 8、柔影），交互不变。
 pub fn filter_menu(
     ui: &mut Ui,
     at: Pos2,
     current: &picasa_db::PhotoFilter,
     draft_tag: &mut String,
     has_selection: bool,
-) -> (Option<ToolbarAction>, String) {
+) -> (Option<FilterPanelAction>, String) {
     let mut action = None;
     let mut tag_out = draft_tag.clone();
     let mut draft = current.clone();
@@ -603,18 +110,25 @@ pub fn filter_menu(
         .show(ui.ctx(), |ui| {
             egui::Frame::new()
                 .fill(Color32::WHITE)
-                .stroke(egui::Stroke::new(1.0, Color32::from_gray(0xC0)))
-                .corner_radius(3.0)
-                .inner_margin(egui::Margin::same(8))
+                .corner_radius(8.0)
+                .stroke(egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 0, 0, 30)))
                 .shadow(egui::epaint::Shadow {
-                    offset: [1, 2],
-                    blur: 6,
+                    offset: [0, 4],
+                    blur: 18,
                     spread: 0,
-                    color: Color32::from_black_alpha(40),
+                    color: Color32::from_black_alpha(45),
                 })
+                .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
                     ui.set_min_width(230.0);
-                    ui.heading("筛选");
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new("筛选")
+                            .size(13.0)
+                            .strong()
+                            .color(Color32::from_rgb(0x20, 0x20, 0x20)),
+                    );
+                    ui.add_space(4.0);
                     ui.separator();
 
                     // ---- 收藏 ----
@@ -622,7 +136,7 @@ pub fn filter_menu(
                         .checkbox(&mut draft.starred_only, "只看收藏（星标）")
                         .changed()
                     {
-                        action = Some(ToolbarAction::ApplyFilter(Box::new(draft.clone())));
+                        action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
                     }
 
                     // ---- 类型 ----
@@ -645,8 +159,7 @@ pub fn filter_menu(
                                 } else {
                                     draft.formats.retain(|f| f != slug);
                                 }
-                                action =
-                                    Some(ToolbarAction::ApplyFilter(Box::new(draft.clone())));
+                                action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
                             }
                         }
                         // RAW 家族一个选项覆盖全部
@@ -662,7 +175,7 @@ pub fn filter_menu(
                                     draft.formats.retain(|f| f != slug);
                                 }
                             }
-                            action = Some(ToolbarAction::ApplyFilter(Box::new(draft.clone())));
+                            action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
                         }
                     });
 
@@ -672,7 +185,7 @@ pub fn filter_menu(
                         let mut none = draft.size_class.is_none();
                         if ui.toggle_value(&mut none, "全部").clicked() {
                             draft.size_class = None;
-                            action = Some(ToolbarAction::ApplyFilter(Box::new(draft.clone())));
+                            action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
                         }
                         for sc in [
                             picasa_db::SizeClass::Small,
@@ -683,7 +196,7 @@ pub fn filter_menu(
                             if ui.toggle_value(&mut on, sc.label()).clicked() {
                                 draft.size_class = Some(sc);
                                 action =
-                                    Some(ToolbarAction::ApplyFilter(Box::new(draft.clone())));
+                                    Some(FilterPanelAction::Apply(Box::new(draft.clone())));
                             }
                         }
                     });
@@ -697,23 +210,23 @@ pub fn filter_menu(
                         if ui.button("按此标签筛").clicked() {
                             let t = draft_tag.trim().to_string();
                             draft.tag = (!t.is_empty()).then_some(t);
-                            action = Some(ToolbarAction::ApplyFilter(Box::new(draft)));
+                            action = Some(FilterPanelAction::Apply(Box::new(draft)));
                         }
                     });
 
                     ui.separator();
                     ui.horizontal(|ui| {
                         if ui.button("清除全部筛选").clicked() {
-                            action = Some(ToolbarAction::ClearFilter);
+                            action = Some(FilterPanelAction::Clear);
                         }
                         if has_selection {
                             ui.separator();
                             ui.label("对所选：");
                             if ui.button("★ 收藏").clicked() {
-                                action = Some(ToolbarAction::BatchStar(true));
+                                action = Some(FilterPanelAction::BatchStar(true));
                             }
                             if ui.button("☆ 取消").clicked() {
-                                action = Some(ToolbarAction::BatchStar(false));
+                                action = Some(FilterPanelAction::BatchStar(false));
                             }
                         }
                     });
@@ -722,7 +235,7 @@ pub fn filter_menu(
                             ui.label("批量标签：");
                             ui.text_edit_singleline(&mut tag_out);
                             if ui.button("打标签").clicked() {
-                                action = Some(ToolbarAction::BatchAddTag);
+                                action = Some(FilterPanelAction::BatchAddTag);
                             }
                         });
                     }
@@ -730,44 +243,3 @@ pub fn filter_menu(
         });
     (action, tag_out)
 }
-
-/// 视图弹出菜单（默认 / 纵向瀑布流 / 横向瀑布流）。
-/// 弹出定位与关停由 App 管（与排序菜单同一套机制）。
-pub fn view_menu(ui: &mut Ui, at: Pos2, current: ViewMode) -> Option<ToolbarAction> {
-    let mut action = None;
-    egui::Area::new(ui.scope_id().with("view-menu"))
-        .fixed_pos(at)
-        .order(egui::Order::Foreground)
-        .show(ui.ctx(), |ui| {
-            egui::Frame::new()
-                .fill(Color32::WHITE)
-                .stroke(egui::Stroke::new(1.0, Color32::from_gray(0xC0)))
-                .corner_radius(3.0)
-                .inner_margin(egui::Margin::same(4))
-                .shadow(egui::epaint::Shadow {
-                    offset: [1, 2],
-                    blur: 6,
-                    spread: 0,
-                    color: Color32::from_black_alpha(40),
-                })
-                .show(ui, |ui| {
-                    ui.set_min_width(150.0);
-                    for mode in [ViewMode::Grid, ViewMode::MasonryV, ViewMode::MasonryH] {
-                        let mark = if current == mode { "√ " } else { "   " };
-                        if ui
-                            .add(
-                                egui::Button::new(format!("{mark}{}", mode.label())).frame(false),
-                            )
-                            .clicked()
-                        {
-                            action = Some(ToolbarAction::PickViewMode(mode));
-                        }
-                    }
-                });
-        });
-    action
-}
-
-// ⚠️ M2.2 §2.6：原「索引管理」二级菜单**已整体移除**。
-// 它做的两件事（修坏图、看进度）现在都在状态栏唯一入口 → 索引管理页里，
-// 位置见 [`crate::index_mgr`]。这里不留残骸：留着就是第二个入口。
