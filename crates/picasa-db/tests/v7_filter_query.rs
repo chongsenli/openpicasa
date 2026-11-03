@@ -126,6 +126,41 @@ fn filter_by_starred_and_tag() {
 }
 
 #[test]
+fn filtered_count_matches_pages_and_jpeg_slug_is_not_the_extension() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (db, path) = make_db(tmp.path());
+    seed(&path, &[
+        ("deep.jpg", 1, 100, 100, 100),
+        ("other.jpg", 1, 100, 100, 200),
+        ("tiny.gif", 3, 100, 100, 300),
+        ("a.png", 2, 100, 100, 400),
+        ("b.bmp", 4, 100, 100, 500),
+    ]);
+
+    let sort = SortSpec { key: SortKey::TakenAt, descending: false };
+    // UI 提交的 slug 是 `jpeg`，库里 `.jpg` 的 `photos.format` 是整数 1。
+    let f = PhotoFilter { formats: vec!["jpeg".into()], ..Default::default() };
+    let all = db.photos_filtered(None, &f, sort, 100, 0).unwrap();
+    assert_eq!(names(&all), vec!["deep.jpg", "other.jpg"]);
+    assert_eq!(db.count_photos_filtered(None, &f).unwrap(), 2);
+
+    let page1 = db.photos_filtered(None, &f, sort, 1, 0).unwrap();
+    let page2 = db.photos_filtered(None, &f, sort, 10, 1).unwrap();
+    let mut seen = std::collections::HashSet::new();
+    for row in page1.iter().chain(&page2) {
+        assert!(seen.insert(row.id), "分页重叠：{}", row.name);
+    }
+    assert_eq!(seen.len(), all.len());
+
+    let unknown = PhotoFilter { formats: vec!["nope".into()], ..Default::default() };
+    assert_eq!(db.count_photos_filtered(None, &unknown).unwrap(), 0);
+    assert_eq!(
+        db.count_photos_filtered(None, &PhotoFilter::default()).unwrap(),
+        db.count_photos_visible(None).unwrap()
+    );
+}
+
+#[test]
 fn filter_respects_scope_and_starred_readback() {
     let tmp = tempfile::tempdir().unwrap();
     let (db, path) = make_db(tmp.path());

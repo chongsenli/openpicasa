@@ -144,6 +144,9 @@ fn section_title(
 
 fn favorites(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut Vec<SidebarAction>) {
     let t = *ctx.theme;
+    // 星标与「所有照片」共用一份 `starred_only`：开着时只高亮星标，
+    // 否则两行同时亮，点「所有照片」看起来像没离开星标视图。
+    let starred_on = lib.filter.as_ref().is_some_and(|f| f.starred_only);
     // 所有照片
     let row = fav_row(
         ui,
@@ -151,7 +154,7 @@ fn favorites(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut Vec
         "所有照片",
         Some(lib.total_in_db),
         Icon::PhotoStack,
-        matches!(lib.view, View::All),
+        matches!(lib.view, View::All) && !starred_on,
         true,
         ctx.has_focus,
     );
@@ -178,7 +181,6 @@ fn favorites(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut Vec
     // 调 `lib.db()` 再拿一次锁：std Mutex 不可重入，重入 = 主线程自我死锁
     // （2026-11-02 实测：启动首帧 hang 127 s，主线程与 op-index 互锁——
     // 与 `app.rs` new() 里 `enqueue_retry` 那条教训是同一类错误）。
-    let starred_on = lib.filter.as_ref().is_some_and(|f| f.starred_only);
     let count = ctx.db.starred_ids().ok().map(|v| v.len() as u64);
     let row = fav_row(ui, &t, "星标", count, Icon::Heart, starred_on, true, ctx.has_focus);
     if row.clicked() {

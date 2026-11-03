@@ -175,6 +175,8 @@ pub struct Library {
     /// 当前视图**总共有多少张**（C1：首屏先拿总数，不为了知道总数把 5 万行读进来）。
     ///
     /// `photos.len()` 在补齐完成前**小于**它；界面要显示「共 N 张」时必须用这个字段。
+    /// 有筛选时它是**筛过之后**的张数，与 `photos` 同一口径——用可见全库的总数
+    /// 会让分页补齐把没筛中的行再拼回来。
     pub photos_total: usize,
     /// 分页补齐是否已到底（`photos.len() >= photos_total` 时为 true）。
     pub photos_complete: bool,
@@ -532,14 +534,14 @@ impl Library {
             self.view_folder_ids()
         };
         let filter = self.filter.clone().unwrap_or_default();
-        let has_filter = filter != picasa_db::PhotoFilter::default();
-        // ⚠️ 用 `count_photos_visible` / `photos_from_visible`，**不是**无后缀的那两个：
-        // 后者是「物理全库」，会把已关闭关注文件夹的照片也算进来。
-        // 用户关掉一个关注文件夹后，树里没了、栅格却还在——那正是这条 bug 的形态。
-        let total = self.db()?.count_photos_visible(folder_ids.as_deref())? as usize;
+        let has_filter = filter.is_active();
 
-        let photos = if !searching && !has_filter {
-            match self.view {
+        let (photos, total) = if !searching && !has_filter {
+            // ⚠️ 用 `count_photos_visible` / `photos_from_visible`，**不是**无后缀的那两个：
+            // 后者是「物理全库」，会把已关闭关注文件夹的照片也算进来。
+            // 用户关掉一个关注文件夹后，树里没了、栅格却还在——那正是这条 bug 的形态。
+            let total = self.db()?.count_photos_visible(folder_ids.as_deref())? as usize;
+            let photos = match self.view {
                 // 「最近更改」按 `mtime_ns` 排序，有 `idx_photos_mtime`，全库 5 万也只要几毫秒；
                 // 且它本身就是「最近 N 条」的语义，不需要分页补齐。
                 View::Recent => self.db()?.recently_changed(200_000)?,
@@ -549,9 +551,20 @@ impl Library {
                     PAGE_FIRST.min(total.max(1)),
                     0,
                 )?,
-            }
+            };
+            let total = if self.view == View::Recent {
+                photos.len()
+            } else {
+                total
+            };
+            (photos, total)
         } else if has_filter {
             // 带筛选（可与搜索词叠加，也可单独用）。筛选查询自带排序与分页口径。
+            //
+            // 总数必须走 `count_photos_filtered`，不能复用上面的可见全库 COUNT。
+            // 以前首屏是筛过的，但 `photos_total` 仍是 9 张全库，`photos_complete`
+            // 为 false，下一帧 `extend_photos` 按无筛选 OFFSET 把 gif/png 和
+            // 已经出现过的格子再拼进来——筛选芯片亮了，栅格却像没筛过。
             let rows = self.db()?.photos_filtered(
                 folder_ids.as_deref(),
                 &filter,
@@ -559,7 +572,7 @@ impl Library {
                 200_000,
                 0,
             )?;
-            if !searching {
+            let photos = if !searching {
                 rows
             } else {
                 // 搜索词与筛选叠加：取并集口径太重（LIKE ∩ 筛选），直接在内存里过滤
@@ -570,22 +583,28 @@ impl Library {
                             || p.folder_path.to_lowercase().contains(&needle)
                     })
                     .collect()
-            }
+            };
+            let total = if searching || self.view == View::Recent {
+                photos.len()
+            } else {
+                self.db()?
+                    .count_photos_filtered(folder_ids.as_deref(), &filter)? as usize
+            };
+            (photos, total)
         } else {
             let needle = paths::compare_key(self.search.trim());
             let range = parse_date_range(self.search.trim());
             // 搜索不分页：LIKE 的结果集通常远小于全库，且用户能立刻用关键字收窄。
             // 真到了几十万行搜不动的那天，另开一页搜索索引，不在这里糊。
-            self.db()?
-                .search(&needle, range, folder_ids.as_deref(), 200_000)?
+            let photos = self
+                .db()?
+                .search(&needle, range, folder_ids.as_deref(), 200_000)?;
+            let total = photos.len();
+            (photos, total)
         };
 
         self.photos = photos;
-        self.photos_total = if self.search.trim().is_empty() && self.view != View::Recent {
-            total
-        } else {
-            self.photos.len()
-        };
+        self.photos_total = total;
         self.photos_complete = self.photos.len() >= self.photos_total;
         // 选择集与照片列表求交，避免「删了照片但 id 还在选择集里」
         let alive: HashSet<i64> = self.photos.iter().map(|p| p.id).collect();
@@ -603,19 +622,40 @@ impl Library {
     /// 由 UI 在**空闲帧**调用（一帧最多一次）：分页是为了让首屏快，
     /// 不是为了把「读完 5 万行」这件事挪到下一帧原地卡住。
     pub fn extend_photos(&mut self) -> Result<bool> {
-        if self.photos_complete || !self.search.trim().is_empty() {
+        if self.photos_complete || !self.search.trim().is_empty() || self.view == View::Recent {
             return Ok(false);
         }
         let folder_ids = self.view_folder_ids();
-        let more = self.db()?.photos_from_visible(
-            folder_ids.as_deref(),
-            self.sort,
-            PAGE_STEP,
-            self.photos.len(),
-        )?;
+        let filter = self.filter.clone().unwrap_or_default();
+        // 有筛选时必须沿同一条 `photos_filtered` 翻页。改走 `photos_from_visible`
+        // 会从「已装入的筛后行数」这个 OFFSET 去捞无筛选的尾部：gif/png 回来了，
+        // 而且已经在首屏里的 jpeg 会再出现一次。
+        let mut more = if filter.is_active() {
+            self.db()?.photos_filtered(
+                folder_ids.as_deref(),
+                &filter,
+                self.sort,
+                PAGE_STEP,
+                self.photos.len(),
+            )?
+        } else {
+            self.db()?.photos_from_visible(
+                folder_ids.as_deref(),
+                self.sort,
+                PAGE_STEP,
+                self.photos.len(),
+            )?
+        };
         if more.is_empty() {
             // 库里的行数比 COUNT 说的少（补齐期间被删了），按「到底」处理，
             // 否则会每帧都来问一次空结果。
+            self.photos_complete = true;
+            return Ok(false);
+        }
+        let seen: HashSet<i64> = self.photos.iter().map(|p| p.id).collect();
+        more.retain(|p| !seen.contains(&p.id));
+        if more.is_empty() {
+            // 这一页全是栅格里已经有的 id。继续按 OFFSET 翻只会重复，停在这里。
             self.photos_complete = true;
             return Ok(false);
         }
@@ -631,16 +671,35 @@ impl Library {
     }
 
     pub fn set_view(&mut self, view: View) -> Result<()> {
-        if self.view == view {
+        // 「星标」不是独立的 `View`，而是叠在当前视图上的 `starred_only`。
+        // 用户已经停在「所有照片」上再点一次时，视图值没变，若在这里直接返回，
+        // 侧栏高亮还在、筛选芯片还亮，栅格也回不到全部照片。
+        let clear_star =
+            view == View::All && self.filter.as_ref().is_some_and(|f| f.starred_only);
+        if self.view == view && !clear_star {
             return Ok(());
         }
-        self.view = view;
-        self.prefs.last_view = Some(view.as_pref_string());
-        self.prefs.grid_scroll = 0.0;
-        self.selection.clear();
-        self.anchor = None;
-        self.dirty_prefs = true;
+        if self.view != view {
+            self.view = view;
+            self.prefs.last_view = Some(view.as_pref_string());
+            self.prefs.grid_scroll = 0.0;
+            self.selection.clear();
+            self.anchor = None;
+            self.dirty_prefs = true;
+        }
+        if clear_star {
+            self.clear_starred_only();
+        }
         self.reload_photos()
+    }
+
+    /// 退出「只看收藏」。格式 / 日期 / 尺寸 / 标签这些维度留下。
+    fn clear_starred_only(&mut self) {
+        let Some(mut f) = self.filter.take() else {
+            return;
+        };
+        f.starred_only = false;
+        self.filter = f.is_active().then_some(f);
     }
 
     pub fn set_search(&mut self, s: String) -> Result<()> {
@@ -1256,6 +1315,11 @@ impl Library {
 
     /// 左侧：当前视图名 + 张数（U-34 待核对排布）。
     pub fn view_title(&self) -> String {
+        // 侧栏「星标」和筛选面板「只看收藏」是同一个 `starred_only`。
+        // 标题跟着它走，否则高亮已经切过去了，顶上仍写着「所有照片 · N 张」。
+        if self.filter.as_ref().is_some_and(|f| f.starred_only) {
+            return "星标".to_string();
+        }
         match self.view {
             View::All => "所有照片".to_string(),
             View::Recent => "最近更改".to_string(),

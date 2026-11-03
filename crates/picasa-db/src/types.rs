@@ -54,6 +54,20 @@ pub struct PhotoFilter {
     pub tag: Option<String>,
 }
 
+impl PhotoFilter {
+    /// 有没有任何一个维度在收窄结果。
+    ///
+    /// 全默认值（不限日期 / 格式 / 尺寸 / 收藏 / 标签）不算筛选——
+    /// 调用方要靠这个区分「没设条件」和「条件把结果收成空集」。
+    pub fn is_active(&self) -> bool {
+        self.taken_range.is_some()
+            || !self.formats.is_empty()
+            || self.size_class.is_some()
+            || self.starred_only
+            || self.tag.is_some()
+    }
+}
+
 /// 尺寸分类（按长边）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SizeClass {
