@@ -66,20 +66,15 @@ pub fn show(
     ui: &mut Ui,
     lib: &Library,
     ctx: &mut SidebarCtx<'_>,
-    title: &str,
-    subtitle: &str,
+    // M32-UI-04 v1.2 起不再使用：标题迁到主区顶部（参数保留以减少调用点改动）
+    _title: &str,
+    _subtitle: &str,
 ) -> Vec<SidebarAction> {
     let mut actions = Vec::new();
     let theme = *ctx.theme;
 
-    // §7.1/§7.3：中区左侧 = 小标题 + 副标题，**其下**才是文件树。
-    // 标题区属于中区左栏（不通栏），因此放在侧栏面板内部的最上方。
-    egui::Panel::top("sidebar-header")
-        .exact_size(Metrics::SIDEBAR_HEADER_H)
-        .frame(egui::Frame::new().fill(theme.sidebar_bg))
-        .show(ui, |ui| {
-            header(ui, &theme, title, subtitle);
-        });
+    // M32-UI-04 v1.2：标题迁到主区顶部（`app.rs` 的 view-header-panel），
+    // 左栏只保留文件树与底部托盘（§7.3 的标题区在此退役）。
 
     // 托盘在底部（先占位，保证不被上面内容挤出去）
     egui::Panel::bottom("tray-panel")
@@ -118,33 +113,6 @@ pub fn show(
         });
 
     actions
-}
-
-/// 中区左侧标题：当前文件夹名（正文偏大一档）+ 张数·拍摄日期跨度。
-fn header(ui: &mut Ui, theme: &Theme, title: &str, subtitle: &str) {
-    let rect = ui.max_rect();
-    let painter = ui.painter_at(rect);
-    painter.text(
-        pos2(rect.left() + 16.0, rect.center().y - 9.0),
-        Align2::LEFT_CENTER,
-        title,
-        FontId::new(15.0, egui::FontFamily::Proportional),
-        theme.text_primary,
-    );
-    painter.text(
-        pos2(rect.left() + 16.0, rect.center().y + 10.0),
-        Align2::LEFT_CENTER,
-        subtitle,
-        FontId::new(11.0, egui::FontFamily::Proportional),
-        theme.text_secondary,
-    );
-    painter.line_segment(
-        [
-            pos2(rect.left() + 12.0, rect.bottom() - 0.5),
-            pos2(rect.right() - 8.0, rect.bottom() - 0.5),
-        ],
-        Stroke::new(1.0, theme.toolbar_border),
-    );
 }
 
 /// 分组标题：灰色小字（截图的「相簿」样式），整行可点 = 折叠。

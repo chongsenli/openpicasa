@@ -66,12 +66,13 @@ pub fn show(
     ui: &mut Ui,
     lib: &Library,
     theme: &Theme,
-    snap: &IndexSnapshot,
     mgmt: &MgmtSnapshot,
     // §4.8 启动校验的进度文案（空 = 没在跑）
     verify_text: &str,
     // M3.1 起不再使用：缩放改为顶栏 −/+ 按钮（参数保留以减少调用点改动）
     _zoom_px: f32,
+    // M32-UI-09 起不再使用：总数/结果数只在主区标题行出现
+    _snap: &IndexSnapshot,
 ) -> StatusbarOut {
     let mut out = StatusbarOut::default();
     let rect = Rect::from_min_size(
@@ -88,40 +89,11 @@ pub fn show(
 
     let font = FontId::new(11.0, egui::FontFamily::Proportional);
 
-    // 左：本地信任提示（§7.5，吸收方案 C）——「本地 · 不改原文件」
-    let trust = "本地 · 不改原文件";
-    let trust_galley = painter.layout_no_wrap(trust.to_owned(), font.clone(), theme.status_text);
-    painter.galley(
-        pos2(
-            rect.left() + 10.0,
-            rect.center().y - trust_galley.size().y / 2.0,
-        ),
-        trust_galley.clone(),
-        theme.status_text,
-    );
-    let sep_x = rect.left() + 10.0 + trust_galley.size().x + 10.0;
-    painter.line_segment(
-        [
-            pos2(sep_x, rect.top() + 5.0),
-            pos2(sep_x, rect.bottom() - 5.0),
-        ],
-        egui::Stroke::new(1.0, theme.separator),
-    );
-
-    // 中左：视图语境计数（与标题副标题同口径，但精简，不重复堆砌）。
-    // ⚠️ 用 `photos_total` 而不是 `photos.len()`：C 包分页后 `photos` 只是已加载的前几页。
-    let total = lib.photos_total.max(lib.photos.len());
-    let view_text = match double_count_text(lib, snap) {
-        Some(counts) => format!("{} · {counts}", lib.view_title()),
-        None => format!("{} · {total} 张", lib.view_title()),
-    };
-    painter.text(
-        pos2(sep_x + 10.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        view_text,
-        font.clone(),
-        theme.status_text,
-    );
+    // M32-UI-11 / M32-UI-09（v1.2）：
+    // * 「本地 · 不改原文件」从底栏退役——该文案改到编辑入口/保存环节出现（F4 域落地时接线）；
+    // * 总数/结果数不再在底栏重复（主区标题行是唯一结果数位置）；
+    // 普通浏览态底栏左侧允许为空，右区依次是：已选 N 张 → 诊断 → 索引入口。
+    let _ = font;
 
     // 右区：唯一入口 → 选中数
     let btn = Rect::from_center_size(
@@ -152,14 +124,14 @@ pub fn show(
     );
     out.diag_clicked = dresp.clicked();
 
-    // ---- 缩放滑块已于 M3.1 移除（顶栏 −/+ 按钮替代）----
-    // 原滑块占位（diag 左侧 144px）不再保留，状态栏右侧依次是：
-    // 「已选 N 张」→ 诊断 → 索引入口。
-    if lib.selected_count() > 0 {
+    // ---- 缩放滑块已于 M3.1 移除；M32-UI-09 起底栏右侧依次是：
+    // 「已选 N 张」→ 诊断 → 索引入口（总数/结果数只在主区标题行出现）。
+    let sel = lib.selected_count();
+    if sel > 0 {
         painter.text(
             pos2(diag.left() - 10.0, rect.center().y),
             Align2::RIGHT_CENTER,
-            format!("已选 {} 张", lib.selected_count()),
+            format!("已选 {sel} 张"),
             font,
             theme.status_text,
         );
@@ -254,6 +226,10 @@ fn index_entry_button(
 ///
 /// 只对**文件夹视图**生效：在「所有照片」下把整库分母摆到状态栏上，
 /// 会和左栏的库总数打架（一个是视图口径、一个是任务口径）。
+///
+/// M32-UI-09 v1.2 起底栏不再显示该计数（进度数字仍同源出现在弹框/角标 tooltip），
+/// 保留实现供测试与后续「任务摘要行」复用。
+#[allow(dead_code)]
 fn double_count_text(lib: &Library, snap: &IndexSnapshot) -> Option<String> {
     let View::Folder(id) = lib.view else {
         return None;

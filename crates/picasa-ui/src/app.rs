@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, vec2};
+use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, pos2, vec2};
 use picasa_core::thumbs::JobKind;
 use picasa_core::{
     AppPaths, CoreEvent, DimsService, IndexBoard, IndexService, Library, ThumbJob, ThumbService,
@@ -1234,8 +1234,10 @@ impl OpenPicasaApp {
         self.view_header_key = Some(key);
         self.view_header_title = title;
         self.view_breadcrumb = breadcrumb;
+        // M32-UI-09：日期一律带来源标签——这里统一是 EXIF/回退的「拍摄时间」口径
+        // （`effective_taken_at`），无来源月份不展示（span 为 None 时只显示张数）。
         self.view_header_subtitle = match photo_date_span(&self.lib.photos) {
-            Some(span) => format!("{total} 张 · {span}"),
+            Some(span) => format!("{total} 张 · 拍摄时间：{span}"),
             None => format!("{total} 张"),
         };
     }
@@ -1627,6 +1629,12 @@ impl OpenPicasaApp {
                     self.lib.view_mode,
                     zoom_min,
                     zoom_max,
+                    // 左段右缘与文件夹树右缘对齐（侧栏隐藏时退回默认宽度）
+                    if self.sidebar_visible {
+                        self.lib.prefs.sidebar_width
+                    } else {
+                        Metrics::SIDEBAR_DEFAULT_W
+                    },
                 );
                 if let Some(rect) = out.sort_button {
                     self.sort_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
@@ -1768,10 +1776,10 @@ impl OpenPicasaApp {
                     ui,
                     &self.lib,
                     &theme,
-                    &snap,
                     &self.mgmt,
                     &self.verify_text,
                     self.zoom.cell_px(),
+                    &snap,
                 );
                 // M3.1：状态栏滑块已移除（顶栏 −/+ 按钮替代），
                 // zoom_drag / zoom_released 分支随之退役。
@@ -1846,7 +1854,31 @@ impl OpenPicasaApp {
             }
         }
 
-        // ③ 中央栅格
+        // ③ 主区顶部标题行（M32-UI-04 v1.2：标题迁到主区顶部，两行左对齐；
+        // 修订 docs/09 §7.3「标题区在左栏」——左栏只保留文件树与托盘）
+        egui::Panel::top("view-header-panel")
+            .exact_size(Metrics::VIEW_HEADER_H)
+            .frame(egui::Frame::new().fill(theme.grid_bg))
+            .show(ui, |ui| {
+                let rect = ui.max_rect();
+                let painter = ui.painter_at(rect);
+                painter.text(
+                    pos2(rect.left() + Metrics::GRID_PAD, rect.top() + 12.0),
+                    egui::Align2::LEFT_CENTER,
+                    &self.view_header_title,
+                    egui::FontId::new(15.0, egui::FontFamily::Proportional),
+                    theme.text_primary,
+                );
+                painter.text(
+                    pos2(rect.left() + Metrics::GRID_PAD, rect.bottom() - 12.0),
+                    egui::Align2::LEFT_CENTER,
+                    &self.view_header_subtitle,
+                    egui::FontId::new(11.0, egui::FontFamily::Proportional),
+                    theme.text_secondary,
+                );
+            });
+
+        // ④ 中央栅格
         egui::CentralPanel::no_frame()
             .frame(egui::Frame::new().fill(theme.grid_bg))
             .show(ui, |ui| {

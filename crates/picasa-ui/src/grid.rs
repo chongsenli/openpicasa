@@ -1212,6 +1212,21 @@ pub fn show(
                     painter.rect_stroke(frame, frame_radius, stroke, StrokeKind::Inside);
                 }
 
+                // ---- 选中角标（M32-UI-10：勾选标记，与托盘/星标角标不混形）----
+                // 选中 = 左上角实心圆 + 白勾。托盘成员态、星标角标另在各自域实现，
+                // 三者形状/位置在 `docs/10` M32-UI-10 登记为互不相同。
+                if is_sel {
+                    let c = pos2(rect.left() + 8.0, rect.top() + 8.0);
+                    let r = 7.0;
+                    painter.circle_filled(c, r, theme.selected);
+                    let w = Stroke::new(1.8, Color32::WHITE);
+                    let a = pos2(c.x - 3.2, c.y + 0.2);
+                    let b = pos2(c.x - 1.0, c.y + 2.6);
+                    let d = pos2(c.x + 3.4, c.y - 2.4);
+                    painter.line_segment([a, b], w);
+                    painter.line_segment([b, d], w);
+                }
+
                 if hovered {
                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                 }

@@ -253,8 +253,10 @@ impl Metrics {
     pub const SIDEBAR_INDENT: f32 = 14.0;
     /// 左栏分组标题（"图库"/"文件夹"）行高。
     pub const SIDEBAR_SECTION_H: f32 = 24.0;
-    /// 中区左侧标题区高度（小标题 + 张数·日期副标题）。
+    /// 中区左侧标题区高度（M32-UI-04 v1.2 起弃用：标题迁到主区顶部）。
     pub const SIDEBAR_HEADER_H: f32 = 58.0;
+    /// 主区顶部标题行高度（M32-UI-04：语境标题 + `N 张 · 拍摄年月` 两行左对齐）。
+    pub const VIEW_HEADER_H: f32 = 52.0;
     /// 分段控件高度：截图 72px ÷ 2 = 36。
     pub const SEG_H: f32 = 36.0;
     /// −/+ 胶囊高：与分段控件同高。
@@ -406,9 +408,19 @@ fn install_cjk_fallback(ctx: &egui::Context) {
             continue;
         };
         tracing::info!(path, bytes = bytes.len(), "已加载 CJK 回退字体");
+        // M32-UI-13：汉字与拉丁/数字混排时**顶端对齐**。
+        // 汉字是 em-box 字形（面积极大，几乎顶满 em），而 egui 内置拉丁字体的
+        // 大写字母只占 em 的约 70%；同一行里汉字的视觉顶边明显高于英文大写字母、
+        // 数字。`y_offset_factor` 为正 = 字形下移（占字号的比值），
+        // 下移 0.30 ≈ 把汉字顶边拉到与拉丁数字顶端平齐（0.10/0.16/0.22 试过仍偏高，加大）；
+        // 它只影响绘制、不影响布局测量，行高与基线逻辑不变。
+        let tweak = egui::epaint::text::FontTweak {
+            y_offset_factor: 0.30,
+            ..Default::default()
+        };
         ctx.add_font(egui::FontInsert::new(
             "cjk_fallback",
-            egui::FontData::from_owned(bytes),
+            egui::FontData::from_owned(bytes).tweak(tweak),
             vec![
                 egui::InsertFontFamily {
                     family: egui::FontFamily::Proportional,

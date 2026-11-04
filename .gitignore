@@ -40,3 +40,4 @@ Icon?
 *.tmp
 *.swp
 .tmp/
+/.appdata/

@@ -39,6 +39,8 @@ pub fn show(
     view_mode: ViewMode,
     zoom_min: bool,
     zoom_max: bool,
+    // 左栏当前宽度（左段右缘与文件夹树右缘对齐，M32-UI-01/02 v1.3）
+    sidebar_w: f32,
 ) -> TopbarOutput {
     crate::topbar::show(
         ui,
@@ -52,6 +54,7 @@ pub fn show(
         search_in_current,
         zoom_min,
         zoom_max,
+        sidebar_w,
     )
 }
 

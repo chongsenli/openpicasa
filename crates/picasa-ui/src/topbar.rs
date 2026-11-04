@@ -1,22 +1,23 @@
 //! M3.1 §7 定稿顶栏：**双行**——上行双语境路径面包屑，下行图标工具栏。
 //!
-//! 布局（像素校准，量自 `openpicasa-3row-final.jpg`）：
+//! 布局（M32-UI-01/02 三段式，仅调按钮位置；量自用户实机截图）：
 //!
 //! ```text
 //! ┌──────────────────────────────────────────────────────────────────────────┐
 //! │ ●●●  图库 / 旅行 / 京都                                        （上行）  │
-//! │                    [侧栏][导入][幻灯片][编辑] [方格|纵瀑|横瀑] [−|+] [🔍] │
-//! │                                              [⇅][≡][…]     （下行右对齐）│
+//! │ [侧栏][导入][幻灯片][编辑]   [方格|纵瀑|横瀑] [−|+]   [🔍][⇅][≡][…]（下行）│
 //! └──────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! 关键约定（`docs/09` §7.2 + 像素校准）：
+//! 关键约定（`docs/10` M32-UI-01/02 v1.1）：
 //!
 //! * 上行：红绿灯 + **双语境面包屑**——文件夹语境画「图库 / 祖先… / 当前」
 //!   （祖先段可点击跳转），根语境弱化为单段「图库」；
-//! * 下行按钮**右对齐**（对齐定稿效果图）；白圆钮 / 白胶囊 + 软阴影（毛玻璃观感）；
+//! * 下行分**三段**：左段 = 侧栏开关 + 导入/幻灯片/编辑（对象操作）；
+//!   中段 = 排布胶囊 + −/+（图库浏览，居中）；右段 = 搜索/排序/筛选/…（右对齐）；
 //! * 排布是**无文字三图标连体胶囊**，选中片为**淡橙圆**（定稿截图采样）；
-//! * 搜索紧接在 `+` 之后（点开后输入框在上行右侧原地展开，不挤压下行控件）。
+//! * −/+ 维持连体胶囊（用户 2026-11-04 拍板：不做滑杆）；搜索在右段首位
+//!   （点开后输入框在上行右侧原地展开，不挤压下行控件）。
 //!
 //! 排序 / 筛选 / 「…」保留为右侧图标组：它们是既有功能，不能在版式重排里丢。
 
@@ -105,6 +106,8 @@ pub fn show(
     // 缩放是否到端点（−/+ 置灰）
     zoom_min: bool,
     zoom_max: bool,
+    // 左栏当前宽度（M32-UI-01/02 v1.3：左段右缘与文件夹树右缘对齐）
+    sidebar_w: f32,
 ) -> TopbarOutput {
     let mut out = TopbarOutput {
         actions: Vec::new(),
@@ -145,8 +148,8 @@ pub fn show(
     // ---- 上行：双语境路径面包屑 ----
     draw_breadcrumb(ui, &painter, line1, theme, breadcrumb, traffic_w, &mut out);
 
-    // ---- 下行：右对齐图标工具栏 ----
-    // 从右往左排：[…] [筛选] [排序] │ [搜索] [−|+] [排布胶囊] [编辑][幻灯片][导入] [侧栏]
+    // ---- 下行：三段式图标工具栏（M32-UI-01/02，只调整按钮位置）----
+    // 左段：侧栏开关 + 导入/幻灯片/编辑；中段：排布胶囊 + −/+；右段：搜索/排序/筛选/…。
     let d = Metrics::TOPBAR_ICON_D;
     let margin = 14.0;
     let bar2_center = line2.center().y;
@@ -154,32 +157,43 @@ pub fn show(
         Rect::from_center_size(pos2(right_x - d / 2.0, bar2_center), vec2(d, d))
     };
 
+    // ---- 右段（从右往左）：… 筛选 排序 搜索 ----
     let more_r = circle_at(rect.right() - margin);
     let filter_r = circle_at(more_r.left() - 4.0);
     let sort_r = circle_at(filter_r.left() - 4.0);
     out.more_button = Some(more_r);
     out.filter_button = Some(filter_r);
     out.sort_button = Some(sort_r);
+    let search_r = circle_at(sort_r.left() - 14.0);
 
-    // 主组右缘 = 排序按钮左侧留 14
-    let main_right = sort_r.left() - 14.0;
-    let search_r = circle_at(main_right);
-    let zoom_rect = Rect::from_min_size(
-        pos2(main_right - d - 10.0 - 76.0, bar2_center - Metrics::ZOOM_PILL_H / 2.0),
-        vec2(76.0, Metrics::ZOOM_PILL_H),
-    );
+    // ---- 中段（居中）：排布胶囊 + −/+ ----
     let layout_w = 3.0 * 34.0;
+    let zoom_w = 76.0;
+    let mid_gap = 10.0;
+    let mid_w = layout_w + mid_gap + zoom_w;
+    let mid_left = rect.left() + (rect.width() - mid_w) / 2.0;
     let layout_rect = Rect::from_min_size(
-        pos2(
-            zoom_rect.left() - 10.0 - layout_w,
-            bar2_center - Metrics::ZOOM_PILL_H / 2.0,
-        ),
+        pos2(mid_left, bar2_center - Metrics::ZOOM_PILL_H / 2.0),
         vec2(layout_w, Metrics::ZOOM_PILL_H),
     );
-    let edit_r = circle_at(layout_rect.left() - 10.0);
-    let slide_r = circle_at(edit_r.left() - 6.0);
-    let import_r = circle_at(slide_r.left() - 6.0);
-    let side_r = circle_at(import_r.left() - 10.0);
+    let zoom_rect = Rect::from_min_size(
+        pos2(layout_rect.right() + mid_gap, bar2_center - Metrics::ZOOM_PILL_H / 2.0),
+        vec2(zoom_w, Metrics::ZOOM_PILL_H),
+    );
+
+    // ---- 左段（从左往右）：侧栏开关 导入 …… 幻灯片 编辑 ----
+    // M32-UI-01/02 v1.4：
+    // * 侧栏开关、导入贴窗口最左（红绿灯在上行，下行不必让位）；
+    // * 幻灯片、编辑两个按钮的**左沿**（幻灯片的 left）= 侧栏右缘，
+    //   即与文件夹树的最右侧**始终保持对齐**——按钮组骑在侧栏边界右侧，
+    //   侧栏拖宽时同步移动；侧栏隐藏时退回默认宽度。
+    let left_x = rect.left() + margin;
+    let side_r = Rect::from_center_size(pos2(left_x + d / 2.0, bar2_center), vec2(d, d));
+    let import_r = Rect::from_center_size(pos2(side_r.right() + 6.0 + d / 2.0, bar2_center), vec2(d, d));
+    // 幻灯片左沿 = 侧栏右缘（Clamp 防窄侧栏时与导入重叠）
+    let seg_left = (rect.left() + sidebar_w).max(import_r.right() + 6.0);
+    let slide_r = Rect::from_center_size(pos2(seg_left + d / 2.0, bar2_center), vec2(d, d));
+    let edit_r = Rect::from_center_size(pos2(slide_r.right() + 6.0 + d / 2.0, bar2_center), vec2(d, d));
 
     // ---- ① 侧栏开关 ----
     if icon_btn(
