@@ -123,6 +123,11 @@ pub struct OpenPicasaApp {
     folder_ctx: Option<(String, Pos2)>,
     /// 照片右键菜单：(photo_id, 当前是否收藏, 屏幕位置)
     photo_ctx: Option<(i64, bool, Pos2)>,
+    /// 照片右键菜单**在哪一帧打开**。
+    /// ⚠️ 必须记这个，理由同 `folder_ctx_frame`：右键释放帧里
+    /// `secondary_clicked()` 与 `pointer.any_click()` 同时为真，不豁免就会
+    /// 「刚画出来就被自己关掉」——用户看到的就是「右键没任何反应」。
+    photo_ctx_frame: u64,
     /// 说明编辑窗口打开中（photo_id）
     caption_editor: Option<i64>,
     /// 标签编辑窗口打开中（photo_id）
@@ -308,6 +313,7 @@ impl OpenPicasaApp {
             albums_collapsed: false,
             folder_ctx: None,
             photo_ctx: None,
+            photo_ctx_frame: u64::MAX,
             caption_editor: None,
             tag_editor: None,
             caption_buf: String::new(),
@@ -2261,6 +2267,7 @@ impl OpenPicasaApp {
                     // M4：照片右键菜单（收藏 / 说明 / 标签）
                     if let Some(row) = self.lib.photos.get(index) {
                         self.photo_ctx = Some((row.id, row.starred, pos));
+                        self.photo_ctx_frame = ctx.cumulative_frame_nr();
                     }
                 }
             });
@@ -2607,10 +2614,11 @@ impl OpenPicasaApp {
         }
 
         // 照片右键菜单（M4：收藏 / 说明 / 标签）
+        // 关闭豁免判定抽成纯函数（见文件尾 context_menu_open_frame_exempt），便于单测。
         if let Some((photo_id, starred, pos)) = self.photo_ctx {
             let mut close = false;
             let mut action: Option<PhotoCtxAction> = None;
-            egui::Area::new(egui::Id::unique("photo-ctx-menu"))
+            let area = egui::Area::new(egui::Id::unique("photo-ctx-menu"))
                 .fixed_pos(pos)
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
@@ -2642,12 +2650,6 @@ impl OpenPicasaApp {
                             }
                         });
                 });
-            if action.is_some() || ctx.input(|i| i.pointer.any_click()) {
-                // 菜单里点了按钮不关（下一帧重开编辑框）；点空白关
-                if action.is_none() {
-                    close = true;
-                }
-            }
             if let Some(act) = action {
                 match act {
                     PhotoCtxAction::ToggleStar => {
@@ -2665,6 +2667,24 @@ impl OpenPicasaApp {
                         self.tag_editor = Some(photo_id);
                         close = true;
                     }
+                }
+            }
+            // 关闭规则（三条，顺序与 folder_ctx 一致）：
+            //   1. 点了菜单项 → 关
+            //   2. 本帧刚打开 → **豁免**。右键释放帧里 `secondary_clicked()` 与
+            //      `pointer.any_click()` 同时为真，不豁免就会「刚画出来就被自己关掉」
+            //      —— 这正是「照片右键没有任何反应」的根因。
+            //   3. 点击落在菜单矩形外 → 关。用 Area 实测矩形，不猜尺寸。
+            let opened_this_frame =
+                context_menu_open_frame_exempt(self.photo_ctx_frame, ctx.cumulative_frame_nr());
+            if !opened_this_frame && !close {
+                let menu_rect = area.response.rect;
+                let clicked_outside = ctx.input(|i| i.pointer.any_click())
+                    && ctx
+                        .input(|i| i.pointer.interact_pos())
+                        .is_some_and(|p| !menu_rect.contains(p));
+                if clicked_outside {
+                    close = true;
                 }
             }
             if close {
@@ -3566,4 +3586,29 @@ enum PhotoCtxAction {
     ToggleStar,
     EditCaption,
     EditTags,
+}
+
+/// 右键菜单在「打开帧」是否应豁免关闭判定（纯函数，可单测）。
+///
+/// 右键释放帧里 `secondary_clicked()` 与 `pointer.any_click()` 同时为真，
+/// 若不豁免，菜单会在画出来的同一帧被自己关掉——用户看到「右键没反应」。
+/// `folder_ctx` 早有此豁免；`photo_ctx` 的遗漏是 M4 实机反馈的 bug。
+fn context_menu_open_frame_exempt(opened_frame: u64, current_frame: u64) -> bool {
+    opened_frame == current_frame
+}
+
+#[cfg(test)]
+mod m4_tests {
+    use super::context_menu_open_frame_exempt;
+
+    #[test]
+    fn photo_context_menu_survives_its_opening_frame() {
+        // 打开帧必须豁免：否则右键释放的 any_click 会立刻把菜单关掉
+        assert!(context_menu_open_frame_exempt(42, 42));
+        // 之后的帧不再豁免，点空白可正常关闭
+        assert!(!context_menu_open_frame_exempt(42, 43));
+        assert!(!context_menu_open_frame_exempt(42, 1000));
+        // 初始值 u64::MAX（还没打开过）不应误豁免
+        assert!(!context_menu_open_frame_exempt(u64::MAX, 0));
+    }
 }
