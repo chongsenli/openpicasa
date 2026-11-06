@@ -1668,8 +1668,12 @@ mod tests {
         assert_eq!(b.cell, Metrics::CELL_SIZES[0]);
         // 宽度变了只影响列数
         assert!(b.cols > a.cols);
-        // U-22：间距也是常量
-        assert_eq!(Metrics::CELL_GAP, 10.0);
+        // U-22：间距也是常量——用「相邻两格左边缘之差 - 单元格边长」反推间距，
+        // 两种窗口宽度下必须都等于当前主题常量（M3.2 定稿 16px，不写死数值）。
+        let pitch_a = a.thumb_rect(1).unwrap().left() - a.thumb_rect(0).unwrap().left();
+        let pitch_b = b.thumb_rect(1).unwrap().left() - b.thumb_rect(0).unwrap().left();
+        assert_eq!(pitch_a - a.cell, Metrics::CELL_GAP);
+        assert_eq!(pitch_b - b.cell, Metrics::CELL_GAP);
     }
 
     #[test]
@@ -1801,8 +1805,12 @@ mod tests {
         );
         // 还没滚：分组头就在正常位置，不需要吸顶补画
         assert_eq!(layout.sticky_group(0.0), None);
-        // 滚过分组头之后：需要吸顶
-        assert_eq!(layout.sticky_group(Metrics::GROUP_HEADER_H + 5.0), Some(0));
+        // 滚过分组头之后：需要吸顶。第一组内容从 GRID_PAD 开始，所以要把
+        // 「上下留白 + 分组头高度」一起滚过去（只滚 GROUP_HEADER_H 是不够的）。
+        assert_eq!(
+            layout.sticky_group(Metrics::GRID_PAD + Metrics::GROUP_HEADER_H + 5.0),
+            Some(0)
+        );
         // 关掉分组时不吸顶
         let plain = GridLayout::build(
             &photos,

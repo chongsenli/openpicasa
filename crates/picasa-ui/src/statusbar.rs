@@ -6,18 +6,15 @@
 //! * 中：视图语境计数、已选数等（精简，不重复标题副标题）；
 //! * **最右**：「索引管理」——既有索引管理流程的唯一显式按钮入口。
 //!
-//! ## 三个入口合成一个（**过渡期：旧「诊断」入口暂时保留**）
+//! ## 三个入口合成一个（M4-BUG-04 已收口）
 //!
 //! 之前这里有「索引进度」和「诊断」两个按钮，工具栏还有一个「索引管理」二级菜单。
 //! 三个入口的问题是**功能会漏**（R-M22-5）：加一个操作得记得在三处都加一遍。
-//! 现在索引只剩这一个按钮，点开是四个标签的索引管理页（[`crate::index_mgr`]）。
+//! 现在索引只剩这一个按钮，点开是五个标签的索引管理页（[`crate::index_mgr`]）。
 //!
-//! ⚠️ **「诊断」按钮为什么还在**（2026-11-01 评审 §1.1 / 规格 §9 迭代 3）：
-//! 规格的迁移顺序是「新页面功能齐备 → 并行一段时间 → 再删旧入口」，不是反过来。
-//! 而对账发现新页面的「存储与诊断」标签还有**两项没齐**：
-//! 诊断日志导出（§4.9）未接线、VACUUM 无进度也无取消（IDX-010）。
-//! 在补齐之前删旧入口 = 让这两项在界面上彻底不可达，直接违反 R-M22-5「零功能丢失」。
-//! 所以旧入口**恢复**，等这两项落地后再按规格顺序删。
+//! ✅ **旧「诊断」入口已于 M4 移除**：它承载的两件事都已在新的「存储与诊断」标签落地——
+//! 诊断日志导出（`m4_export_diag_log`，§4.9）、带反馈的 VACUUM（`MgrAction::Vacuum` → `vacuum()`）。
+//! 底栏不再出现「诊断」等需解释的术语（`10` M32-UI-11 验收项）；零功能丢失已兑现。
 //!
 //! 入口**放在状态栏右区**：不占栅格宽度，也不动左栏布局——这是 `04` §2.2 的硬约束，
 //! 因为进度 UI 的本分是"如实呈现"，不是重新排版整个界面。
@@ -56,8 +53,6 @@ pub struct StatusbarOut {
 
 /// 索引入口按钮宽度（图标 + 文案 + 角标）。定值，避免文字长度影响布局。
 const INDEX_BTN_W: f32 = 104.0;
-/// 「诊断」按钮宽度
-const DIAG_BTN_W: f32 = 52.0;
 /// 角标圆点直径
 const BADGE_D: f32 = 14.0;
 
@@ -103,29 +98,15 @@ pub fn show(
     out.button_rect = Some(btn);
     out.index_clicked = index_entry_button(ui, theme, mgmt, btn, &font, verify_text);
 
-    // 诊断入口（过渡期保留）：放在索引入口左边，不占栅格宽度、不动左栏。
-    // 它承载的两件事（诊断日志导出、带进度的 VACUUM）在新的「存储与诊断」标签里还没齐。
-    let diag = Rect::from_center_size(
-        pos2(btn.left() - 6.0 - DIAG_BTN_W / 2.0, rect.center().y),
-        vec2(DIAG_BTN_W, Metrics::STATUS_H - 6.0),
-    );
-    let dresp = ui.interact(diag, ui.scope_id().with("diag-btn"), egui::Sense::click());
-    let dpainter = ui.painter_at(diag);
-    if dresp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        dpainter.rect_filled(diag, 2.0, theme.cell_hover);
-    }
-    dpainter.text(
-        diag.center(),
-        Align2::CENTER_CENTER,
-        "诊断",
-        font.clone(),
-        theme.status_text,
-    );
-    out.diag_clicked = dresp.clicked();
+    // M4-BUG-04：旧「诊断」入口退役。它承载的两件事已在索引管理窗口
+    // 「存储与诊断」标签落地：诊断日志导出（`m4_export_diag_log`）、带 toast 反馈的
+    // VACUUM（`MgrAction::Vacuum` → `vacuum()`）。底栏不再出现「诊断 / 索引 / 缓存 / 本地」
+    // 等需解释的术语（`10` M32-UI-11 验收项）。`diag_clicked` 保留在结构里恒为 false，
+    // 避免牵动调用点签名；索引管理窗口仍是唯一入口。
+    out.diag_clicked = false;
+    let diag = btn; // 「已选 N 张」仍从索引入口左侧起算
 
-    // ---- 缩放滑块已于 M3.1 移除；M32-UI-09 起底栏右侧依次是：
-    // 「已选 N 张」→ 诊断 → 索引入口（总数/结果数只在主区标题行出现）。
+    // ---- 缩放滑块已于 M3.1 移除；M4 起底栏右侧只剩「索引管理」唯一入口。
     let sel = lib.selected_count();
     if sel > 0 {
         painter.text(

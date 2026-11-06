@@ -283,7 +283,7 @@ pub fn apply_storage(snap: &mut MgmtSnapshot, st: &ThumbStorage) {
     }
 }
 
-/// 索引管理页的四个标签（§4.1）。
+/// 索引管理页的五个标签（§4.1 + M4 第五标签「导入 / 导出」，docs/12 §0）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MgmtTab {
     #[default]
@@ -291,10 +291,18 @@ pub enum MgmtTab {
     Folders,
     Exclusions,
     Storage,
+    /// M4 新增：索引文件导入 / 导出（`M4-IDX-*`）。
+    ImportExport,
 }
 
 impl MgmtTab {
-    pub const ALL: [Self; 4] = [Self::Tasks, Self::Folders, Self::Exclusions, Self::Storage];
+    pub const ALL: [Self; 5] = [
+        Self::Tasks,
+        Self::Folders,
+        Self::Exclusions,
+        Self::Storage,
+        Self::ImportExport,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -302,6 +310,7 @@ impl MgmtTab {
             Self::Folders => "关注文件夹",
             Self::Exclusions => "排除项",
             Self::Storage => "存储与诊断",
+            Self::ImportExport => "导入 / 导出",
         }
     }
 }

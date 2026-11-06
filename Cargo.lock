@@ -2731,6 +2731,7 @@ version = "0.3.2-beta.4"
 dependencies = [
  "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
@@ -2766,6 +2767,7 @@ dependencies = [
  "picasa-imaging",
  "rfd",
  "serde",
+ "serde_json",
  "tempfile",
  "tracing",
  "tracing-subscriber",

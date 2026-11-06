@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenPicasa · M4 界面原型（照片检索、整理与索引管理）</title>
+<style>
+  :root{
+    /* 取自 crates/picasa-ui/src/theme.rs:143-169 */
+    --text-primary:#202020; --text-secondary:#666666; --text-disabled:#AAAAAA;
+    --chrome:#F0F0F0; --grid:#FFFFFF; --sidebar:#F5F4F2; --separator:#C8C8C8;
+    --cell-border:#CFCFCF; --selected:#4A90D9; --warn:#C8861E; --danger:#C0392B;
+    --ok:#3E8E3E; --progress:#4A90D9; --overlay:#FBFBFB;
+    --seg-active:#FBE2D5; --toolbar:#FFFFFF; --sidebar-section:#8A8A8A;
+    --hover:#E9E7E3; --card-shadow:0 6px 24px rgba(0,0,0,.14);
+    --font: -apple-system, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--font);color:var(--text-primary);background:#E8E6E2;font-size:13px;line-height:1.5}
+  /* ---------- 原型工具条（不属于产品界面） ---------- */
+  .protobar{position:sticky;top:0;z-index:50;background:#2B2B2B;color:#EEE;padding:9px 16px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+  .protobar .title{font-weight:600;margin-right:10px;color:#FFF;font-size:13px}
+  .protobar .tag{font-size:11px;color:#9AD;background:#3A3A3A;padding:2px 7px;border-radius:10px;margin-right:8px}
+  .protobar button{background:#444;color:#EEE;border:1px solid #555;border-radius:5px;padding:5px 10px;cursor:pointer;font-size:12px;font-family:var(--font)}
+  .protobar button:hover{background:#555}
+  .protobar button.on{background:var(--selected);border-color:var(--selected);color:#FFF}
+  .protobar .sep{width:1px;height:20px;background:#555;margin:0 6px}
+  .protobar select{background:#444;color:#EEE;border:1px solid #555;border-radius:5px;padding:4px 6px;font-family:var(--font);font-size:12px}
+  .protobar .hint{font-size:11px;color:#999;margin-left:auto}
+  /* ---------- 舞台 ---------- */
+  .stage{padding:22px;display:flex;justify-content:center;align-items:flex-start;min-height:calc(100vh - 44px)}
+  .screen{display:none;width:1280px;max-width:100%}
+  .screen.active{display:block}
+  .caption{max-width:1280px;margin:0 auto 12px;color:#555;font-size:12px}
+  .caption b{color:#202020}
+  /* ---------- 主窗口 ---------- */
+  .app{width:1280px;height:820px;background:var(--grid);border:1px solid #B9B7B3;border-radius:10px;overflow:hidden;box-shadow:var(--card-shadow);display:flex;flex-direction:column}
+  .titlebar{height:38px;background:linear-gradient(#F7F7F7,#ECECEA);border-bottom:1px solid var(--separator);display:flex;align-items:center;padding:0 14px;gap:8px}
+  .lights{display:flex;gap:7px;margin-right:8px}
+  .lights i{width:12px;height:12px;border-radius:50%;display:block}
+  .lights i:nth-child(1){background:#FF5F57}.lights i:nth-child(2){background:#FEBC2E}.lights i:nth-child(3){background:#28C840}
+  .tb-title{font-size:12px;color:var(--text-secondary)}
+  .toolbar{height:58px;background:var(--toolbar);border-bottom:1px solid rgba(0,0,0,.10);display:flex;align-items:center;padding:0 14px;gap:18px}
+  .tb-group{display:flex;align-items:center;gap:8px}
+  .tb-sep{flex:1}
+  .tbtn{height:34px;min-width:34px;padding:0 10px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--text-primary);font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;font-family:var(--font)}
+  .tbtn:hover{background:var(--hover)}
+  .tbtn.primary{background:var(--selected);color:#FFF;border-color:var(--selected)}
+  .tbtn.active{background:var(--seg-active);border-color:#E9C4AF}
+  /* 工具栏图标：SVG 形状与 crates/picasa-ui/src/icons.rs 的矢量绘制一一对应（不引外部资源） */
+  .tbtn .ico{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;flex:none;line-height:1}
+  .tbtn .ico svg{width:18px;height:18px;display:block}
+  .pill{display:inline-flex;border:1px solid var(--separator);border-radius:9px;overflow:hidden;background:#EBE9E5}
+  .pill span{padding:8px 12px;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;min-width:40px}
+  .pill span svg{width:18px;height:18px;display:block}
+  .pill span.on{background:#FFF;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+  .body{flex:1;display:flex;min-height:0}
+  .sidebar{width:216px;background:var(--sidebar);border-right:1px solid var(--separator);display:flex;flex-direction:column;overflow:hidden}
+  .side-scroll{overflow:auto;padding:8px 0;flex:1}
+  .sec{font-size:11px;color:var(--sidebar-section);padding:8px 14px 4px;display:flex;justify-content:space-between;align-items:center}
+  .sec .add{cursor:pointer;color:var(--selected);font-size:12px}
+  .nav{height:26px;display:flex;align-items:center;padding:0 14px;gap:7px;cursor:pointer;font-size:12.5px;color:#4D4D4D}
+  .nav:hover{background:var(--hover)}
+  .nav.on{background:#D6E4F7;border-left:3px solid var(--selected);padding-left:11px}
+  .nav .cnt{margin-left:auto;color:var(--text-secondary);font-size:11px}
+  .nav .warn{color:var(--warn)}
+  .tray{height:34px;border-top:1px solid var(--separator);display:flex;align-items:center;padding:0 12px;gap:6px;font-size:11.5px;color:var(--text-secondary)}
+  .main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--grid)}
+  .viewhead{height:52px;padding:10px 24px 6px;border-bottom:1px solid #EEE;flex:none}
+  .viewhead h1{margin:0;font-size:15px;font-weight:600}
+  .viewhead .sub{font-size:11px;color:var(--text-secondary)}
+  .chips{display:flex;gap:6px;padding:7px 24px;align-items:center;min-height:34px;border-bottom:1px solid #F0F0F0;flex:none;flex-wrap:wrap}
+  .chip{background:#EDF3FA;border:1px solid #C9DDF0;color:#2C5F8A;border-radius:12px;padding:2px 9px;font-size:11px;display:inline-flex;gap:6px;align-items:center}
+  .chip b{cursor:pointer;color:#7A9AB8}
+  .chip.clear{background:transparent;border:none;color:var(--selected);cursor:pointer;font-size:11.5px}
+  .gridarea{flex:1;overflow:auto;padding:20px 24px;background:var(--grid)}
+  .grid{display:grid;grid-template-columns:repeat(5,1fr);gap:16px}
+  .cell{position:relative;aspect-ratio:1/.82;background:linear-gradient(135deg,#D9E2EC,#B9C7D6);border:1px solid var(--cell-border);border-radius:8px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:6px;font-size:11px;color:#4A5560}
+  .cell.sel{outline:2px solid var(--selected);outline-offset:1px}
+  .cell .corner{position:absolute;top:5px;left:5px;width:16px;height:16px;border-radius:50%;background:var(--selected);color:#FFF;font-size:10px;display:flex;align-items:center;justify-content:center}
+  .cell .star{position:absolute;top:5px;right:6px;color:#E8A33D;font-size:12px}
+  .cell .offline{position:absolute;bottom:5px;right:6px;font-size:9px;background:rgba(0,0,0,.55);color:#FFF;padding:1px 4px;border-radius:3px}
+  .ctxbar{margin:0 24px 10px;background:#F7F9FC;border:1px solid #D8E4F2;border-radius:8px;padding:7px 12px;display:none;align-items:center;gap:10px;font-size:12px;flex:none}
+  .ctxbar.show{display:flex}
+  .ctxbar .btn{border:1px solid #C9D6E4;background:#FFF;border-radius:6px;padding:3px 9px;cursor:pointer;font-size:11.5px;font-family:var(--font)}
+  .statusbar{height:24px;background:var(--chrome);border-top:1px solid var(--separator);display:flex;align-items:center;padding:0 14px;font-size:11.5px;color:var(--status-text,#5A5A5A);flex:none}
+  .statusbar .sp{flex:1}
+  .statusbar .entry{color:var(--text-secondary);cursor:pointer;display:flex;gap:5px;align-items:center}
+  .statusbar .entry:hover{color:var(--selected)}
+  .statusbar .dot{width:6px;height:6px;border-radius:50%;background:var(--danger)}
+  .statusbar .diag{color:var(--text-disabled);margin-right:14px}
+  /* ---------- 浮层卡片 ---------- */
+  .float{position:absolute;background:var(--overlay);border:1px solid #D6D4D0;border-radius:8px;box-shadow:var(--card-shadow);padding:14px;z-index:20}
+  .float h3{margin:0 0 10px;font-size:13px}
+  .lbl{font-size:11px;color:var(--text-secondary);display:block;margin-bottom:3px}
+  .row{display:flex;align-items:center;gap:8px;margin:7px 0}
+  .inp{flex:1;border:1px solid var(--separator);border-radius:5px;padding:5px 8px;font-size:12px;font-family:var(--font);background:#FFF;min-width:0}
+  .btn{border:1px solid var(--separator);background:#FFF;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;font-family:var(--font);color:var(--text-primary)}
+  .btn:hover{background:var(--hover)}
+  .btn.pri{background:var(--selected);color:#FFF;border-color:var(--selected)}
+  .btn.danger{color:var(--danger);border-color:#E3B5B0}
+  .btn.ghost{background:transparent;border-color:transparent;color:var(--selected)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .card{border:1px solid #E2E0DC;border-radius:8px;background:#FFF;padding:12px;margin:10px 0}
+  .card .h{font-size:11.5px;font-weight:600;margin-bottom:8px;color:var(--text-secondary);text-transform:none}
+  .kv{display:grid;grid-template-columns:1fr 1fr;gap:6px 18px;font-size:12px}
+  .kv .k{color:var(--text-secondary)}
+  .kv .v{font-weight:600}
+  .note{font-size:11px;color:var(--text-secondary);background:#F4F6F8;border-left:3px solid #C9D6E4;padding:7px 10px;border-radius:0 5px 5px 0;margin:8px 0}
+  .warnbox{font-size:12px;border:1px solid #EAD3A8;background:#FDF7EC;color:#8A5D12;padding:9px 11px;border-radius:6px;margin:8px 0}
+  .errbox{font-size:12px;border:1px solid #E6BDB8;background:#FCF0EF;color:#9B3227;padding:9px 11px;border-radius:6px;margin:8px 0}
+  .okbox{font-size:12px;border:1px solid #BEDDBE;background:#F1F8F1;color:#2C6B2C;padding:9px 11px;border-radius:6px;margin:8px 0}
+  .fine{font-size:11px;color:var(--text-secondary)}
+  .progress{height:8px;background:#E6E6E6;border-radius:5px;overflow:hidden;margin:8px 0}
+  .progress i{display:block;height:100%;background:var(--progress);border-radius:5px;transition:width .3s}
+  .progress.indet i{width:35%;animation:slide 1.2s infinite linear}
+  @keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
+  .tag{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:9px;background:#EDF3FA;color:#2C5F8A;border:1px solid #C9DDF0}
+  .tag.warn{background:#FDF2DF;color:#8A5D12;border-color:#EAD3A8}
+  .tag.dan{background:#FBECEA;color:#9B3227;border-color:#E6BDB8}
+  .tag.ok{background:#EEF7EE;color:#2C6B2C;border-color:#BEDDBE}
+  /* ---------- 索引管理窗口 ---------- */
+  .idxwrap{position:relative;width:1280px;height:820px;background:
+      linear-gradient(rgba(0,0,0,.10),rgba(0,0,0,.10)),
+      repeating-linear-gradient(45deg,#EDEBE7,#EDEBE7 12px,#E7E5E1 12px,#E7E5E1 24px);
+    border-radius:10px;border:1px solid #B9B7B3;box-shadow:var(--card-shadow)}
+  .idxwin{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:760px;min-height:540px;max-height:760px;background:var(--overlay);border:1px solid #C9C7C3;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.25);display:flex;flex-direction:column;overflow:hidden}
+  .idxbar{height:36px;background:linear-gradient(#FAFAFA,#F0EFED);border-bottom:1px solid var(--separator);display:flex;align-items:center;padding:0 12px;font-size:12.5px;font-weight:600}
+  .idxbar .sp{flex:1}
+  .idxbar .x{width:20px;height:20px;border-radius:50%;background:#E4E2DE;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;color:#666}
+  .idxbar .x:hover{background:#D6D4D0}
+  .summary{margin:12px 14px 0;border:1px solid #E4E2DE;border-radius:8px;background:#FFF;padding:11px 13px;flex:none}
+  .summary .srow{display:flex;gap:10px;font-size:12px;align-items:baseline;flex-wrap:wrap}
+  .summary .srow .k{color:var(--text-secondary);width:74px;flex:none}
+  .summary .srow .v{font-weight:600}
+  .summary hr{border:none;border-top:1px solid #EEE;margin:8px 0}
+  .summary .metrics{display:flex;gap:26px;font-size:12px;flex-wrap:wrap}
+  .summary .metrics b{font-size:14px}
+  .summary .alert{margin-top:9px;font-size:11.5px;color:var(--warn);display:flex;align-items:center;gap:8px}
+  .summary .alert .link{color:var(--selected);cursor:pointer;text-decoration:underline}
+  .tabs{display:flex;gap:2px;padding:10px 14px 0;flex:none;flex-wrap:wrap}
+  .tab{padding:6px 12px;font-size:12px;border:1px solid transparent;border-bottom:none;border-radius:6px 6px 0 0;cursor:pointer;color:var(--text-secondary)}
+  .tab:hover{background:var(--hover)}
+  .tab.on{background:#FFF;border-color:#E2E0DC;color:var(--text-primary);font-weight:600;box-shadow:0 -2px 0 var(--selected) inset}
+  .tabpane{flex:1;overflow:auto;border-top:1px solid #E2E0DC;margin:0 14px 14px;background:#FFF;border:1px solid #E2E0DC;border-top:none;border-radius:0 0 8px 8px;padding:14px}
+  .idxfoot{flex:none;padding:0 14px 12px;font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:6px}
+  /* 操作状态区 */
+  .opstate{border:1px solid #E2E0DC;border-radius:8px;padding:11px;margin-top:4px}
+  .opstate .st{font-size:12px;font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:7px}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .entrycard{border:1px solid #E2E0DC;border-radius:8px;padding:13px}
+  .entrycard h4{margin:0 0 5px;font-size:12.5px}
+  .entrycard p{margin:0 0 10px;font-size:11.5px;color:var(--text-secondary)}
+  /* 步骤条 */
+  .steps{display:flex;align-items:center;gap:0;margin:2px 0 14px;font-size:11.5px}
+  .steps .s{display:flex;align-items:center;gap:6px;color:var(--text-disabled);white-space:nowrap}
+  .steps .s .n{width:20px;height:20px;border-radius:50%;border:1px solid var(--separator);display:flex;align-items:center;justify-content:center;font-size:11px;background:#FFF}
+  .steps .s.done,.steps .s.cur{color:var(--text-primary)}
+  .steps .s.done .n{background:var(--ok);border-color:var(--ok);color:#FFF}
+  .steps .s.cur .n{background:var(--selected);border-color:var(--selected);color:#FFF}
+  .steps .ln{flex:1;height:1px;background:var(--separator);margin:0 8px;min-width:12px}
+  /* radio 策略卡 */
+  .strat{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .strat .opt{border:1px solid #E2E0DC;border-radius:8px;padding:12px;cursor:pointer}
+  .strat .opt.on{border-color:var(--selected);box-shadow:0 0 0 2px rgba(74,144,217,.18)}
+  .strat .opt.dan.on{border-color:var(--danger);box-shadow:0 0 0 2px rgba(192,57,43,.15)}
+  .strat .opt h4{margin:0 0 6px;font-size:12.5px}
+  .strat .opt p{margin:0;font-size:11.5px;color:var(--text-secondary)}
+  /* 表格 */
+  table{width:100%;border-collapse:collapse;font-size:11.5px}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid #EEE}
+  th{color:var(--text-secondary);font-weight:600;font-size:11px}
+  td .btn{padding:3px 8px;font-size:11px}
+  /* 确认浮层 */
+  /* 确认浮层：fixed 且挂在 body 级，任何屏幕都能显示 */
+  .modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.28);display:none;align-items:center;justify-content:center;z-index:60}
+  .modal-mask.show{display:flex}
+  .modal{width:386px;background:#FFF;border-radius:10px;box-shadow:0 16px 50px rgba(0,0,0,.3);overflow:hidden}
+  .modal .mh{padding:13px 16px;font-weight:600;font-size:13px;border-bottom:1px solid #EEE;display:flex;gap:8px;align-items:center}
+  .modal .mb{padding:14px 16px;font-size:12px}
+  .modal .mb ul{margin:6px 0 10px;padding-left:18px}
+  .modal .mf{padding:0 16px 14px;display:flex;justify-content:flex-end;gap:8px}
+  /* toast */
+  .toast{position:absolute;bottom:60px;left:50%;transform:translateX(-50%);background:rgba(20,20,20,.86);color:#FFF;padding:8px 16px;border-radius:6px;font-size:12px;display:none;z-index:45}
+  .toast.show{display:block;animation:fade 2.6s forwards}
+  @keyframes fade{0%{opacity:0}10%{opacity:1}85%{opacity:1}100%{opacity:0}}
+  /* 筛选面板 / 信息面板 定位 */
+  .filterpanel{left:800px;top:96px;width:360px;max-height:640px;overflow:auto}
+  .infopanel{right:26px;top:150px;width:300px}
+  .orgctx{left:430px;top:250px;width:210px;padding:8px}
+  .orgctx div{padding:6px 8px;border-radius:5px;cursor:pointer;font-size:12px}
+  .orgctx div:hover{background:var(--hover)}
+  .viewer{position:absolute;inset:0;background:#1A1A1A;display:flex;align-items:center;justify-content:center;color:#888;font-size:13px}
+  .viewer .vimg{width:560px;height:420px;background:linear-gradient(135deg,#3A4653,#20272E);border-radius:6px;display:flex;align-items:center;justify-content:center;color:#6B7885}
+  .legend{max-width:1280px;margin:14px auto 0;background:#FFF;border:1px solid #D6D4D0;border-radius:8px;padding:12px 16px;font-size:12px}
+  .legend b{display:block;margin-bottom:6px}
+  .legend table{font-size:11.5px}
+  .legend td:first-child{color:var(--selected);font-family:monospace;width:130px}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+
+<!-- ============ 原型工具条（非产品界面） ============ -->
+<div class="protobar">
+  <span class="title">OpenPicasa · M4 界面原型</span>
+  <span class="tag">v1.0 · 配套 docs/12</span>
+  <button data-screen="home" class="on">S0 主窗口</button>
+  <button data-screen="index">S1 索引管理</button>
+  <button data-screen="export">S2 导出</button>
+  <button data-screen="import">S3–S6 导入向导</button>
+  <button data-screen="confirm">S7 二次确认</button>
+  <button data-screen="filter">S8 组合筛选</button>
+  <button data-screen="meta">S9 元数据</button>
+  <button data-screen="org">S10 标签/相册</button>
+  <span class="sep"></span>
+  <span style="font-size:11px;color:#AAA">操作状态：</span>
+  <select id="stateSel">
+    <option value="idle">空闲</option>
+    <option value="prep">准备中</option>
+    <option value="run">进行中</option>
+    <option value="ok">成功</option>
+    <option value="fail">失败</option>
+    <option value="cancel">已取消</option>
+  </select>
+  <button id="cfgBtn">⚙ 文案/参数</button>
+  <span class="hint">提示：点击界面内按钮可切换步骤、标签与状态；均为原型模拟，不写任何数据</span>
+</div>
+
+<div class="stage">
+
+<!-- ==================== S0 主窗口 ==================== -->
+<div class="screen active" id="scr-home">
+  <div class="caption"><b>S0 · 主窗口基线</b> —— M3.2 三行骨架 + M4 新增入口标注（左栏标签/相册分组、筛选芯片行、上下文操作栏）。底栏「索引管理」仍是唯一入口。</div>
+  <div class="app" style="position:relative">
+    <div class="titlebar"><div class="lights"><i></i><i></i><i></i></div><span class="tb-title">OpenPicasa 0.4.0 · 所有照片</span></div>
+    <div class="toolbar">
+      <div class="tb-group">
+        <!-- ① SidebarToggle：圆角方框 + 左瓣竖线（icons.rs:243） -->
+        <button class="tbtn" title="显示/隐藏边栏"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="19" height="15" rx="3.5"/><line x1="9" y1="4.5" x2="9" y2="19.5"/></svg></span></button>
+        <!-- ② Import：托盘开口 + 向下箭头（icons.rs:488） -->
+        <button class="tbtn primary" title="导入：添加文件夹…"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15 L3 21 L21 21 L21 15"/><line x1="12" y1="2" x2="12" y2="16"/><path d="M7.5 11.5 L12 16 L16.5 11.5"/></svg></span> 导入图片</button>
+        <!-- ③ Slideshow：圆角屏幕 + 播放三角（icons.rs:498） -->
+        <button class="tbtn" title="幻灯片（下一版开放）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="4.2" width="20.4" height="15.6" rx="2.5"/><polygon points="10,8.6 10,15.4 16.6,12" fill="currentColor" stroke="none"/></svg></span></button>
+        <!-- ④ Edit：铅笔（斜杆 + 笔尖，icons.rs:512） -->
+        <button class="tbtn" title="编辑（下一版开放）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 20 L17.5 7 L20 9.5 L7 22.5 Z"/><line x1="4.5" y1="20" x2="7" y2="22.5"/></svg></span></button>
+      </div>
+      <div class="tb-group">
+        <!-- ⑤ 排布胶囊：LayoutGrid / LayoutMasonryV / LayoutMasonryH（icons.rs:521-551） -->
+        <div class="pill">
+          <span class="on" title="方格"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="2" y="2" width="9" height="9" rx="1.6"/><rect x="13" y="2" width="9" height="9" rx="1.6"/><rect x="2" y="13" width="9" height="9" rx="1.6"/><rect x="13" y="13" width="9" height="9" rx="1.6"/></svg></span>
+          <span title="纵向瀑布流"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="2" y="2" width="5.5" height="13" rx="1.2"/><rect x="9.2" y="2" width="5.5" height="20" rx="1.2"/><rect x="16.5" y="2" width="5.5" height="9" rx="1.2"/></svg></span>
+          <span title="横向瀑布流"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="2" y="2" width="13" height="5.5" rx="1.2"/><rect x="2" y="9.2" width="20" height="5.5" rx="1.2"/><rect x="2" y="16.5" width="9" height="5.5" rx="1.2"/></svg></span>
+        </div>
+        <!-- ⑥ −/+ 缩放（icons.rs:228-240，Plus/Minus 为 1.5× 粗线） -->
+        <button class="tbtn" title="缩小缩略图 · ⌘−"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"/></svg></span></button>
+        <button class="tbtn" title="放大缩略图 · ⌘+"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="12" y1="3" x2="12" y2="21"/></svg></span></button>
+      </div>
+      <div class="tb-sep"></div>
+      <div class="tb-group">
+        <!-- ⑦ Search：圆 + 柄（icons.rs:161） -->
+        <button class="tbtn" title="搜索 · ⌘F" onclick="go('filter')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9.5" cy="9.5" r="6.2"/><line x1="16.5" y1="16.5" x2="23" y2="23"/></svg></span></button>
+        <!-- ⑧ SortArrows：上下箭头并列（icons.rs:256） -->
+        <button class="tbtn" title="排序：拍摄日期（新在前）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="7.7,20 7.7,3.6 3.4,8.6"/><line x1="7.7" y1="3.6" x2="12" y2="8.6"/><polyline points="16.3,3.6 16.3,20 12,15.4"/><line x1="16.3" y1="20" x2="20.6" y2="15.4"/></svg></span></button>
+        <!-- ⑨ ListLines：三横线，第三行短（icons.rs:285） -->
+        <button class="tbtn active" title="筛选（日期 / 类型 / 尺寸 / 标签）" onclick="go('filter')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><line x1="2.4" y1="6.7" x2="21.6" y2="6.7"/><line x1="2.4" y1="12" x2="21.6" y2="12"/><line x1="2.4" y1="17.3" x2="14.9" y2="17.3"/></svg></span></button>
+        <!-- ⑩ Ellipsis：三个点（icons.rs:300） -->
+        <button class="tbtn" title="更多"><span class="ico"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5.3" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="18.7" cy="12" r="1.7"/></svg></span></button>
+      </div>
+    </div>
+    <div class="body">
+      <div class="sidebar">
+        <div class="side-scroll">
+          <div class="sec">图库</div>
+          <div class="nav on">所有照片 <span class="cnt">1 249</span></div>
+          <div class="nav">最近更改 <span class="cnt">38</span></div>
+          <div class="nav">星标 <span class="cnt">12</span></div>
+          <div class="sec" style="margin-top:8px">文件夹</div>
+          <div class="nav">▸ /Users/me/Photos <span class="cnt">9</span></div>
+          <div class="nav" style="padding-left:28px">▸ album-a</div>
+          <div class="nav" style="padding-left:28px">▸ album-b/nested</div>
+          <div class="nav warn">⚠ /Volumes/Ext/2026 <span class="cnt">1 240</span></div>
+          <div class="sec" style="margin-top:8px">标签 <span class="add" onclick="go('org')">＋ 新建</span></div>
+          <div class="nav" onclick="go('org')">旅行 <span class="cnt">12</span></div>
+          <div class="nav" onclick="go('org')">家人 <span class="cnt">8</span></div>
+          <div class="nav" onclick="go('org')">工作 <span class="cnt">3</span></div>
+          <div class="sec" style="margin-top:8px">相册 <span class="add" onclick="go('org')">＋ 新建</span></div>
+          <div class="nav" onclick="go('org')">2026 京都 <span class="cnt">20</span></div>
+          <div class="nav" onclick="go('org')">扫描件 <span class="cnt">5</span></div>
+        </div>
+        <div class="tray">▣ 照片托盘 · 0 张 <span style="margin-left:auto">›</span></div>
+      </div>
+      <div class="main">
+        <div class="viewhead"><h1>所有照片</h1><div class="sub">1 249 张 · 拍摄时间：2010 年 3 月 — 2026 年 10 月</div></div>
+        <div class="chips">
+          <span class="chip">格式 GIF <b>×</b></span>
+          <span class="chip">相机 Canon EOS 5D <b>×</b></span>
+          <span class="clear" onclick="go('filter')">清除全部筛选</span>
+          <span class="fine" style="margin-left:auto">匹配 1 249 张（数字与主区标题同源）</span>
+        </div>
+        <div class="ctxbar show">
+          <b>已选 3 张</b>
+          <button class="btn">★ 星标</button>
+          <button class="btn" onclick="go('org')">加标签 ▾</button>
+          <button class="btn" onclick="go('org')">加入相册 ▾</button>
+          <button class="btn">加入托盘</button>
+          <button class="btn ghost">取消选择</button>
+        </div>
+        <div class="gridarea">
+          <div class="grid" id="grid"></div>
+        </div>
+        <div class="statusbar">
+          <span>已选 3 张</span><span class="sp"></span>
+          <span class="diag">诊断 <span class="fine">（M4-BUG-04 过渡期保留，补齐后移除）</span></span>
+          <span class="entry" onclick="go('index')"><span class="dot"></span> 索引管理 ›</span>
+        </div>
+      </div>
+    </div>
+    <div class="toast" id="toast-home"></div>
+  </div>
+  <div class="legend">
+    <b>本屏 M4 变化点</b>
+    <table>
+      <tr><td>左栏新增分组</td><td>「标签」「相册」两组（组头灰字 + 折叠箭头）；不放假条目 · 对应 M4-ORG-*</td></tr>
+      <tr><td>筛选芯片行</td><td>已激活条件各一枚可删芯片 + 清除全部筛选 · 对应 M4-SEARCH-06</td></tr>
+      <tr><td>上下文操作栏</td><td>选中时出现「加标签 / 加入相册」，未选中不渲染 · 对应 M4-ORG-02/08、10 M32-UI-02</td></tr>
+      <tr><td>底栏</td><td>「索引管理」位置不变；「诊断」按 M4-BUG-04 收口后移除</td></tr>
+      <tr><td>tooltip 格式</td><td>统一「功能名 · 快捷键」（M4-BUG-03），悬停工具栏图标可看</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== S1 / S2 / S3-6 共用索引窗口 ==================== -->
+<div class="screen" id="scr-index">
+  <div class="caption"><b>S1 · 索引管理窗口</b>（总览摘要区常驻 + 四既有标签 + 第五标签「导入 / 导出」）。点标签切换；点「导出索引文件…」「选择索引文件…」直达 S2 / S3。窗口非模态。</div>
+  <div class="idxwrap">
+    <div class="idxwin" id="idxwin">
+      <div class="idxbar">索引管理 <span class="sp"></span><span class="fine" style="font-weight:400">非模态 · 关闭不取消任务</span><div class="x" title="关闭（后台继续）">×</div></div>
+
+      <!-- 总览摘要区：常驻 -->
+      <div class="summary">
+        <div class="srow"><span class="k">图库根目录</span><span class="v">/Users/me/Photos</span><span class="tag ok">● 在线 · 9 张 · 264 KB</span></div>
+        <div class="srow"><span class="k"></span><span class="v" style="font-weight:400">/Volumes/Ext/2026</span><span class="tag warn">⚠ 离线 · 1 240 张</span></div>
+        <hr>
+        <div class="metrics">
+          <span><span class="k">索引状态</span> <b class="tag ok">● 已完成</b></span>
+          <span><span class="k">照片数量</span> <b>1 249 张</b> <span class="fine">（与主区标题同源）</span></span>
+          <span><span class="k">最近更新</span> <b>2 分钟前</b> <span class="fine">扫描完成</span></span>
+        </div>
+        <div class="alert">⚠ 2 个失败项 · 1 个离线根 · 监视降级 1 <span class="link" onclick="openTab('tasks')">查看失败项 →</span></div>
+      </div>
+
+      <!-- 标签栏：4 既有 + 第 5 -->
+      <div class="tabs">
+        <div class="tab" data-tab="tasks" onclick="openTab('tasks')">任务</div>
+        <div class="tab" data-tab="folders" onclick="openTab('folders')">关注文件夹</div>
+        <div class="tab" data-tab="excl" onclick="openTab('excl')">排除项</div>
+        <div class="tab" data-tab="storage" onclick="openTab('storage')">存储与诊断</div>
+        <div class="tab on" data-tab="io" onclick="openTab('io')">导入 / 导出</div>
+      </div>
+
+      <div class="tabpane" id="pane-io">
+        <!-- ------- S2 导出 ------- -->
+        <div id="view-export">
+          <div class="h" style="font-size:12px;font-weight:600;margin-bottom:8px">导出索引文件</div>
+          <div class="row"><span class="lbl" style="width:76px">目标位置</span><input class="inp" value="/Users/me/Backups/"><button class="btn">浏览…</button></div>
+          <div class="row"><span class="lbl" style="width:76px"></span><input class="inp" value="photo-index-20261105.opicasaidx"><button class="btn">复制路径</button></div>
+          <div class="note">ⓘ 导出文件不能放在图库照片目录内（照片目录零写入保护）。</div>
+
+          <div class="card">
+            <div class="h">预计内容（导出前显示 · M4-IDX-20）</div>
+            <div class="kv">
+              <span class="k">照片记录</span><span class="v">1 249 张</span>
+              <span class="k">根目录</span><span class="v">2 个（含 1 个离线）</span>
+              <span class="k">标签 / 相册</span><span class="v">5 个 / 3 个</span>
+              <span class="k">星标 / 说明</span><span class="v">含</span>
+              <span class="k">图库路径信息</span><span class="v">含</span>
+              <span class="k">预计大小</span><span class="v">≈ 1.8 MB</span>
+            </div>
+          </div>
+          <label class="fine" style="display:flex;gap:6px;align-items:center;margin:4px 0"><input type="checkbox" id="incThumbs" onchange="onThumbs(this)"> 包含缩略图（生成索引包 .opicasaidx.zip，≈ 64 MB）· P-M4-02 可选</label>
+          <label class="fine" style="display:flex;gap:6px;align-items:center;margin:4px 0"><input type="checkbox" checked> 包含标签、相册、星标、说明等整理数据 · P-M4-01 默认</label>
+          <div class="fine" style="color:var(--danger);margin:6px 0">⛔ 原始照片：不包含，且不提供该选项（R-M4-1）</div>
+          <div class="fine" style="margin:8px 0">目标校验　✓ 可写　✓ 剩余空间 42 GB ≥ <span id="needSize">1.8 MB</span>　✓ 不在图库根目录内</div>
+          <div class="row" style="justify-content:flex-end"><button class="btn">取消</button><button class="btn pri" onclick="go('confirm')">导出索引文件</button></div>
+          <div class="row" style="justify-content:flex-end"><button class="btn ghost" onclick="go('import')">→ 转到导入向导</button></div>
+        </div>
+      </div>
+
+      <!-- 其余 4 个既有标签（示意） -->
+      <div class="tabpane hidden" id="pane-tasks">
+        <div class="h" style="font-size:12px;font-weight:600">任务（既有标签，本次不改）</div>
+        <table><tr><th>任务</th><th>状态</th><th>进度</th><th>操作</th></tr>
+        <tr><td>扫描 /Users/me/Photos</td><td><span class="tag ok">已完成</span></td><td>9 / 9</td><td>—</td></tr>
+        <tr><td>缩略图 /Volumes/Ext/2026</td><td><span class="tag warn">部分失败</span></td><td>1 238 / 1 240</td><td><button class="btn">重试失败项</button></td></tr></table>
+        <div class="note">⚠ 异常常驻，不静默消失（R-M2-4）。点击总览的「查看失败项 →」会定位到本标签。</div>
+      </div>
+      <div class="tabpane hidden" id="pane-folders">
+        <div class="h" style="font-size:12px;font-weight:600">关注文件夹（既有标签）</div>
+        <table><tr><th>根目录</th><th>状态</th><th>照片</th><th>占用</th></tr>
+        <tr><td>/Users/me/Photos</td><td><span class="tag ok">在线</span></td><td>9</td><td>264 KB</td></tr>
+        <tr><td>/Volumes/Ext/2026</td><td><span class="tag warn">离线</span></td><td>1 240</td><td>64 KB</td></tr></table>
+      </div>
+      <div class="tabpane hidden" id="pane-excl"><div class="h" style="font-size:12px;font-weight:600">排除项（既有标签）</div><div class="fine">共 2 条，无失效项。</div></div>
+      <div class="tabpane hidden" id="pane-storage">
+        <div class="h" style="font-size:12px;font-weight:600">存储与诊断（既有标签）</div>
+        <div class="kv"><span class="k">索引库文件</span><span class="v">264 KB</span><span class="k">缩略图</span><span class="v">9 条 · 64 KB</span><span class="k">照片</span><span class="v">9 张</span></div>
+        <div class="row" style="margin-top:12px"><button class="btn">导出诊断日志</button><button class="btn">VACUUM（带进度/可取消）</button></div>
+        <div class="note">M4-BUG-04：两项补齐后，底栏「诊断」入口移除。</div>
+      </div>
+
+      <!-- 操作状态区：六态 -->
+      <div style="margin:0 14px 6px"><div class="opstate" id="opstate"></div></div>
+      <div class="idxfoot">ⓘ 相关操作不修改或移动原始照片 · 导入采用事务保护，失败可回滚</div>
+    </div>
+
+    <div class="toast" id="toast-idx"></div>
+  </div>
+  <div class="legend">
+    <b>本屏要点</b>
+    <table>
+      <tr><td>总览摘要区</td><td>在标签栏之上、切换标签不消失；五字段全部来自同一 MgmtSnapshot · M4-IDX-01/02/05</td></tr>
+      <tr><td>第五标签</td><td>「导入 / 导出」承载本版新操作（P-M4-05 可改为总览卡片）</td></tr>
+      <tr><td>四态/六态</td><td>顶部「操作状态」下拉切换：空闲 / 准备中 / 进行中 / 成功 / 失败 / 已取消 · M4-IDX-03</td></tr>
+      <tr><td>非模态</td><td>点窗口 × 只收起，提示「后台继续」；不弹模态，主界面不阻塞 · M4-IDX-06</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- 导出 / 导入 / 确认 复用同一 index 屏，下面三个是快捷跳转容器 -->
+<div class="screen" id="scr-export"></div>
+<div class="screen" id="scr-import"></div>
+<div class="screen" id="scr-confirm"></div>
+
+<!-- ==================== S3–S6 导入向导（独立全屏，便于演示 4 步） ==================== -->
+<div class="screen" id="scr-wizard">
+  <div class="caption"><b>S3–S6 · 导入四步向导</b> —— 步骤条切换；Step2 可切「合并 / 替换」；Step3 用顶部状态下拉演示进行中 / 取消 / 失败；Step4 可点「选择本机目录…」看重新匹配。</div>
+  <div class="idxwrap">
+    <div class="idxwin" style="width:820px">
+      <div class="idxbar">索引管理 › 导入 / 导出 <span class="sp"></span><span class="fine" style="font-weight:400">分步流程 · 非模态</span><div class="x">×</div></div>
+      <div class="summary" style="margin-bottom:0">
+        <div class="metrics"><span><span class="k">索引状态</span> <b class="tag ok">● 已完成</b></span><span><span class="k">照片数量</span> <b>1 249 张</b></span><span><span class="k">最近更新</span> <b>2 分钟前</b></span></div>
+      </div>
+      <div class="tabpane" style="margin-top:0;border-top:none;border:1px solid #E2E0DC;border-radius:8px">
+        <div class="steps" id="stepbar"></div>
+        <div id="wiz"></div>
+      </div>
+      <div class="idxfoot">ⓘ 关闭本窗口不会取消导入 · 相关操作不修改或移动原始照片</div>
+    </div>
+    <div class="toast" id="toast-wiz"></div>
+  </div>
+  <div class="legend">
+    <b>导入四步与需求对账</b>
+    <table>
+      <tr><td>Step 1 校验与预览</td><td>M4-IDX-30/31/32/51/52 · 5 类坏文件各有可理解原因，现有索引零改动</td></tr>
+      <tr><td>Step 2 策略与范围</td><td>M4-IDX-33/34/54 · 合并（默认）/ 替换，影响范围随策略实时重算</td></tr>
+      <tr><td>Step 3 执行</td><td>M4-IDX-35/36/38/42/50 · 进度、取消、整体失败回滚；不显示 ETA</td></tr>
+      <tr><td>Step 4 结果与重匹配</td><td>M4-IDX-37/39/40/41 · 成功/跳过/失败可对账；逐根重新匹配；离线状态正确</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== S8 组合筛选 ==================== -->
+<div class="screen" id="scr-filter">
+  <div class="caption"><b>S8 · 组合筛选面板</b> —— 从工具栏「筛选」弹出的白卡（沿用 09 §1.2 观感）。芯片行与面板双向同步；不出现人物/地点/AI 等无数据筛选项。</div>
+  <div class="app" style="position:relative">
+    <div class="titlebar"><div class="lights"><i></i><i></i><i></i></div><span class="tb-title">OpenPicasa 0.4.0 · 筛选照片</span></div>
+    <div class="toolbar"><div class="tb-group"><button class="tbtn" title="显示/隐藏边栏"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="19" height="15" rx="3.5"/><line x1="9" y1="4.5" x2="9" y2="19.5"/></svg></span></button><button class="tbtn primary" title="导入：添加文件夹…"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15 L3 21 L21 21 L21 15"/><line x1="12" y1="2" x2="12" y2="16"/><path d="M7.5 11.5 L12 16 L16.5 11.5"/></svg></span> 导入图片</button><button class="tbtn" title="幻灯片（下一版开放）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="4.2" width="20.4" height="15.6" rx="2.5"/><polygon points="10,8.6 10,15.4 16.6,12" fill="currentColor" stroke="none"/></svg></span></button><button class="tbtn" title="编辑（下一版开放）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 20 L17.5 7 L20 9.5 L7 22.5 Z"/><line x1="4.5" y1="20" x2="7" y2="22.5"/></svg></span></button></div>
+      <div class="tb-group"><div class="pill"><span class="on" title="方格"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="2" y="2" width="9" height="9" rx="1.6"/><rect x="13" y="2" width="9" height="9" rx="1.6"/><rect x="2" y="13" width="9" height="9" rx="1.6"/><rect x="13" y="13" width="9" height="9" rx="1.6"/></svg></span><span title="纵向瀑布流"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="2" y="2" width="5.5" height="13" rx="1.2"/><rect x="9.2" y="2" width="5.5" height="20" rx="1.2"/><rect x="16.5" y="2" width="5.5" height="9" rx="1.2"/></svg></span><span title="横向瀑布流"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="2" y="2" width="13" height="5.5" rx="1.2"/><rect x="2" y="9.2" width="20" height="5.5" rx="1.2"/><rect x="2" y="16.5" width="9" height="5.5" rx="1.2"/></svg></span></div><button class="tbtn" title="缩小缩略图 · ⌘−"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"/></svg></span></button><button class="tbtn" title="放大缩略图 · ⌘+"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="12" y1="3" x2="12" y2="21"/></svg></span></button></div>
+      <div class="tb-sep"></div><div class="tb-group"><button class="tbtn" title="搜索 · ⌘F"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9.5" cy="9.5" r="6.2"/><line x1="16.5" y1="16.5" x2="23" y2="23"/></svg></span></button><button class="tbtn" title="排序：拍摄日期（新在前）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="7.7,20 7.7,3.6 3.4,8.6"/><line x1="7.7" y1="3.6" x2="12" y2="8.6"/><polyline points="16.3,3.6 16.3,20 12,15.4"/><line x1="16.3" y1="20" x2="20.6" y2="15.4"/></svg></span></button><button class="tbtn active" title="筛选（日期 / 类型 / 尺寸 / 标签）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><line x1="2.4" y1="6.7" x2="21.6" y2="6.7"/><line x1="2.4" y1="12" x2="21.6" y2="12"/><line x1="2.4" y1="17.3" x2="14.9" y2="17.3"/></svg></span></button><button class="tbtn" title="更多"><span class="ico"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5.3" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="18.7" cy="12" r="1.7"/></svg></span></button></div></div>
+    <div class="body"><div class="sidebar"><div class="side-scroll"><div class="sec">图库</div><div class="nav">所有照片 <span class="cnt">1 249</span></div><div class="nav">最近更改 <span class="cnt">38</span></div><div class="nav">星标 <span class="cnt">12</span></div>
+      <div class="sec">标签</div><div class="nav">旅行 <span class="cnt">12</span></div><div class="nav">家人 <span class="cnt">8</span></div>
+      <div class="sec">相册</div><div class="nav">2026 京都 <span class="cnt">20</span></div></div><div class="tray">▣ 照片托盘 · 0 张</div></div>
+      <div class="main"><div class="viewhead"><h1>搜索结果</h1><div class="sub">1 张 · 拍摄时间：2010 年 3 月</div></div>
+        <div class="chips"><span class="chip">格式 GIF <b>×</b></span><span class="chip">相机 Canon EOS 5D <b>×</b></span><span class="clear">清除全部筛选</span></div>
+        <div class="gridarea"><div class="grid" id="grid2"></div></div>
+        <div class="statusbar"><span>已选 0 张</span><span class="sp"></span><span class="entry">索引管理 ›</span></div>
+      </div>
+    </div>
+
+    <div class="float filterpanel">
+      <h3>筛选照片</h3>
+      <div class="row"><span class="lbl" style="width:88px">文件名/路径</span><input class="inp" value="sample"><button class="btn" style="padding:5px 8px">文/全 ▾</button></div>
+      <div class="row"><span class="lbl" style="width:88px">图库根目录</span><input class="inp" value="全部 ▾"><input class="inp" value="文件夹：全部 ▾"></div>
+      <hr style="border:none;border-top:1px solid #EEE">
+      <div class="row"><span class="lbl" style="width:88px">拍摄时间</span><input class="inp" value="2010-01-01"><span>～</span><input class="inp" value="2010-12-31"></div>
+      <label class="fine" style="display:flex;gap:6px;align-items:center"><input type="checkbox"> 只看缺少拍摄时间的照片</label>
+      <hr style="border:none;border-top:1px solid #EEE">
+      <div class="fine" style="margin-bottom:4px">文件格式</div>
+      <div class="row" style="flex-wrap:wrap;gap:10px"><label class="fine"><input type="checkbox"> jpeg</label><label class="fine"><input type="checkbox"> png</label><label class="fine"><input type="checkbox" checked> gif</label><label class="fine"><input type="checkbox"> raw</label><label class="fine"><input type="checkbox"> heic</label></div>
+      <div class="row"><span class="lbl" style="width:88px">相机与镜头</span><input class="inp" value="全部机身 ▾"><input class="inp" value="全部镜头 ▾"><span class="tag">M4 新增</span></div>
+      <hr style="border:none;border-top:1px solid #EEE">
+      <div class="row"><span class="lbl" style="width:88px">图片尺寸</span><label class="fine"><input type="radio" name="sz"> 不限</label><label class="fine"><input type="radio" name="sz"> 小图</label><label class="fine"><input type="radio" name="sz"> 中图</label><label class="fine"><input type="radio" name="sz"> 大图</label></div>
+      <div class="row"><span class="lbl" style="width:88px"></span><span class="fine">长边</span><input class="inp" placeholder="最小 px" style="max-width:90px"><span>～</span><input class="inp" placeholder="最大 px" style="max-width:90px"></div>
+      <div class="row"><span class="lbl" style="width:88px">文件大小</span><input class="inp" placeholder="最小 KB" style="max-width:110px"><span>～</span><input class="inp" placeholder="最大 KB" style="max-width:110px"></div>
+      <label class="fine" style="display:flex;gap:6px;align-items:center"><input type="checkbox"> 只看缺少元数据的照片 <span class="tag">M4 新增</span></label>
+      <hr style="border:none;border-top:1px solid #EEE">
+      <div class="row"><span class="lbl" style="width:88px">标签 / 相册</span><input class="inp" value="全部 ▾"><input class="inp" value="全部 ▾"><label class="fine"><input type="checkbox"> 只看收藏</label></div>
+      <div class="fine" style="margin:6px 0 2px">近期搜索（上限 10 条 · P-M4-06）</div>
+      <div class="row" style="gap:6px;flex-wrap:wrap"><span class="chip">sample · GIF</span><span class="chip">京都 · 2010</span><span class="chip">缺少元数据</span></div>
+      <hr style="border:none;border-top:1px solid #EEE">
+      <div class="row" style="justify-content:space-between"><span class="fine">匹配 <b>1 张</b></span><button class="btn ghost">清除全部筛选</button></div>
+    </div>
+  </div>
+  <div class="legend"><b>组合筛选</b><table>
+    <tr><td>新增维度</td><td>相机与镜头（依赖 v8 EXIF 字段）、文件大小区间、缺少拍摄时间 / 缺少元数据快捷条件 · M4-SEARCH-01/05</td></tr>
+    <tr><td>芯片 ↔ 面板</td><td>双向同步；清除恢复语境完整集合且计数同步 · M4-SEARCH-06</td></tr>
+    <tr><td>取消与稳定</td><td>新查询取消旧查询，过期异步结果丢弃；稳定次级排序 · M4-SEARCH-08/09</td></tr>
+    <tr><td>不放假入口</td><td>无人物/地点/AI 等本版无数据的筛选项（沿用 01 F1-21 纪律）</td></tr>
+  </table></div>
+</div>
+
+<!-- ==================== S9 元数据信息面板 ==================== -->
+<div class="screen" id="scr-meta">
+  <div class="caption"><b>S9 · 查看器信息面板（元数据）</b> —— 沿用 viewer.rs 已有行结构，补齐来源标签、三种降级态与离线态。右上「元数据状态」可切换。</div>
+  <div class="app" style="position:relative">
+    <div class="titlebar"><div class="lights"><i></i><i></i><i></i></div><span class="tb-title">OpenPicasa 0.4.0 · 查看器</span></div>
+    <div class="viewer"><div class="vimg">IMG_20100314_0930.jpg<br>（照片主体，信息面板浮于右侧）</div></div>
+    <div class="float infopanel">
+      <h3>照片信息 <span class="tag" id="metaStateTag">✓ 读取成功</span></h3>
+      <div class="kv" style="grid-template-columns:78px 1fr">
+        <span class="k">文件名</span><span class="v" style="font-weight:400">IMG_20100314_0930.jpg</span>
+        <span class="k">拍摄时间</span><span class="v" id="metaTaken">2010-03-14 09:30 <span class="tag">来源：EXIF 拍摄时间</span></span>
+        <span class="k">相机</span><span class="v" id="metaCam" style="font-weight:400">Canon · EOS 5D Mark II</span>
+        <span class="k">镜头</span><span class="v" id="metaLens" style="font-weight:400">EF 24-70mm f/2.8L USM</span>
+        <span class="k">焦距</span><span class="v" style="font-weight:400">70 mm</span>
+        <span class="k">光圈</span><span class="v" style="font-weight:400">f/2.8</span>
+        <span class="k">快门</span><span class="v" style="font-weight:400">1/250 s</span>
+        <span class="k">ISO</span><span class="v" style="font-weight:400">200</span>
+        <span class="k">方向</span><span class="v" style="font-weight:400">1（正常）· EXIF 只读</span>
+        <span class="k">原始尺寸</span><span class="v" style="font-weight:400">5616 × 3744</span>
+        <span class="k">文件大小</span><span class="v" style="font-weight:400">8.4 MB · JPEG</span>
+      </div>
+      <div id="metaStatusNote" class="okbox" style="font-size:11px">✓ 元数据读取成功（v8 入库字段）</div>
+      <hr style="border:none;border-top:1px solid #EEE">
+      <div class="row" style="margin:2px 0"><span class="lbl" style="width:60px">标签</span><span class="tag">旅行</span><span class="tag">家人</span><button class="btn" style="padding:2px 7px;font-size:11px">＋</button></div>
+      <div class="row" style="margin:2px 0"><span class="lbl" style="width:60px">相册</span><span class="tag">2026 京都</span><button class="btn" style="padding:2px 7px;font-size:11px">＋</button></div>
+    </div>
+    <div style="position:absolute;top:12px;right:26px;z-index:30">
+      <select id="metaSel" class="inp" style="width:190px">
+        <option value="ok">✓ 读取成功</option>
+        <option value="noexif">无 EXIF（降级）</option>
+        <option value="readfail">读取失败（降级）</option>
+        <option value="offline">照片离线（降级）</option>
+      </select>
+    </div>
+    <div class="statusbar" style="position:absolute;bottom:0;left:0;right:0"><span>第 3 / 9 张 · Esc 返回栅格</span><span class="sp"></span><span class="fine">信息面板不出现 .picasa.ini 来源字段（D-18）</span></div>
+  </div>
+  <div class="legend"><b>元数据状态</b><table>
+    <tr><td>来源标签</td><td>taken_at_src：0=EXIF / 1=文件名 / 2=文件修改时间；无法确定来源不展示月份 · M4-META-02</td></tr>
+    <tr><td>三种降级态</td><td>无 EXIF / 读取失败 / 离线：照片仍可浏览、缩略图正常、不弹错 · M4-META-04</td></tr>
+    <tr><td>缓存失效</td><td>文件变化（size/mtime）后重读，面板与筛选结果同步 · M4-META-05</td></tr>
+    <tr><td>红线</td><td>不编辑 EXIF、不写回照片文件；TC-RO-001 零差异 · M4-META-06</td></tr>
+  </table></div>
+</div>
+
+<!-- ==================== S10 标签/相册 ==================== -->
+<div class="screen" id="scr-org">
+  <div class="caption"><b>S10 · 标签 / 相册管理 + 上下文操作栏</b> —— 左栏分组、右键菜单、重命名/删除确认、批量「加标签 / 加入相册」下拉。</div>
+  <div class="app" style="position:relative">
+    <div class="titlebar"><div class="lights"><i></i><i></i><i></i></div><span class="tb-title">OpenPicasa 0.4.0 · 整理照片</span></div>
+    <div class="toolbar"><div class="tb-group"><button class="tbtn" title="显示/隐藏边栏"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="19" height="15" rx="3.5"/><line x1="9" y1="4.5" x2="9" y2="19.5"/></svg></span></button><button class="tbtn primary" title="导入：添加文件夹…"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15 L3 21 L21 21 L21 15"/><line x1="12" y1="2" x2="12" y2="16"/><path d="M7.5 11.5 L12 16 L16.5 11.5"/></svg></span> 导入图片</button></div><div class="tb-sep"></div><div class="tb-group"><button class="tbtn" title="搜索 · ⌘F"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9.5" cy="9.5" r="6.2"/><line x1="16.5" y1="16.5" x2="23" y2="23"/></svg></span></button><button class="tbtn" title="排序：拍摄日期（新在前）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="7.7,20 7.7,3.6 3.4,8.6"/><line x1="7.7" y1="3.6" x2="12" y2="8.6"/><polyline points="16.3,3.6 16.3,20 12,15.4"/><line x1="16.3" y1="20" x2="20.6" y2="15.4"/></svg></span></button><button class="tbtn" title="筛选（日期 / 类型 / 尺寸 / 标签）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><line x1="2.4" y1="6.7" x2="21.6" y2="6.7"/><line x1="2.4" y1="12" x2="21.6" y2="12"/><line x1="2.4" y1="17.3" x2="14.9" y2="17.3"/></svg></span></button></div></div>
+    <div class="body"><div class="sidebar"><div class="side-scroll">
+      <div class="sec">标签 <span class="add" onclick="orgModal('newTag')">＋ 新建标签</span></div>
+      <div class="nav on" id="navTag">旅行 <span class="cnt">12</span></div>
+      <div class="nav">家人 <span class="cnt">8</span></div><div class="nav">工作 <span class="cnt">3</span></div>
+      <div class="sec" style="margin-top:8px">相册 <span class="add" onclick="orgModal('newAlbum')">＋ 新建相册</span></div>
+      <div class="nav">2026 京都 <span class="cnt">20</span></div><div class="nav">扫描件 <span class="cnt">5</span></div>
+    </div><div class="tray">▣ 照片托盘 · 3 张</div></div>
+    <div class="main"><div class="viewhead"><h1>旅行</h1><div class="sub">12 张 · 标签筛选</div></div>
+      <div class="ctxbar show"><b>已选 3 张</b><button class="btn">★ 星标</button><button class="btn" onclick="toggleCtx('tag')">加标签 ▾</button><button class="btn" onclick="toggleCtx('album')">加入相册 ▾</button><button class="btn">加入托盘</button><button class="btn ghost">取消选择</button></div>
+      <div class="gridarea"><div class="grid" id="grid3"></div></div>
+      <div class="statusbar"><span>已选 3 张</span><span class="sp"></span><span class="entry">索引管理 ›</span></div>
+    </div></div>
+
+    <div class="float orgctx" id="ctxTag"><div>☑ 旅行</div><div>☐ 家人</div><div>☐ 工作</div><div style="color:var(--selected)">＋ 新建标签并添加…</div></div>
+    <div class="float orgctx hidden" id="ctxAlbum" style="left:560px"><div>☐ 2026 京都</div><div>☐ 扫描件</div><div style="color:var(--selected)">＋ 新建相册并加入…</div>
+      <div class="fine" style="padding:6px 8px;color:var(--text-secondary)">一张照片可属于多个相册</div></div>
+
+    <div class="float" style="left:250px;top:130px;width:200px;padding:8px" id="rightMenu">
+      <div style="font-size:11px;color:var(--text-secondary);padding:2px 6px 6px">「旅行」</div>
+      <div style="padding:5px 6px;cursor:pointer" onclick="orgModal('rename')">重命名…</div>
+      <div style="padding:5px 6px;cursor:pointer" onclick="orgModal('delTag')">删除标签…</div>
+      <div style="padding:5px 6px;cursor:pointer">只看此标签</div>
+    </div>
+  </div>
+
+  <div class="legend"><b>整理操作</b><table>
+    <tr><td>标签</td><td>创建 / 重命名 / 删除；删除只从照片移除标签，不删照片 · M4-ORG-01/03/04</td></tr>
+    <tr><td>相册</td><td>创建 / 重命名 / 删除；照片可属多个相册；移出仅取消归属 · M4-ORG-07/08/09</td></tr>
+    <tr><td>批量</td><td>上下文操作栏只放已实现功能，未选中不渲染；右键/下拉均有入口 · M4-ORG-02</td></tr>
+    <tr><td>离线</td><td>拔盘时保留整理关系，照片标记离线，不产生重复记录 · M4-ORG-06/12</td></tr>
+  </table></div>
+
+  <!-- 整理类模态（原型演示用） -->
+  <div class="modal-mask" id="orgMask"><div class="modal">
+    <div class="mh" id="orgTitle">重命名标签</div>
+    <div class="mb" id="orgBody"></div>
+    <div class="mf"><button class="btn" onclick="closeOrg()">取消</button><button class="btn pri" id="orgOk" onclick="closeOrg()">保存</button></div>
+  </div></div>
+</div>
+
+<!-- 二次确认浮层：body 级、position:fixed，索引窗口与导入向导都能唤起 -->
+<div class="modal-mask" id="mask">
+  <div class="modal">
+    <div class="mh">⚠ <span id="mTitle">确认以「替换」方式导入？</span></div>
+    <div class="mb" id="mBody"></div>
+    <div class="mf"><button class="btn" onclick="closeModal();pendingConfirm=null">取消</button><button class="btn danger pri" id="mOk" onclick="confirmOk()">确认</button></div>
+  </div>
+</div>
+
+</div><!-- /stage -->
+
+<script>
+/* ================= 网格样例 ================= */
+function fillGrid(id,n,opts){
+  opts=opts||{};
+  const g=document.getElementById(id); if(!g) return;
+  let h='';
+  for(let i=0;i<n;i++){
+    const sel=i<3?' sel':'';
+    const corner=i<3?'<span class="corner">✓</span>':'';
+    const star=i%5===0?'<span class="star">★</span>':'';
+    const off=(opts.offline&&i>=n-2)?'<span class="offline">⚠ 离线</span>':'';
+    h+=`<div class="cell${sel}">${corner}${star}${off}IMG_${1000+i}.jpg</div>`;
+  }
+  g.innerHTML=h;
+}
+['grid','grid2','grid3'].forEach((id,i)=>fillGrid(id,i===1?1:9,{offline:i===2}));
+
+/* ================= 屏幕切换 ================= */
+function go(s){
+  // 快捷跳转：export/import/confirm 都映射到索引窗口或向导
+  if(s==='export'){ switchScreen('index'); openTab('io'); return; }
+  if(s==='import'){ switchScreen('wizard'); setStep(1); return; }
+  if(s==='confirm'){ switchScreen('index'); openTab('io'); showConfirm('replace'); return; }
+  switchScreen(s);
+}
+function switchScreen(s){
+  document.querySelectorAll('.screen').forEach(e=>e.classList.remove('active'));
+  const el=document.getElementById('scr-'+s)||document.getElementById('scr-'+({index:'index',wizard:'wizard',filter:'filter',meta:'meta',org:'org',home:'home'}[s]));
+  if(el) el.classList.add('active');
+  document.querySelectorAll('.protobar button[data-screen]').forEach(b=>b.classList.toggle('on',b.dataset.screen===s));
+  window.scrollTo(0,0);
+}
+document.querySelectorAll('.protobar button[data-screen]').forEach(b=>{
+  b.addEventListener('click',()=>{
+    const s=b.dataset.screen;
+    if(s==='export'){ switchScreen('index'); openTab('io'); }
+    else if(s==='import'){ switchScreen('wizard'); setStep(1); }
+    else if(s==='confirm'){ switchScreen('index'); openTab('io'); showConfirm('replace'); }
+    else switchScreen(s);
+    document.querySelectorAll('.protobar button[data-screen]').forEach(x=>x.classList.toggle('on',x===b));
+  });
+});
+
+/* ================= 索引窗口标签 ================= */
+function openTab(t){
+  ['tasks','folders','excl','storage','io'].forEach(x=>{
+    const p=document.getElementById('pane-'+x); if(p) p.classList.toggle('hidden',x!==t);
+    const b=document.querySelector('.tab[data-tab="'+x+'"]'); if(b) b.classList.toggle('on',x===t);
+  });
+}
+function onThumbs(cb){
+  document.getElementById('needSize').textContent=cb.checked?'64 MB':'1.8 MB';
+}
+
+/* ================= 六态操作状态 ================= */
+const STATES={
+  idle:{t:'空闲',cls:'',body:`<div class="fine">上次导出：2026-11-05 14:02 · 成功 · 1.8 MB</div>
+        <div class="row" style="margin-top:4px"><span class="fine">↳ /Users/me/Backups/photo-index-20261105.opicasaidx</span><button class="btn ghost" style="padding:2px 6px">打开所在目录</button></div>`,toast:''},
+  prep:{t:'准备中',cls:'',body:`<div class="fine">正在准备… 校验目标 / 计算预计内容 / 读清单</div>
+        <div class="progress indet"><i></i></div><div class="fine">总数未知时不显示虚假百分比（04 M2-FD-31）</div>`,toast:''},
+  run:{t:'进行中',cls:'',body:`<div class="fine">正在导出… 已处理 842 / 1 249 项</div>
+        <div class="progress"><i style="width:67%"></i></div>
+        <div class="row" style="justify-content:space-between"><span class="fine">67% · 无 ETA</span><button class="btn" onclick="setState('cancel')">取消导出</button></div>`,toast:''},
+  ok:{t:'✓ 成功',cls:'okbox',body:`<div class="okbox" style="margin:0">✓ 导出成功 · 耗时 2.4 s　<span class="fine">（同时触发 toast）</span></div>
+        <div class="fine" style="margin-top:8px">/Users/me/Backups/photo-index-20261105.opicasaidx</div>
+        <div class="fine">实际 1.8 MB · 照片 1 249 · 标签 5 · 相册 3 · 缩略图 0</div>
+        <div class="row" style="margin-top:6px"><button class="btn" style="padding:3px 9px">打开所在目录</button><button class="btn" style="padding:3px 9px">复制路径</button></div>`,toast:'✓ 导出成功'},
+  fail:{t:'⛔ 失败',cls:'errbox',body:`<div class="errbox" style="margin:0">⛔ 导出失败 · 现有索引未改动</div>
+        <div class="fine" style="margin-top:6px">目标磁盘空间不足（需要 1.8 MB，可用 0.4 MB）；临时文件已清理，无半成品文件</div>
+        <div class="row" style="margin-top:6px"><button class="btn" onclick="setState('run')">重试</button><button class="btn">返回</button></div>`,toast:'⛔ 操作失败，现有索引未改动'},
+  cancel:{t:'⏹ 已取消',cls:'',body:`<div class="fine">⏹ 已取消 · 现有索引未改动</div>
+        <div class="fine" style="margin-top:4px">已回滚全部写入，临时文件已清理；不记为失败</div>
+        <div class="row" style="margin-top:6px"><button class="btn">返回</button></div>`,toast:'⏹ 已取消'}
+};
+function setState(s){
+  const st=STATES[s];
+  const box=document.getElementById('opstate');
+  if(box){
+    box.innerHTML=`<div class="st"><span class="tag ${s==='ok'?'ok':s==='fail'?'dan':s==='cancel'?'warn':''}">${st.t}</span> 操作状态（常驻）</div>${st.body}`;
+    box.className='opstate '+st.cls;
+  }
+  // 顶部状态下拉同时驱动「导入向导 Step 3」的进度区（六态共用一套文案）
+  const wizOp=document.getElementById('wizOp');
+  if(wizOp && WIZ_FROM_STATE[s]) wizOp.innerHTML=WIZ_FROM_STATE[s];
+  document.getElementById('stateSel').value=s;
+  // toast 演示（M4-BUG-02 修复后可见）
+  ['toast-idx','toast-home','toast-wiz'].forEach(id=>{
+    const t=document.getElementById(id);
+    if(t&&st.toast){ t.textContent=st.toast; t.classList.remove('show'); void t.offsetWidth; t.classList.add('show'); }
+  });
+}
+document.getElementById('stateSel').addEventListener('change',e=>setState(e.target.value));
+
+/* ================= 二次确认 ================= */
+const CONFIRMS={
+  replace:{title:'确认以「替换」方式导入？',body:`将移除现有独有的整理数据：<ul><li>标签 2 个 · 相册 1 个</li><li>说明 34 条 · 星标 12 张</li></ul>
+      现有照片记录将以导入文件为准覆盖；执行前会先生成一份备份。
+      <div class="okbox" style="margin:8px 0 0">✓ 照片文件不受影响：不复制、不移动、不重命名</div>`,ok:'确认替换导入'},
+  overwrite:{title:'目标位置已存在同名文件',body:`/Users/me/Backups/photo-index-20261105.opicasaidx 已存在。
+      <ul><li>继续将覆盖该文件（覆盖前先做完整性校验）</li><li>现有索引不受影响</li></ul>
+      <div class="okbox" style="margin:8px 0 0">✓ 照片文件不受影响：不复制、不移动、不重命名</div>`,ok:'覆盖并导出'},
+  rebuild:{title:'重建索引？',body:`将清空 9 张照片的缩略图并重新生成。
+      <div class="okbox" style="margin:8px 0 0">✓ 清的是缩略图，照片文件不受影响</div>`,ok:'开始重建'}
+};
+let pendingConfirm=null;   // 'toStep3' | null：确认后要推进的动作
+function showConfirm(k, advance){
+  const c=CONFIRMS[k]||CONFIRMS.replace;
+  document.getElementById('mTitle').textContent=c.title;
+  document.getElementById('mBody').innerHTML=c.body;
+  document.getElementById('mOk').textContent=c.ok;
+  pendingConfirm=(k==='replace' && advance)?'toStep3':null;
+  document.getElementById('mask').classList.add('show');
+}
+function closeModal(){document.getElementById('mask').classList.remove('show');}
+function confirmOk(){
+  closeModal();
+  if(pendingConfirm==='toStep3'){ pendingConfirm=null; setStep(3); }
+}
+
+/* ================= 导入四步向导 ================= */
+let curStep=1;
+const STEP_NAMES=['校验与预览','策略与范围','执行','结果与匹配'];
+function setStep(n){
+  curStep=Math.max(1,Math.min(4,n));
+  let bar='';
+  for(let i=1;i<=4;i++){
+    const cls=i<curStep?'done':i===curStep?'cur':'';
+    bar+=`<div class="s ${cls}"><span class="n">${i<curStep?'✓':i}</span>${STEP_NAMES[i-1]}</div>`;
+    if(i<4) bar+='<div class="ln"></div>';
+  }
+  document.getElementById('stepbar').innerHTML=bar;
+  const w=document.getElementById('wiz');
+  w.innerHTML=STEP_HTML[curStep]();
+  if(curStep===2) bindStrat();
+  if(curStep===3){ const b=document.getElementById('wizOp'); if(b) b.innerHTML=WIZ_FROM_STATE.run; }
+  if(curStep===4) wizToast('✓ 导入完成 · 69 条成功导入');
+}
+const STEP_HTML={
+1:()=>`<div class="row"><span class="lbl" style="width:76px">索引文件</span><input class="inp" value="/Users/me/Backups/photo-index-20261105.opicasaidx"><button class="btn">浏览…</button></div>
+  <div class="okbox">✓ 完整性校验通过（SHA-256 匹配）<br>✓ 格式版本 v1 · 需要 OpenPicasa ≥ 0.4.0 · 当前 0.4.0<br>✓ 数据库版本 v8 · 与当前一致</div>
+  <div class="card"><div class="h">索引信息（来自 index_manifest · M4-IDX-31）</div>
+    <div class="kv"><span class="k">生成应用</span><span class="v" style="font-weight:400">OpenPicasa 0.4.0</span>
+      <span class="k">生成时间</span><span class="v" style="font-weight:400">2026-11-05 14:02</span>
+      <span class="k">内容</span><span class="v" style="font-weight:400">索引记录 ✓ · 整理数据 ✓ · 路径信息 ✓ · 缩略图 ✗</span>
+      <span class="k">数量</span><span class="v" style="font-weight:400">照片 1 249 · 根 2 · 文件夹 87 · 标签 5 · 相册 3</span></div>
+    <div class="fine" style="margin-top:8px">来源根目录 ▾ 明细</div>
+    <div class="fine">&nbsp;&nbsp;/Users/me/Photos　<span class="tag ok">在线</span></div>
+    <div class="fine">&nbsp;&nbsp;/Volumes/Ext/2026　<span class="tag warn">离线（导出时即离线）</span></div></div>
+  <div class="card" style="border-color:#EAD3A8"><div class="h" style="color:var(--warn)">⚠ 冲突与路径匹配（导入前必显 · M4-IDX-32）</div>
+    <div class="kv"><span class="k">重复记录</span><span class="v">1 180 条（身份相同，将按策略处理）</span>
+      <span class="k">路径无法匹配</span><span class="v">69 条（/Volumes/Ext/2026 在本机不存在）</span>
+      <span class="k">将新增 / 跳过 / 冲突</span><span class="v">0 / 1 180 / 0 条</span></div>
+    <div class="note">ℹ 路径无法匹配的照片导入后可在第 4 步「重新匹配图库根目录」处理；不会复制或移动照片，未匹配的照片将标记为离线。</div></div>
+  <div class="row" style="justify-content:space-between"><button class="btn ghost" onclick="badFile()">模拟「损坏文件」报错</button>
+    <span><button class="btn">取消</button> <button class="btn pri" onclick="setStep(2)">下一步：策略 →</button></span></div>
+  <div id="badFileSlot"></div>`,
+2:()=>`<div class="fine" style="margin-bottom:8px">导入策略（明确说明影响范围 · M4-IDX-33）</div>
+  <div class="strat">
+    <div class="opt on" id="optMerge" onclick="setStrat('merge')"><h4>◉ 合并（推荐，默认）</h4><p>只新增、不删除现有记录；身份相同且内容不同：保留现有，计入冲突清单。</p></div>
+    <div class="opt dan" id="optReplace" onclick="setStrat('replace')"><h4>○ 替换　<span class="tag dan">危险</span></h4><p>以导入文件为准；现有独有的整理数据将被移除；执行前自动备份。</p></div>
+  </div>
+  <div class="card" id="impact"><div class="h">影响范围（随策略切换实时更新）</div><div id="impactBody"></div></div>
+  <label class="fine" style="display:flex;gap:6px;align-items:center"><input type="checkbox" checked> 我已了解上述影响范围</label>
+  <div class="row" style="justify-content:space-between">
+    <button class="btn" onclick="setStep(1)">← 上一步</button>
+    <span><button class="btn">取消</button> <button class="btn pri" id="startBtn" onclick="startImport()">开始导入</button></span></div>`,
+3:()=>`<div class="opstate" id="wizOp"></div>
+  <div class="note">ⓘ 关闭本窗口不会取消导入；重开可继续查看进度（M4-IDX-06/42）。后台执行，界面可继续操作。</div>
+  <div class="row" style="justify-content:space-between"><button class="btn" onclick="setStep(2)">← 上一步</button>
+    <span><button class="btn" onclick="setWizState('cancel')">取消导入</button> <button class="btn pri" onclick="setStep(4)">模拟完成 →</button></span></div>`,
+4:()=>`<div class="okbox">✓ 导入完成 · 69 条成功导入</div>
+  <div class="card"><div class="h">导入结果（可对账 · M4-IDX-37）</div>
+    <div class="kv"><span class="k">成功导入</span><span class="v">69 条</span>
+      <span class="k">跳过</span><span class="v">1 180 条（与现有完全相同）</span>
+      <span class="k">失败</span><span class="v">0 条　<button class="btn" style="padding:2px 7px">展开失败清单 ▾</button></span>
+      <span class="k">合计</span><span class="v">1 249 条 = 导入文件记录数 ✓</span></div></div>
+  <div class="card" style="border-color:#EAD3A8"><div class="h" style="color:var(--warn)">重新匹配图库根目录（M4-IDX-39 · 可选后续动作）</div>
+    <table><tr><th>来源根目录</th><th>本机状态</th><th>操作</th></tr>
+      <tr><td>/Users/me/Photos</td><td><span class="tag ok">✓ 已匹配</span></td><td><button class="btn">更改…</button></td></tr>
+      <tr><td>/Volumes/Ext/2026</td><td><span class="tag dan">✗ 路径不存在</span></td><td><button class="btn" onclick="remap()">选择本机目录…</button> <button class="btn">稍后</button></td></tr></table>
+    <div class="fine" style="margin-top:6px">↳ 69 张照片 <span class="tag warn">⚠ 离线（索引与整理关系已保留）</span></div>
+    <div class="note">ℹ 重新匹配不会复制、移动或重命名照片；映射后做增量核对。</div></div>
+  <div class="card"><div class="h">结果补充</div><div class="fine">标签 5 个 / 相册 3 个 / 星标与说明随导入保留；离线照片 69 张（可见、不可打开原图，标记离线）。</div></div>
+  <div class="row" style="justify-content:flex-end"><button class="btn">稍后再匹配</button> <button class="btn pri" onclick="go('home')">完成</button></div>`
+};
+let strat='merge';
+function setStrat(s){
+  strat=s;
+  document.getElementById('optMerge').classList.toggle('on',s==='merge');
+  document.getElementById('optReplace').classList.toggle('on',s==='replace');
+  renderImpact();
+}
+function bindStrat(){renderImpact();}
+function renderImpact(){
+  const b=document.getElementById('impactBody'); if(!b) return;
+  if(strat==='merge'){
+    document.getElementById('impact').style.borderColor='#E2E0DC';
+    b.innerHTML=`<div class="fine">合并：新增 <b>69</b> 条 · 跳过 <b>1 180</b> 条 · 冲突 <b>0</b> 条 · 删除 <b>0</b> 条</div>
+      <div class="fine" style="margin-top:4px">标签按名称合并去重 · 相册按名称合并 · 星标/说明保留现有</div>
+      <div class="fine">现有图库根目录保持不变</div>`;
+    document.getElementById('startBtn').textContent='开始导入';
+  }else{
+    document.getElementById('impact').style.borderColor='#E6BDB8';
+    b.innerHTML=`<div class="errbox" style="margin:0">⚠ 影响范围（替换）</div>
+      <div class="fine" style="margin-top:6px">将被移除：现有独有标签 <b>2</b> 个 · 相册 <b>1</b> 个 · 说明 <b>34</b> 条 · 星标 <b>12</b> 张</div>
+      <div class="fine">现有照片记录：以导入文件覆盖；执行前先生成备份</div>
+      <div class="fine" style="color:var(--danger)">✓ 照片文件不受影响（不复制、不移动、不重命名）</div>`;
+    document.getElementById('startBtn').textContent='开始导入（需二次确认）';
+  }
+}
+function startImport(){
+  if(strat==='replace'){ showConfirm('replace', true); return; /* 确认按钮才推进到第 3 步 */ }
+  setStep(3);
+}
+/* 导入向导 Step 3 的进度区：与顶部状态下拉共用同一套六态口径（11 §2.1.2） */
+const WIZ_FROM_STATE={
+  idle:`<div class="st"><span class="tag">空闲</span> 操作状态</div><div class="fine">等待开始导入。</div>`,
+  prep:`<div class="st"><span class="tag">准备中</span> 操作状态</div><div class="fine">正在准备… 校验文件 / 读清单 / 建临时副本</div><div class="progress indet"><i></i></div><div class="fine">总数未知时不显示虚假百分比（04 M2-FD-31）</div>`,
+  run:`<div class="st"><span class="tag">进行中</span> 操作状态</div><div class="fine">正在导入… 已处理 620 / 1 249 项</div>
+       <div class="progress"><i style="width:50%"></i></div><div class="fine">当前阶段：写入整理关系（后台执行，界面可继续操作） · 无 ETA</div>`,
+  ok:`<div class="st"><span class="tag ok">✓ 成功</span> 导入完成 · 69 条成功导入</div><div class="fine">成功 / 跳过 / 失败可对账，详见第 4 步结果。</div>`,
+  fail:`<div class="st"><span class="tag dan">⛔ 导入失败</span> 现有索引未改动</div>
+        <div class="errbox" style="margin:6px 0">目标磁盘空间不足（需要 2.1 MB，可用 0.4 MB）；事务已回滚</div>
+        <button class="btn">重试</button>`,
+  cancel:`<div class="st"><span class="tag warn">⏹ 已取消</span> 现有索引未改动</div><div class="fine">已回滚全部写入，可重新选择文件或稍后重试；不记为失败。</div>`
+};
+function setWizState(s){
+  const box=document.getElementById('wizOp'); if(box) box.innerHTML=WIZ_FROM_STATE[s];
+  const sel=document.getElementById('stateSel'); if(sel) sel.value=s;
+  if(s==='cancel') wizToast('⏹ 已取消 · 现有索引未改动');
+}
+function badFile(){
+  const slot=document.getElementById('badFileSlot');
+  slot.innerHTML=`<div class="errbox">⛔ 无法导入：索引文件已损坏或不完整（校验和不匹配）<br>
+    <span class="fine">现有索引未改动，可重新选择文件或更换来源后重试。</span></div>
+    <div class="fine" style="margin-top:4px">其他坏文件文案（11 §2.2.4）：不是 OpenPicasa 索引文件 / 需要 OpenPicasa ≥ x.y.z / 缺少数据表 / 旧版升级失败…</div>`;
+}
+function remap(){
+  const t=document.getElementById('toast-wiz');
+  t.textContent='✓ 已重新匹配到 /Users/me/Archive/2026 · 69 张照片恢复在线（增量核对）';
+  t.classList.remove('show'); void t.offsetWidth; t.classList.add('show');
+}
+function wizToast(msg){
+  const t=document.getElementById('toast-wiz');
+  if(t){t.textContent=msg;t.classList.remove('show');void t.offsetWidth;t.classList.add('show');}
+}
+
+/* ================= 元数据降级态 ================= */
+const META={
+  ok:{tag:'✓ 读取成功',cls:'tag',note:'<div class="okbox" style="font-size:11px">✓ 元数据读取成功（v8 入库字段）</div>',
+      taken:'2010-03-14 09:30 <span class="tag">来源：EXIF 拍摄时间</span>',cam:'Canon · EOS 5D Mark II',lens:'EF 24-70mm f/2.8L USM'},
+  noexif:{tag:'ⓘ 无 EXIF',cls:'tag warn',note:'<div class="warnbox" style="font-size:11px">ⓘ 该文件没有 EXIF 信息，按文件属性显示</div>',
+      taken:'2010-03-14 <span class="tag warn">来源：文件修改时间</span>',cam:'—',lens:'—'},
+  readfail:{tag:'⚠ 读取失败',cls:'tag dan',note:'<div class="errbox" style="font-size:11px">⚠ 元数据读取失败（EXIF 段损坏），已按文件属性显示</div>',
+      taken:'2010-03-14 <span class="tag warn">来源：文件修改时间</span>',cam:'—',lens:'—'},
+  offline:{tag:'⚠ 照片离线',cls:'tag dan',note:'<div class="warnbox" style="font-size:11px">⚠ 照片离线（/Volumes/Ext/2026 不可访问），显示上次缓存信息</div>',
+      taken:'2010-03-14 09:30 <span class="tag">来源：EXIF 拍摄时间</span>',cam:'Canon · EOS 5D Mark II',lens:'EF 24-70mm f/2.8L USM'}
+};
+const metaSel=document.getElementById('metaSel');
+if(metaSel) metaSel.addEventListener('change',e=>{
+  const m=META[e.target.value];
+  const tag=document.getElementById('metaStateTag'); tag.textContent=m.tag; tag.className=m.cls;
+  document.getElementById('metaTaken').innerHTML=m.taken;
+  document.getElementById('metaCam').textContent=m.cam;
+  document.getElementById('metaLens').textContent=m.lens;
+  document.getElementById('metaStatusNote').outerHTML=`<div id="metaStatusNote">${m.note}</div>`;
+});
+
+/* ================= S10 整理 ================= */
+function toggleCtx(k){
+  document.getElementById('ctxTag').classList.toggle('hidden',k!=='tag');
+  document.getElementById('ctxAlbum').classList.toggle('hidden',k!=='album');
+}
+const ORG_MODALS={
+  newTag:{title:'新建标签',body:'<label class="lbl">名称</label><input class="inp" placeholder="例如：旅途"><div class="note">同名标签会提示重名，不静默覆盖（M4-ORG-04）。</div>',ok:'创建'},
+  newAlbum:{title:'新建相册',body:'<label class="lbl">名称</label><input class="inp" placeholder="例如：2026 京都"><div class="note">相册是应用内虚拟集合，不会在磁盘上新建目录（M4-ORG-07）。</div>',ok:'创建'},
+  rename:{title:'重命名标签「旅行」',body:'<div class="row"><span class="lbl" style="width:60px">原名称</span><span>旅行</span></div><div class="row"><span class="lbl" style="width:60px">新名称</span><input class="inp" value="旅途"></div><div class="note">ℹ 12 张照片上的标签将同步更新。</div>',ok:'保存'},
+  delTag:{title:'删除标签「旅行」？',body:'将从 12 张照片上移除该标签。<div class="okbox" style="margin:8px 0 0">✓ 照片文件不受影响，不会删除任何照片</div>',ok:'删除标签'}
+};
+function orgModal(k){
+  const m=ORG_MODALS[k];
+  document.getElementById('orgTitle').textContent=m.title;
+  document.getElementById('orgBody').innerHTML=m.body;
+  document.getElementById('orgOk').textContent=m.ok;
+  document.getElementById('orgOk').className='btn '+(k==='delTag'?'danger':'pri');
+  document.getElementById('orgMask').classList.add('show');
+}
+function closeOrg(){document.getElementById('orgMask').classList.remove('show');}
+
+/* ================= 参数面板（原型说明） ================= */
+document.getElementById('cfgBtn').addEventListener('click',()=>{
+  alert('M4 原型参数（均来自 docs/11 建议默认，P 项待裁决）：\n\n'+
+    '· P-M4-01 索引文件默认包含标签/相册/星标/说明/路径信息\n'+
+    '· P-M4-02 缩略图可选，默认不含（索引包 .opicasaidx.zip）\n'+
+    '· P-M4-03 合并=保留现有+冲突计数；替换=备份+二次确认\n'+
+    '· P-M4-05 第五标签「导入 / 导出」（可改为总览卡片）\n'+
+    '· P-M4-06 近期搜索上限 10 条，存自有 DB settings\n'+
+    '· P-M4-07 同名导出文件需二次确认覆盖\n\n'+
+    '配色/尺寸取自 theme.rs 与 index_mgr.rs；原型不写任何数据。');
+});
+
+/* ================= 初始 ================= */
+setState('idle');
+setStep(1);
+openTab('io');
+</script>
+</body>
+</html>

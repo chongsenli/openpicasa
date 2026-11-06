@@ -14,6 +14,8 @@
 //! 本 crate 只接受一个路径参数，**不自己拼路径**——这样「谁能写哪儿」只有一处定义）。
 
 mod dims;
+mod export;
+mod m4;
 mod pathutil;
 mod roots;
 mod schema;
@@ -33,6 +35,14 @@ pub use types::{
     RootSeed, RootStat, RootWatchRow, ScanApply, TakenFrom, TaskOutcome, TaskRow, ThumbBuf, ThumbState,
     ThumbStats, UPSERT_UNCHANGED, UpgradeReport, V2DataReport, classify_failure,
 };
+pub use m4::{
+    AlbumRow, ContentFlags, ImportReport, ImportStrategy, IndexManifest, ManifestCounts,
+    ManifestRoot, PhotoExif, RecentSearch,
+};
+pub use export::{
+    FORMAT_VERSION, ExportReport, ImportPreview, check_export_dir, cleanup_staging,
+    execute_import, export_index, inspect_index,
+};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -46,6 +56,9 @@ pub enum DbError {
     Io(#[from] std::io::Error),
     #[error("schema 版本 {found} 比本程序支持的 {supported} 更新；请升级应用而不是降级数据库")]
     SchemaTooNew { found: i64, supported: i64 },
+    /// 业务校验失败（重名、空名、不兼容的索引文件等），文案可直接展示给用户。
+    #[error("{0}")]
+    Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -1510,6 +1523,40 @@ impl Db {
                 sql_text_literal(tag)
             ));
         }
+        // ---- M4 组合筛选新增维度（docs/11 §4.1）----
+        if let Some((lo, hi)) = filter.size_bytes {
+            where_sql.push_str(&format!(" AND p.size_bytes BETWEEN {lo} AND {hi}"));
+        }
+        if let Some((lo, hi)) = filter.dimension_range {
+            where_sql.push_str(&format!(
+                " AND MAX(COALESCE(p.width,0), COALESCE(p.height,0)) BETWEEN {lo} AND {hi}"
+            ));
+        }
+        if let Some(cam) = &filter.camera {
+            where_sql.push_str(&format!(
+                " AND (COALESCE(p.camera_make,'') || ' ' || COALESCE(p.camera_model,'')) LIKE '%{}%'",
+                sql_text_literal(cam)
+            ));
+        }
+        if let Some(lens) = &filter.lens {
+            where_sql.push_str(&format!(
+                " AND COALESCE(p.lens_model,'') LIKE '%{}%'",
+                sql_text_literal(lens)
+            ));
+        }
+        if filter.missing_date {
+            where_sql.push_str(" AND (p.taken_at IS NULL OR p.taken_from = 2)");
+        }
+        if filter.missing_exif {
+            where_sql.push_str(" AND p.exif_status <> 1");
+        }
+        if let Some(album) = &filter.album {
+            where_sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM album_photos ap JOIN albums a ON a.id = ap.album_id
+                              WHERE ap.photo_id = p.id AND a.name = '{}')",
+                sql_text_literal(album)
+            ));
+        }
         FilterWhere::Sql(where_sql)
     }
 
@@ -2112,7 +2159,7 @@ impl Db {
         {
             let mut st = self.conn.prepare(
                 "SELECT root_id, SUM(direct_count), MAX(last_scan_at)
-                   FROM folders GROUP BY root_id",
+                   FROM folders WHERE root_id IS NOT NULL GROUP BY root_id",
             )?;
             let mut rows = st.query([])?;
             while let Some(r) = rows.next()? {
@@ -2127,7 +2174,8 @@ impl Db {
             let mut st = self.conn.prepare(
                 "SELECT f.root_id, COUNT(*) FROM photos p
                    JOIN folders f ON f.id = p.folder_id
-                  WHERE p.thumb_state IN (2, 3) GROUP BY f.root_id",
+                  WHERE p.thumb_state IN (2, 3) AND f.root_id IS NOT NULL
+                  GROUP BY f.root_id",
             )?;
             let mut rows = st.query([])?;
             while let Some(r) = rows.next()? {

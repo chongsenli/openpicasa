@@ -66,6 +66,9 @@ pub struct Viewer {
     pub fullscreen: bool,
     /// EXIF 摘要（打开时同步读一次，1~5ms）
     pub exif: picasa_imaging::ExifSummary,
+    /// M4：拍摄时间来源标签（EXIF / 文件名 / 文件修改时间）与元数据状态
+    pub taken_src: String,
+    pub exif_status: String,
     /// 直方图（M4 #11）：纹理加载时算一次。`None` = 还没加载 / 算不出来。
     pub histogram: Option<picasa_imaging::Histogram>,
     /// 并排比较（M4 #11）：与相邻照片并排。`true` 时同时加载 index±1 的纹理。
@@ -93,6 +96,8 @@ impl Viewer {
             last_move: 0.0,
             fullscreen: false,
             exif: Default::default(),
+            taken_src: String::new(),
+            exif_status: String::new(),
             histogram: None,
             compare: false,
             compare_tex: None,
@@ -151,13 +156,36 @@ pub fn ensure_loaded(viewer: &mut Viewer, row: &PhotoRow, service: &ThumbService
         kind: JobKind::Viewer,
     });
     // EXIF 只读探测：100MB 的 EXIF 解析也就几毫秒，同步做即可（换页手感更稳）
-    if let Ok(probe) = picasa_imaging::probe(&row.abs_path()) {
-        viewer.exif = probe.summary;
-        viewer.dims = if probe.width > 0 {
-            Some((probe.width, probe.height))
-        } else {
-            None
-        };
+    // M4-META-02/04：来源标签 + 读取状态，缺失就明说，不编造。
+    match picasa_imaging::probe(&row.abs_path()) {
+        Ok(probe) => {
+            viewer.exif = probe.summary;
+            viewer.dims = if probe.width > 0 {
+                Some((probe.width, probe.height))
+            } else {
+                None
+            };
+            viewer.taken_src = match row.taken_at_src {
+                0 => "EXIF 拍摄时间",
+                1 => "文件名",
+                _ => "文件修改时间",
+            }
+            .to_string();
+            viewer.exif_status = if viewer.exif.make.is_none()
+                && viewer.exif.model.is_none()
+                && viewer.exif.taken_at_text.is_none()
+            {
+                "该文件没有 EXIF 信息".to_string()
+            } else {
+                "读取成功".to_string()
+            };
+        }
+        Err(e) => {
+            viewer.exif = Default::default();
+            viewer.dims = None;
+            viewer.taken_src = "—".to_string();
+            viewer.exif_status = format!("元数据读取失败（{}）", e);
+        }
     }
 }
 
@@ -564,8 +592,10 @@ fn draw_info_panel(painter: &egui::Painter, rect: Rect, viewer: &Viewer, theme: 
         ("快门", e.exposure_time.clone()),
         ("ISO", e.iso.clone()),
         ("拍摄时间", e.taken_at_text.clone()),
+        ("时间来源", Some(viewer.taken_src.clone())),
         ("色彩空间", e.color_space.clone()),
         ("位置", e.gps.clone()),
+        ("元数据", Some(viewer.exif_status.clone())),
     ];
 
     let mut y = panel.top() + 10.0 + hist_h;

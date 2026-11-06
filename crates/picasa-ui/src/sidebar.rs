@@ -46,6 +46,15 @@ pub enum SidebarAction {
     TrayOpen(i64),
     /// 右键：路径、屏幕位置
     FolderContext(String, Pos2),
+    /// M4：按标签筛选照片（`M4-ORG-03`）
+    FilterByTag(String),
+    /// M4：按相册筛选照片（`M4-ORG-03/08`）
+    FilterByAlbum(String),
+    /// M4：折叠标签 / 相册分组
+    ToggleSectionM4(String),
+    /// M4：新建标签 / 相册
+    NewTag,
+    NewAlbum,
 }
 
 pub struct SidebarCtx<'a> {
@@ -57,6 +66,14 @@ pub struct SidebarCtx<'a> {
     pub tray_expanded: bool,
     pub favorites_collapsed: bool,
     pub folders_collapsed: bool,
+    /// M4：标签 / 相册分组的折叠状态
+    pub tags_collapsed: bool,
+    pub albums_collapsed: bool,
+    /// M4：标签 / 相册列表（**由 App 缓存后传入**）。
+    /// ⚠️ 不能在这里每帧查库：`all_tags()` 是全表 GROUP BY、`all_albums()` 带
+    /// 相关子查询计数，绘制每帧都跑会拖慢缩略图展示（实机反馈的性能回归）。
+    pub tags: &'a [(String, i64)],
+    pub albums: &'a [(String, i64)],
     pub has_focus: bool,
     /// 索引进度快照：左栏的**状态点**与计数必须与面板/弹框同源（`04` §3.2）
     pub snapshot: &'a IndexSnapshot,
@@ -110,6 +127,26 @@ pub fn show(
             if !ctx.folders_collapsed {
                 folder_tree(ui, lib, &*ctx, &mut actions);
             }
+
+            // ---- M4：标签 / 相册（应用内虚拟集合，不是磁盘目录）----
+            ui.add_space(6.0);
+            m4_group(
+                ui,
+                "标签",
+                ctx.tags_collapsed,
+                ctx.tags.to_vec(),
+                &mut actions,
+                true,
+            );
+            ui.add_space(6.0);
+            m4_group(
+                ui,
+                "相册",
+                ctx.albums_collapsed,
+                ctx.albums.to_vec(),
+                &mut actions,
+                false,
+            );
         });
 
     actions
@@ -145,6 +182,87 @@ fn section_title(ui: &mut Ui, title: &str, collapsed: bool, actions: &mut Vec<Si
     );
     if resp.clicked() {
         actions.push(SidebarAction::ToggleSection(title.to_string()));
+    }
+}
+
+/// M4 标签 / 相册分组（docs/12 §8.1）。
+///
+/// 与「文件夹」组刻意区分：这里是**应用内虚拟集合**，数据只存自有 DB，
+/// 不会在磁盘上新建目录。组头带「＋」新建入口，行显示计数。
+fn m4_group(
+    ui: &mut Ui,
+    title: &str,
+    collapsed: bool,
+    items: Vec<(String, i64)>,
+    actions: &mut Vec<SidebarAction>,
+    is_tag: bool,
+) {
+    let (rect, resp) = ui.allocate_exact_size(
+        vec2(ui.available_width().max(1.0), Metrics::SIDEBAR_SECTION_H),
+        Sense::click(),
+    );
+    // 防御：窗口极窄 / 侧栏收起过渡帧时 rect 可能退化（宽度 0 或负）。
+    // 退化几何会让 egui 后续合并 Mesh 时产生无效索引（debug 下 `is_valid()`
+    // 断言 panic：Other mesh is invalid），所以这里直接跳过绘制。
+    if rect.width() < 2.0 || rect.height() < 2.0 || !rect.is_finite() {
+        return;
+    }
+    let painter = ui.painter_at(rect);
+    let color = Theme::picasa().sidebar_section_text;
+    painter.text(
+        pos2(rect.left() + 14.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        title,
+        FontId::new(11.0, egui::FontFamily::Proportional),
+        color,
+    );
+    // 右端「＋」新建
+    let plus = Rect::from_center_size(pos2(rect.right() - 14.0, rect.center().y), vec2(11.0, 11.0));
+    icons::draw(&painter, Icon::Plus, plus, color, 1.2);
+    if resp.clicked() {
+        if plus.contains(resp.interact_pointer_pos().unwrap_or_default()) {
+            actions.push(if is_tag {
+                SidebarAction::NewTag
+            } else {
+                SidebarAction::NewAlbum
+            });
+        } else {
+            actions.push(SidebarAction::ToggleSectionM4(title.to_string()));
+        }
+    }
+    if collapsed {
+        return;
+    }
+    for (name, count) in items {
+        let (r, row_resp) = ui.allocate_exact_size(
+            vec2(ui.available_width().max(1.0), Metrics::SIDEBAR_ROW_H),
+            Sense::click(),
+        );
+        if r.width() < 2.0 || !r.is_finite() {
+            continue; // 退化行不绘制，避免无效 Mesh
+        }
+        let p = ui.painter_at(r);
+        p.text(
+            pos2(r.left() + 28.0, r.center().y),
+            Align2::LEFT_CENTER,
+            &name,
+            FontId::new(12.5, egui::FontFamily::Proportional),
+            Theme::picasa().tree_text,
+        );
+        p.text(
+            pos2(r.right() - 14.0, r.center().y),
+            Align2::RIGHT_CENTER,
+            count.to_string(),
+            FontId::new(11.0, egui::FontFamily::Proportional),
+            Theme::picasa().text_secondary,
+        );
+        if row_resp.clicked() {
+            actions.push(if is_tag {
+                SidebarAction::FilterByTag(name.clone())
+            } else {
+                SidebarAction::FilterByAlbum(name.clone())
+            });
+        }
     }
 }
 

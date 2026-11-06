@@ -29,42 +29,42 @@ use crate::theme::Theme;
 // ---------------------------------------------------------------- 动作
 
 /// 页面上用户能点出的动作。交回 `app` 执行，本模块**不碰数据库**。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MgrAction {
     // ---- 任务标签
-    /// 取消一个进行中的任务
     CancelTask(i64),
-    /// 重试某个分类的失败项（走 `generate_thumbs_for_ids`，§4.3 边界）
     RetryKind(FailureKind),
-    /// 忽略某个分类（只是标记，**仍在列表可见**，R-M2-4）
     IgnoreKind(FailureKind),
-    /// 取消忽略
     UnignoreKind(FailureKind),
-
     // ---- 关注文件夹标签
     RefreshRoot(i64),
     ReindexRoot(i64),
-    /// 全量重建（二次确认后）
     RebuildRoot(i64),
     CloseRoot(i64),
     ReopenRoot(i64),
-    /// 在系统文件管理器里显示（macOS = Finder）
     RevealRoot(i64),
-    /// 删除该根的索引（保留 root 与排除项）
     DeleteIndexRoot(i64),
-
     // ---- 排除项标签
     RestoreExclusion(i64),
-    /// 清理全部「路径已不存在」的失效项
     PruneStaleExclusions,
-
     // ---- 存储与诊断标签
     ClearThumbs,
     Vacuum,
-    /// 导出诊断日志（§4.9：目标目录由用户选，且不得落在照片目录下）
     ExportDiagLog,
-    /// 帧时间直方图开关（PERF-18）
     ToggleFrameStats(bool),
+    // ---- M4「导入 / 导出」标签（docs/12 S2～S7）
+    /// 打开系统保存对话框 → 导出（携带是否含缩略图）
+    ExportIndex { with_thumbs: bool },
+    /// 打开系统文件对话框 → 选择索引文件并校验/预览
+    PickImportFile,
+    /// 导入：切换合并 / 替换策略
+    SetImportStrategy(picasa_db::ImportStrategy),
+    /// 导入：开始执行（替换策略会先弹二次确认）
+    StartImport,
+    /// 导入：取消
+    CancelImport,
+    /// 导入后重新匹配某个来源根目录：(根路径, 用户选的本机目录)
+    RemapRoot { from: String, to: String },
 }
 
 // ---------------------------------------------------------------- 二次确认
@@ -121,14 +121,69 @@ impl Confirm {
 
 // ---------------------------------------------------------------- 页面状态
 
+/// M4 导入 / 导出操作的六种状态（docs/11 §2.1.2、docs/12 §9.1）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IoState {
+    #[default]
+    Idle,
+    /// 校验 / 计算预计内容 / 读清单；总数未知时不显示百分比
+    Preparing,
+    /// 进行中（进度条 + 已处理 N / M，无 ETA）
+    Running,
+    Success,
+    Failed,
+    Cancelled,
+}
+
+/// 导入向导的四步（docs/12 S3～S6）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImportStep {
+    #[default]
+    Validate,
+    Strategy,
+    Execute,
+    Result,
+}
+
+/// M4「导入 / 导出」标签的会话态（不进偏好）。
+#[derive(Clone, Debug, Default)]
+pub struct IoUi {
+    pub state: IoState,
+    /// 进度文案（"已处理 620 / 1 249 项"），M 未知时只写 "已处理 N 项"
+    pub progress: String,
+    /// 0..1，None = 不确定态（循环条）
+    pub fraction: Option<f32>,
+    /// 结果 / 错误 / 取消的正文（可理解的人话）
+    pub message: String,
+    /// 上次操作结果摘要（空闲态显示）
+    pub last_result: String,
+    /// 导出目标路径（用户选的；显示用）
+    pub export_path: String,
+    pub export_with_thumbs: bool,
+    /// 导入文件路径
+    pub import_path: String,
+    pub import_step: ImportStep,
+    pub strategy: picasa_db::ImportStrategy,
+    /// 导入预览（校验通过后由 app 填入）
+    pub preview: Option<picasa_db::ImportPreview>,
+    /// 导入结果（执行完成后由 app 填入）
+    pub report: Option<picasa_db::ImportReport>,
+    /// 需要重新匹配的来源根（路径, 是否已匹配）
+    pub roots_to_remap: Vec<(String, bool)>,
+    /// 我已了解影响范围（替换策略勾选框）
+    pub understood: bool,
+}
+
 /// 索引管理页的界面状态（**不进偏好**：它是临时窗口状态，不该跨会话复活）。
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct IndexMgrUi {
     pub open: bool,
     pub tab: MgmtTab,
     pub confirm: Confirm,
     /// 帧时间直方图浮层开关（PERF-18，存这里因为是「诊断」的一部分）
     pub frame_stats: bool,
+    /// M4 导入 / 导出标签状态
+    pub io: IoUi,
 }
 
 impl IndexMgrUi {
@@ -265,10 +320,14 @@ pub fn show(
         // 只是把窗口收起来。用户关掉页面后索引必须继续跑。
         .open(&mut open)
         .resizable(true)
-        .default_size([720.0, 520.0])
+        .default_size([760.0, 560.0])
         .min_size([560.0, 380.0])
         .show(ctx, |ui| {
-            // ---- 四个标签
+            // ---- M4 总览摘要区（常驻，不随标签切换消失；docs/12 §2）
+            // 五字段全部来自同一份 MgmtSnapshot，与主区标题 / 状态栏数字同源。
+            overview_summary(ui, theme, snap, now);
+            ui.separator();
+            // ---- 五个标签（M4 新增「导入 / 导出」）
             ui.horizontal(|ui| {
                 for t in MgmtTab::ALL {
                     let sel = tab == t;
@@ -304,6 +363,9 @@ pub fn show(
                         &mut actions,
                         &mut state.confirm,
                     ),
+                    // M4 第五标签：导入 / 导出（总览摘要区见 show() 开头，
+                    // 具体操作与四态反馈见 import_export_tab）。
+                    MgmtTab::ImportExport => import_export_tab(ui, theme, state, &mut actions),
                 });
         });
 
@@ -648,6 +710,322 @@ fn confirm_dialog(ctx: &Context, state: &mut IndexMgrUi, actions: &mut Vec<MgrAc
     }
 }
 
+// ---------------------------------------------------------------- M4 总览摘要区
+
+/// 总览摘要区（docs/11 §2.1.1、docs/12 §2）：标签栏之上常驻。
+///
+/// 数据源**只有** `MgmtSnapshot` 一份，不自行维护任何计数；异常常驻且可点击定位。
+fn overview_summary(ui: &mut Ui, theme: &Theme, snap: &MgmtSnapshot, now: i64) {
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            // 图库根目录：逐行（非离线根也要可见，R-M3-7）
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("图库根目录").color(theme.text_secondary));
+                if snap.roots.is_empty() {
+                    ui.label(RichText::new("尚未添加图库根目录").color(theme.warn));
+                } else {
+                    ui.vertical(|ui| {
+                        for r in &snap.roots {
+                            let s = root_summary_line(r);
+                            let color = if r.offline { theme.warn } else { theme.text_primary };
+                            ui.label(RichText::new(s).color(color).size(11.5));
+                        }
+                    });
+                }
+            });
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                // 索引状态：最近活跃任务，无任务显示空闲
+                let status = snap
+                    .tasks
+                    .iter()
+                    .find(|t| t.running)
+                    .map(|t| t.status.clone())
+                    .unwrap_or_else(|| "空闲".to_string());
+                ui.label(RichText::new("索引状态").color(theme.text_secondary));
+                ui.label(RichText::new(format!("● {status}")).strong());
+                ui.add_space(16.0);
+                // 照片数量：与 main 标题同源的 all_photos
+                ui.label(RichText::new("照片数量").color(theme.text_secondary));
+                ui.label(RichText::new(format!("{} 张", snap.all_photos)).strong());
+                ui.add_space(16.0);
+                // 最近更新：取根目录 / 任务里最近的时间戳（同一快照内）
+                let last = snap
+                    .roots
+                    .iter()
+                    .filter_map(|r| r.last_indexed_at)
+                    .chain(snap.tasks.iter().filter_map(|t| t.started_at))
+                    .max();
+                let rel = match last {
+                    Some(t) => relative_time(Some(t), now),
+                    None => "尚未索引".to_string(),
+                };
+                ui.label(RichText::new("最近更新").color(theme.text_secondary));
+                ui.label(RichText::new(rel));
+            });
+            // 异常提示：0 异常时整行不渲染（不显示「一切正常」式噪音）
+            if snap.badge > 0 {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠").color(theme.warn));
+                    ui.label(
+                        RichText::new(snap.badge_tooltip(0).join(" · "))
+                            .color(theme.warn)
+                            .size(11.0),
+                    );
+                });
+            }
+        });
+}
+
+// ---------------------------------------------------------------- M4 导入 / 导出 标签
+
+/// 第五标签：导出、导入四步向导、四态反馈、二次确认入口（docs/12 S2～S7）。
+fn import_export_tab(
+    ui: &mut Ui,
+    theme: &Theme,
+    state: &mut IndexMgrUi,
+    actions: &mut Vec<MgrAction>,
+) {
+    let io = &mut state.io;
+    section(ui, theme, "导出索引文件");
+    ui.label(
+        RichText::new("把索引记录与整理关系存成文件 · 不含原始照片")
+            .color(theme.text_secondary)
+            .size(11.5),
+    );
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut io.export_with_thumbs, "包含缩略图（生成索引包）");
+    });
+    if ui.button("导出索引文件…").clicked() {
+        actions.push(MgrAction::ExportIndex {
+            with_thumbs: io.export_with_thumbs,
+        });
+    }
+    ui.separator();
+
+    section(ui, theme, "导入索引文件");
+    ui.label(
+        RichText::new("从文件恢复索引与整理关系 · 导入前可预览、可选合并 / 替换")
+            .color(theme.text_secondary)
+            .size(11.5),
+    );
+    if ui.button("选择索引文件…").clicked() {
+        actions.push(MgrAction::PickImportFile);
+    }
+
+    // 四步向导（校验通过后才展开）
+    if io.preview.is_some() {
+        ui.separator();
+        let steps = [
+            ("① 校验与预览", ImportStep::Validate),
+            ("② 策略与范围", ImportStep::Strategy),
+            ("③ 执行", ImportStep::Execute),
+            ("④ 结果与匹配", ImportStep::Result),
+        ];
+        ui.horizontal(|ui| {
+            for (label, s) in steps {
+                let on = io.import_step == s;
+                if ui.selectable_label(on, label).clicked() && io.state != IoState::Running {
+                    io.import_step = s;
+                }
+            }
+        });
+        ui.separator();
+        match io.import_step {
+            ImportStep::Validate => import_step_validate(ui, theme, io),
+            ImportStep::Strategy => import_step_strategy(ui, theme, io, actions),
+            ImportStep::Execute => import_step_execute(ui, theme, io, actions),
+            ImportStep::Result => import_step_result(ui, theme, io, actions),
+        }
+    }
+
+    // 操作状态区：六态常驻（docs/11 §2.1.2）
+    ui.separator();
+    io_state_area(ui, theme, io);
+    ui.label(
+        RichText::new("ⓘ 相关操作不修改或移动原始照片 · 导入采用事务保护，失败可回滚")
+            .color(theme.text_secondary)
+            .size(10.5),
+    );
+}
+
+fn import_step_validate(ui: &mut Ui, theme: &Theme, io: &IoUi) {
+    let Some(p) = &io.preview else { return };
+    ui.label(RichText::new("✓ 完整性校验通过 · 版本兼容").color(theme.ok));
+    section(ui, theme, "索引信息");
+    row(ui, theme, "生成应用", &p.manifest.app_version);
+    row(ui, theme, "格式版本", &format!("v{}", p.manifest.format_version));
+    row(ui, theme, "数据库版本", &format!("v{}", p.manifest.schema_version));
+    let c = &p.manifest.counts;
+    row(
+        ui,
+        theme,
+        "数量",
+        &format!(
+            "照片 {} · 根 {} · 文件夹 {} · 标签 {} · 相册 {}",
+            c.photos, c.roots, c.folders, c.tags, c.albums
+        ),
+    );
+    ui.separator();
+    section(ui, theme, "冲突与路径匹配");
+    row(ui, theme, "重复记录", &format!("{} 条（按身份键处理）", p.duplicates));
+    row(ui, theme, "路径无法匹配", &format!("{} 个根", p.unmatched_roots));
+    ui.label(
+        RichText::new("ℹ 未匹配的照片导入后可重新匹配根目录，将标记为离线，不复制或移动照片")
+            .color(theme.text_secondary)
+            .size(11.0),
+    );
+}
+
+fn import_step_strategy(ui: &mut Ui, theme: &Theme, io: &mut IoUi, actions: &mut Vec<MgrAction>) {
+    section(ui, theme, "导入策略（明确说明影响范围）");
+    let merge = io.strategy == picasa_db::ImportStrategy::Merge;
+    ui.horizontal(|ui| {
+        if ui.selectable_label(merge, "◉ 合并（推荐，默认）").clicked() {
+            io.strategy = picasa_db::ImportStrategy::Merge;
+            actions.push(MgrAction::SetImportStrategy(io.strategy));
+        }
+        if ui.selectable_label(!merge, "○ 替换").clicked() {
+            io.strategy = picasa_db::ImportStrategy::Replace;
+            actions.push(MgrAction::SetImportStrategy(io.strategy));
+        }
+    });
+    egui::Frame::new()
+        .fill(if merge { ui.visuals().extreme_bg_color } else { theme.danger.gamma_multiply(0.08) })
+        .corner_radius(6.0)
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            if merge {
+                ui.label("合并：只新增、不删除现有记录；身份相同且内容不同保留现有，计入冲突清单。");
+                ui.label("标签 / 相册按名称合并去重，星标与说明保留现有；现有图库根目录不变。");
+            } else {
+                ui.label(RichText::new("⚠ 影响范围（替换）").color(theme.danger));
+                if let Some(p) = &io.preview {
+                    ui.label(format!(
+                        "现有独有的整理数据（约 {} 项）将被移除；执行前先生成备份。",
+                        p.existing_only_user_data
+                    ));
+                }
+                ui.label("现有照片记录以导入文件为准覆盖。✓ 照片文件不受影响（不复制、不移动、不重命名）");
+            }
+        });
+    ui.checkbox(&mut io.understood, "我已了解上述影响范围");
+    ui.horizontal(|ui| {
+        let enabled = io.understood && io.state != IoState::Running;
+        if ui.add_enabled(enabled, egui::Button::new("开始导入")).clicked() {
+            actions.push(MgrAction::StartImport);
+            io.import_step = ImportStep::Execute;
+        }
+    });
+}
+
+fn import_step_execute(ui: &mut Ui, theme: &Theme, io: &mut IoUi, actions: &mut Vec<MgrAction>) {
+    section(ui, theme, "执行导入");
+    if io.state == IoState::Running || io.state == IoState::Preparing {
+        ui.label(RichText::new(&io.progress).color(theme.text_primary));
+        if let Some(f) = io.fraction {
+            ui.add(egui::ProgressBar::new(f).show_percentage());
+        } else {
+            let bar = egui::ProgressBar::new(0.3).animate(true);
+            ui.add(bar);
+        }
+        ui.label(
+            RichText::new("当前阶段：写入整理关系（后台执行，界面可继续操作）· 无 ETA")
+                .color(theme.text_secondary)
+                .size(11.0),
+        );
+        if ui.button("取消导入").clicked() {
+            actions.push(MgrAction::CancelImport);
+        }
+    } else if io.state == IoState::Cancelled {
+        ui.label(RichText::new("⏹ 已取消 · 现有索引未改动").color(theme.warn));
+    } else if io.state == IoState::Failed {
+        ui.label(RichText::new(&io.message).color(theme.danger));
+    } else {
+        ui.label(RichText::new("准备就绪，点「开始导入」执行。").color(theme.text_secondary));
+    }
+    ui.label(
+        RichText::new("ⓘ 关闭本窗口不会取消导入；重开可继续查看进度")
+            .color(theme.text_secondary)
+            .size(10.5),
+    );
+}
+
+fn import_step_result(ui: &mut Ui, theme: &Theme, io: &mut IoUi, actions: &mut Vec<MgrAction>) {
+    section(ui, theme, "导入结果");
+    if let Some(r) = &io.report {
+        row(ui, theme, "成功导入", &format!("{} 条", r.imported));
+        row(ui, theme, "跳过", &format!("{} 条", r.skipped));
+        row(ui, theme, "失败", &format!("{} 条", r.failed));
+        row(ui, theme, "冲突", &format!("{} 条", r.conflicts));
+    }
+    ui.separator();
+    section(ui, theme, "重新匹配图库根目录（可选后续动作）");
+    let mut remap: Option<(String, String)> = None;
+    for (path, matched) in &io.roots_to_remap {
+        ui.horizontal(|ui| {
+            if *matched {
+                ui.label(RichText::new(format!("✓ {}", path)).color(theme.ok));
+            } else {
+                ui.label(RichText::new(format!("⚠ {} · 路径不存在（离线）", path)).color(theme.warn));
+                if ui.button("选择本机目录…").clicked() {
+                    // 路径注入由 app 层用 rfd 完成；这里先发一个带原路径的动作
+                    remap = Some((path.clone(), String::new()));
+                }
+            }
+        });
+    }
+    if let Some((from, to)) = remap {
+        actions.push(MgrAction::RemapRoot { from, to });
+    }
+    ui.label(
+        RichText::new("ℹ 重新匹配不会复制、移动或重命名照片；映射后做增量核对")
+            .color(theme.text_secondary)
+            .size(10.5),
+    );
+}
+
+/// 操作状态区：六态共用一套展示（docs/11 §2.1.2）。
+/// 纯函数拆出来是为了可单测（本仓库 UI 测试的惯例：测「决定画什么」，不测 egui 绘制）。
+pub fn io_state_label(state: IoState) -> &'static str {
+    match state {
+        IoState::Idle => "空闲",
+        IoState::Preparing => "准备中",
+        IoState::Running => "进行中",
+        IoState::Success => "✓ 成功",
+        IoState::Failed => "⛔ 失败",
+        IoState::Cancelled => "⏹ 已取消",
+    }
+}
+
+fn io_state_area(ui: &mut Ui, theme: &Theme, io: &IoUi) {
+    section(ui, theme, "操作状态");
+    let (label, color, body): (&str, Color32, String) = match io.state {
+        IoState::Idle => (io_state_label(io.state), theme.text_secondary, io.last_result.clone()),
+        IoState::Preparing => (io_state_label(io.state), theme.progress, "正在准备… 校验目标 / 计算预计内容 / 读清单".into()),
+        IoState::Running => (io_state_label(io.state), theme.progress, io.progress.clone()),
+        IoState::Success => (io_state_label(io.state), theme.ok, io.message.clone()),
+        IoState::Failed => (io_state_label(io.state), theme.danger, io.message.clone()),
+        IoState::Cancelled => (io_state_label(io.state), theme.warn, "已取消 · 现有索引未改动".into()),
+    };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(color).strong());
+    });
+    if !body.is_empty() {
+        ui.label(RichText::new(body).size(11.0).color(theme.text_primary));
+    }
+    if io.state == IoState::Failed || io.state == IoState::Cancelled {
+        ui.label(
+            RichText::new("现有索引保持可用；可重新选择文件或稍后重试")
+                .size(10.5)
+                .color(theme.text_secondary),
+        );
+    }
+}
+
 fn section(ui: &mut Ui, theme: &Theme, title: &str) {
     ui.label(RichText::new(title).strong().color(theme.text_primary));
 }
@@ -820,5 +1198,48 @@ mod tests {
         assert_eq!(ui.tab, MgmtTab::Folders, "有离线根 → 定位到关注文件夹");
         ui.close();
         assert!(!ui.open);
+    }
+
+    // ---- M4 新增逻辑的纯函数测试（docs/12 §0.1、docs/11 §2.1.2）----
+
+    #[test]
+    fn mgmt_tab_has_five_entries_with_import_export_last() {
+        assert_eq!(MgmtTab::ALL.len(), 5);
+        assert_eq!(MgmtTab::ALL[4], MgmtTab::ImportExport);
+        assert_eq!(MgmtTab::ImportExport.label(), "导入 / 导出");
+    }
+
+    #[test]
+    fn io_state_labels_cover_all_six_states() {
+        use IoState::*;
+        let cases = [
+            (Idle, "空闲"),
+            (Preparing, "准备中"),
+            (Running, "进行中"),
+            (Success, "✓ 成功"),
+            (Failed, "⛔ 失败"),
+            (Cancelled, "⏹ 已取消"),
+        ];
+        for (s, want) in cases {
+            assert_eq!(io_state_label(s), want);
+        }
+    }
+
+    #[test]
+    fn io_ui_default_is_idle_and_merge_first() {
+        let io = IoUi::default();
+        assert_eq!(io.state, IoState::Idle);
+        assert_eq!(io.import_step, ImportStep::Validate);
+        assert_eq!(io.strategy, picasa_db::ImportStrategy::Merge);
+        assert!(io.preview.is_none());
+        assert!(io.report.is_none());
+    }
+
+    #[test]
+    fn index_mgr_ui_default_keeps_io_state() {
+        let ui = IndexMgrUi::new();
+        assert!(!ui.open);
+        assert_eq!(ui.tab, MgmtTab::Tasks);
+        assert_eq!(ui.io.state, IoState::Idle);
     }
 }

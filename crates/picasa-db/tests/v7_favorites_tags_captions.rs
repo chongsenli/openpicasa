@@ -39,7 +39,7 @@ fn v7_creates_metadata_tables() {
     let tmp = tempfile::tempdir().unwrap();
     let (db, db_path) = open_db(tmp.path());
     assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 7);
+    assert_eq!(SCHEMA_VERSION, 8);
 
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let have: Vec<String> = conn

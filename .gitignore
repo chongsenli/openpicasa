@@ -41,3 +41,5 @@ Icon?
 *.swp
 .tmp/
 /.appdata/
+# DSH 安装器更新缓存（每机不同、体积大，绝不入库）
+/.dsh-update/

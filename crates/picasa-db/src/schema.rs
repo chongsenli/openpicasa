@@ -27,7 +27,7 @@ pub struct Migration {
 /// 因为它成文时代码停在 v2；本仓库在 M2.1 收尾时又落了 v3（`eff_taken_at`）与
 /// v4（待补缩略图索引）。**内容按规格做，版本号以代码为准 = 5**，
 /// 已登记进 `docs/06` §12.1 冲突表。
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// v1 · M1 最小集（02 §5.3）。
 ///
@@ -391,6 +391,67 @@ CREATE INDEX IF NOT EXISTS idx_tags_label ON tags(label);
 CREATE INDEX IF NOT EXISTS idx_photos_starred ON photos(starred) WHERE starred = 1;
 "#;
 
+/// v8 · M4 索引管理版（docs/11 §3/§5）。**只增不改**：全部是 ADD COLUMN / CREATE TABLE，
+/// 不 DROP、不改列类型、不重写已有行（沿用 05 §4.5 的迁移纪律）。
+///
+/// 四块内容：
+/// 1. **EXIF 摘要列**（`M4-META-07`）：把 `picasa_imaging::ExifSummary` 拍平成列，
+///    供查看器信息面板与相机/镜头筛选使用。全部可空——「缺失就是缺失」，不编造。
+///    `exif_status`：0=未读 / 1=OK / 2=缺失或读取失败（附 `exif_error` 原因短语）。
+/// 2. **相册**（`M4-ORG-07～12`）：`albums` + `album_photos` 多对多，一张照片可属多个相册。
+///    成员引用 `photos(id)`，但离线时**只标记不删行**（否则 CASCADE 会连带清掉标签）。
+/// 3. **近期搜索**（`M4-SEARCH-07`）：存自有 DB，纳入迁移/备份/恢复，不写照片目录。
+/// 4. **索引文件清单表**（`M4-IDX-10`）：导出时写入、导入时读取；本表本身也属于导出内容。
+///    `format_version` 与 `schema_version` 分离：前者是文件格式契约，后者是 DB 迁移版本。
+pub const V8: &str = r#"
+-- ============================================================ v8：M4 索引管理版
+-- ---------------------------------------------------------- 1. EXIF 摘要（只读，不写回照片）
+ALTER TABLE photos ADD COLUMN camera_make    TEXT;
+ALTER TABLE photos ADD COLUMN camera_model   TEXT;
+ALTER TABLE photos ADD COLUMN lens_model     TEXT;
+ALTER TABLE photos ADD COLUMN focal_length   TEXT;
+ALTER TABLE photos ADD COLUMN f_number       TEXT;
+ALTER TABLE photos ADD COLUMN exposure_time  TEXT;
+ALTER TABLE photos ADD COLUMN iso            TEXT;
+ALTER TABLE photos ADD COLUMN exif_status    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE photos ADD COLUMN exif_error     TEXT;
+
+-- 相机/镜头组合筛选的辅助索引（M4-SEARCH-01/09，避免退化为全表扫描）
+CREATE INDEX IF NOT EXISTS idx_photos_camera ON photos(camera_make, camera_model);
+CREATE INDEX IF NOT EXISTS idx_photos_lens   ON photos(lens_model);
+CREATE INDEX IF NOT EXISTS idx_photos_exif_status ON photos(exif_status);
+
+-- ---------------------------------------------------------- 2. 相册（应用内虚拟集合）
+CREATE TABLE IF NOT EXISTS albums (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS album_photos (
+    album_id  INTEGER NOT NULL REFERENCES albums(id)     ON DELETE CASCADE,
+    photo_id  INTEGER NOT NULL REFERENCES photos(id)    ON DELETE CASCADE,
+    added_at  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (album_id, photo_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_album_photos_photo ON album_photos(photo_id);
+
+-- ---------------------------------------------------------- 3. 近期搜索（用户创作数据，只存自有库）
+CREATE TABLE IF NOT EXISTS recent_searches (
+    id         INTEGER PRIMARY KEY,
+    query_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT 0
+);
+
+-- ---------------------------------------------------------- 4. 索引文件清单（导出/导入共用）
+-- 每行对应一个导出的索引文件；导入时读它做版本识别与完整性展示。
+CREATE TABLE IF NOT EXISTS index_manifest (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+) WITHOUT ROWID;
+INSERT OR IGNORE INTO index_manifest(key, value) VALUES ('format_version', '1');
+INSERT OR IGNORE INTO index_manifest(key, value) VALUES ('min_reader_version', '0.4.0');
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -426,6 +487,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 7,
         name: "m4_favorites_tags_captions",
         sql: V7,
+    },
+    Migration {
+        version: 8,
+        name: "m4_index_portability",
+        sql: V8,
     },
 ];
 

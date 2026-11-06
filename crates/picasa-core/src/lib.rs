@@ -17,6 +17,7 @@ pub mod dims;
 pub mod filters;
 pub mod index;
 pub mod library;
+pub mod m4_exif;
 pub mod mgmt;
 pub mod migrate;
 pub mod movematch;

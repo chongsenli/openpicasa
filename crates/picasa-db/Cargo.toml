@@ -10,6 +10,7 @@ description = "OpenPicasa M1 · 自有索引库（SQLite）：schema / 迁移 / 
 [dependencies]
 rusqlite = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 unicode-normalization = { workspace = true }

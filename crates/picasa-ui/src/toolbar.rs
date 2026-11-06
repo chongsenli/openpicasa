@@ -212,7 +212,54 @@ pub fn filter_menu(
                         if ui.button("按此标签筛").clicked() {
                             let t = draft_tag.trim().to_string();
                             draft.tag = (!t.is_empty()).then_some(t);
-                            action = Some(FilterPanelAction::Apply(Box::new(draft)));
+                            action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
+                        }
+                    });
+
+                    // ---- M4 组合筛选新增维度（docs/11 §4.1）----
+                    ui.separator();
+                    ui.label("相机 / 镜头");
+                    ui.horizontal(|ui| {
+                        let mut cam = draft.camera.clone().unwrap_or_default();
+                        ui.add(egui::TextEdit::singleline(&mut cam).hint_text("相机型号").desired_width(90.0));
+                        draft.camera = (!cam.trim().is_empty()).then(|| cam.trim().to_string());
+                        let mut lens = draft.lens.clone().unwrap_or_default();
+                        ui.add(egui::TextEdit::singleline(&mut lens).hint_text("镜头").desired_width(80.0));
+                        draft.lens = (!lens.trim().is_empty()).then(|| lens.trim().to_string());
+                        if ui.button("应用").clicked() {
+                            action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        let mut miss_date = draft.missing_date;
+                        if ui.checkbox(&mut miss_date, "缺拍摄时间").changed() {
+                            draft.missing_date = miss_date;
+                            action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
+                        }
+                        let mut miss_exif = draft.missing_exif;
+                        if ui.checkbox(&mut miss_exif, "缺元数据").changed() {
+                            draft.missing_exif = miss_exif;
+                            action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("文件大小 (KB)");
+                        let mut lo = draft
+                            .size_bytes
+                            .map(|(a, _)| (a / 1024).to_string())
+                            .unwrap_or_default();
+                        let mut hi = draft
+                            .size_bytes
+                            .map(|(_, b)| (b / 1024).to_string())
+                            .unwrap_or_default();
+                        ui.add(egui::TextEdit::singleline(&mut lo).desired_width(48.0));
+                        ui.label("～");
+                        ui.add(egui::TextEdit::singleline(&mut hi).desired_width(48.0));
+                        if ui.button("应用").clicked() {
+                            let a: i64 = lo.parse::<i64>().unwrap_or(0) * 1024;
+                            let b: i64 = hi.parse::<i64>().unwrap_or(i64::MAX / 1024) * 1024;
+                            draft.size_bytes = (a > 0 || b < i64::MAX).then_some((a, b));
+                            action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
                         }
                     });
 

@@ -35,24 +35,37 @@ impl AppPaths {
     /// 按 macOS 惯例解析（支持 `OPENPICASA_DATA_DIR` 覆盖，测试与便携模式用）。
     pub fn resolve() -> Self {
         if let Some(dir) = std::env::var_os("OPENPICASA_DATA_DIR") {
-            let root = PathBuf::from(dir);
-            return Self {
-                support: root.join("Application Support").join(BUNDLE_ID),
-                preferences: root.join("Preferences").join(BUNDLE_ID),
-                caches: root.join("Caches").join(BUNDLE_ID),
-                logs: root.join("Logs").join(BUNDLE_ID),
-            };
+            return Self::from_root(PathBuf::from(&dir));
         }
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/tmp"));
-        let lib = home.join("Library");
-        Self {
-            support: lib.join("Application Support").join(BUNDLE_ID),
-            preferences: lib.join("Preferences").join(BUNDLE_ID),
-            caches: lib.join("Caches").join(BUNDLE_ID),
-            logs: lib.join("Logs").join(BUNDLE_ID),
-        }
+        Self::from_root(home.join("Library"))
+    }
+
+    /// 从指定的容器根拼出四个目录，并做**隔离自检**（可单测，不依赖环境变量）。
+    ///
+    /// 现场教训：用 `VAR=x nohup cmd &` 这类写法时，环境变量偶尔没被子进程继承，
+    /// 应用会静默回退到 `~/Library` 读真实图库——测试/演示时极易误跑 v8 迁移、
+    /// 甚至把测试根目录写进真实库。这里对「四个目录都落在指定 root 之下」做硬断言；
+    /// 不满足就拒绝启动，绝不静默串库。生效路径的 INFO 日志由 `picasa_ui::run()`
+    /// 在 `init_tracing` 之后补打（本方法早于日志初始化，不在这里打 tracing）。
+    pub fn from_root(root: PathBuf) -> Self {
+        let p = Self {
+            support: root.join("Application Support").join(BUNDLE_ID),
+            preferences: root.join("Preferences").join(BUNDLE_ID),
+            caches: root.join("Caches").join(BUNDLE_ID),
+            logs: root.join("Logs").join(BUNDLE_ID),
+        };
+        let shown = root.to_string_lossy();
+        assert!(
+            p.support.starts_with(&root)
+                && p.preferences.starts_with(&root)
+                && p.caches.starts_with(&root)
+                && p.logs.starts_with(&root),
+            "OPENPICASA_DATA_DIR={shown} 但应用容器未落在其下，拒绝启动以防误读真实图库"
+        );
+        p
     }
 
     /// 建目录。**只创建应用容器**，永远不会碰到照片目录。
@@ -190,5 +203,26 @@ mod tests {
             !p.db_file().starts_with(&p.caches),
             "02 §5.2.1：索引不能放 Caches"
         );
+    }
+
+    #[test]
+    fn isolated_root_keeps_all_four_dirs_under_it() {
+        // 回归：隔离目录必须完整生效，四个目录都落在指定 root 之下，
+        // 绝不回退到 ~/Library 读真实图库（上一轮实机运行踩过的串库问题）。
+        let root = PathBuf::from("/tmp/openpicasa-isolated-xyz");
+        let p = AppPaths::from_root(root.clone());
+        for d in [&p.support, &p.preferences, &p.caches, &p.logs] {
+            assert!(d.starts_with(&root), "{d:?} 未落在 {root:?} 之下");
+        }
+        assert!(p.db_file().starts_with(root.join("Application Support")));
+        // 与真实用户目录无任何交集
+        assert!(!p.support.starts_with("/Users/"));
+    }
+
+    #[test]
+    fn default_resolve_is_in_home_library() {
+        // 未设覆盖时仍按 macOS 惯例落到 ~/Library（不改变既有行为）
+        let p = AppPaths::resolve();
+        assert!(p.support.ends_with("Application Support/app.openpicasa"));
     }
 }

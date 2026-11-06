@@ -45,6 +45,39 @@ pub fn pick_folder_none_toast() -> (&'static str, f64) {
     }
 }
 
+/// M4 导出：系统「保存文件」面板（`.opicasaidx` / `.opicasaidx.zip`）。
+pub fn pick_export_index(start: Option<&Path>, with_thumbs: bool) -> Option<PathBuf> {
+    let ext = if with_thumbs { "opicasaidx.zip" } else { "opicasaidx" };
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("导出索引文件（不含原始照片）")
+        .set_file_name(format!("photo-index.{ext}"))
+        .add_filter("OpenPicasa 索引文件", &[ext]);
+    if let Some(dir) = start {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.save_file()
+}
+
+/// M4 导入：系统「打开文件」面板。
+pub fn pick_import_index(start: Option<&Path>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("选择 OpenPicasa 索引文件")
+        .add_filter("OpenPicasa 索引文件", &["opicasaidx", "opicasaidx.zip"]);
+    if let Some(dir) = start {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_file()
+}
+
+/// M4 重新匹配：选一个本机目录作为新的图库根。
+pub fn pick_remap_folder(start: Option<&Path>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title("重新匹配图库根目录");
+    if let Some(dir) = start {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_folder()
+}
+
 /// 在文件管理器中显示（并选中）。失败返回 `Err(说明)`。
 pub fn reveal_in_finder(path: &Path) -> Result<(), String> {
     if !path.exists() {

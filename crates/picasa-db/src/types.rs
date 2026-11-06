@@ -35,9 +35,9 @@ pub struct PhotoInput {
     pub format: i64,
 }
 
-/// 照片筛选条件（用户功能 #5/#9：按日期/类型/尺寸/收藏/标签筛选）。
+/// 照片筛选条件（M4 组合筛选：`docs/11` §4）。
 ///
-/// 各字段是**与**关系；`None` = 不过滤该维度。设计成一个结构而不是 N 个参数：
+/// 各字段是**与**关系；`None`/空集 = 不过滤该维度。设计成一个结构而不是 N 个参数：
 /// 筛选面板一次传一份，新增维度不用改全链路签名。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PhotoFilter {
@@ -48,10 +48,24 @@ pub struct PhotoFilter {
     pub formats: Vec<String>,
     /// 尺寸段（长边像素）：`Small` ≤640 / `Medium` ≤1920 / `Large` >1920。
     pub size_class: Option<SizeClass>,
+    /// 文件大小区间（字节，含端点）。M4 新增（`M4-SEARCH-01`）。
+    pub size_bytes: Option<(i64, i64)>,
+    /// 精确长边像素区间（含端点），与 `size_class` 正交。`M4-SEARCH-01`。
+    pub dimension_range: Option<(i64, i64)>,
+    /// 相机型号（`camera_make` + `camera_model` 的模糊包含）。`M4-SEARCH-01`。
+    pub camera: Option<String>,
+    /// 镜头型号（模糊包含）。`M4-SEARCH-01`。
+    pub lens: Option<String>,
+    /// 只看缺少拍摄时间（`taken_from = 2` 或 `taken_at IS NULL`）。`M4-SEARCH-01`。
+    pub missing_date: bool,
+    /// 只看缺少元数据（`exif_status != 1`）。`M4-SEARCH-01`。
+    pub missing_exif: bool,
     /// 只看收藏。
     pub starred_only: bool,
     /// 只看打这个标签的。
     pub tag: Option<String>,
+    /// 只看属于这个相册的（按名称）。`M4-ORG-03`。
+    pub album: Option<String>,
 }
 
 impl PhotoFilter {
@@ -63,8 +77,15 @@ impl PhotoFilter {
         self.taken_range.is_some()
             || !self.formats.is_empty()
             || self.size_class.is_some()
+            || self.size_bytes.is_some()
+            || self.dimension_range.is_some()
+            || self.camera.is_some()
+            || self.lens.is_some()
+            || self.missing_date
+            || self.missing_exif
             || self.starred_only
             || self.tag.is_some()
+            || self.album.is_some()
     }
 }
 

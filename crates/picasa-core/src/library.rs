@@ -814,6 +814,76 @@ impl Library {
         self.db()?.timeline_years().map_err(CoreError::from)
     }
 
+    // ---------------------------------------------------------- M4：应用内相册
+    // 全部只写自有数据库，不复制/移动/修改原图（docs/11 §5.2）。
+
+    pub fn create_album(&self, name: &str, now: i64) -> Result<i64> {
+        self.db()?.create_album(name, now).map_err(CoreError::from)
+    }
+    pub fn rename_album(&self, id: i64, new_name: &str) -> Result<()> {
+        self.db()?.rename_album(id, new_name).map_err(CoreError::from)
+    }
+    pub fn delete_album(&self, id: i64) -> Result<()> {
+        self.db()?.delete_album(id).map_err(CoreError::from)
+    }
+    pub fn all_albums(&self) -> Result<Vec<picasa_db::AlbumRow>> {
+        self.db()?.all_albums().map_err(CoreError::from)
+    }
+    pub fn album_photo_ids(&self, album_id: i64) -> Result<Vec<i64>> {
+        self.db()?.album_photo_ids(album_id).map_err(CoreError::from)
+    }
+    pub fn albums_of(&self, photo_id: i64) -> Result<Vec<picasa_db::AlbumRow>> {
+        self.db()?.albums_of(photo_id).map_err(CoreError::from)
+    }
+    pub fn add_to_album(&self, album_id: i64, ids: &[i64], now: i64) -> Result<usize> {
+        self.db()?
+            .add_to_album(album_id, ids, now)
+            .map_err(CoreError::from)
+    }
+    pub fn remove_from_album(&self, album_id: i64, ids: &[i64]) -> Result<usize> {
+        self.db()?
+            .remove_from_album(album_id, ids)
+            .map_err(CoreError::from)
+    }
+
+    // ---------------------------------------------------------- M4：标签定义
+    pub fn rename_tag(&self, old: &str, new: &str) -> Result<usize> {
+        self.db()?.rename_tag(old, new).map_err(CoreError::from)
+    }
+    pub fn delete_tag(&self, label: &str) -> Result<usize> {
+        self.db()?.delete_tag(label).map_err(CoreError::from)
+    }
+
+    // ---------------------------------------------------------- M4：EXIF 摘要
+    pub fn set_photo_exif(&self, id: i64, e: &picasa_db::PhotoExif) -> Result<()> {
+        self.db()?.set_photo_exif(id, e).map_err(CoreError::from)
+    }
+    pub fn photo_exif(&self, id: i64) -> Result<picasa_db::PhotoExif> {
+        self.db()?.photo_exif(id).map_err(CoreError::from)
+    }
+    pub fn photos_pending_exif(&self, limit: usize) -> Result<Vec<i64>> {
+        self.db()?.photos_pending_exif(limit).map_err(CoreError::from)
+    }
+    pub fn camera_options(&self) -> Result<Vec<(String, String)>> {
+        self.db()?.camera_options().map_err(CoreError::from)
+    }
+    pub fn lens_options(&self) -> Result<Vec<String>> {
+        self.db()?.lens_options().map_err(CoreError::from)
+    }
+
+    // ---------------------------------------------------------- M4：近期搜索
+    pub fn push_recent_search(&self, query_json: &str, now: i64) -> Result<()> {
+        self.db()?
+            .push_recent_search(query_json, now)
+            .map_err(CoreError::from)
+    }
+    pub fn recent_searches(&self) -> Result<Vec<picasa_db::RecentSearch>> {
+        self.db()?.recent_searches().map_err(CoreError::from)
+    }
+    pub fn clear_recent_searches(&self) -> Result<()> {
+        self.db()?.clear_recent_searches().map_err(CoreError::from)
+    }
+
     pub fn set_sort(&mut self, key: SortKey) -> Result<()> {
         if self.sort.key == key {
             self.sort.descending = !self.sort.descending;
@@ -1012,6 +1082,10 @@ impl Library {
     pub fn add_root(&mut self, root: &Path) {
         // 走 DB：`roots` 表是唯一真相源；偏好里的 roots 不再写入。
         let canonical = paths::canonical_string(root);
+        // 可追溯性：`add_root` 的 4 个调用点全是用户动作（导入 / 重新打开根 /
+        // M4 重新匹配 / 进度面板）。曾出现「隔离空库凭空多出真实照片目录」的
+        // 误判——有了这条日志（含调用点标记）就能一眼区分「用户导入」与「串库」。
+        tracing::info!(root = %canonical, "add_root 被调用（用户动作或重新匹配）");
         let ci = crate::migrate::probe_case_insensitive(root);
         let now = chrono::Utc::now().timestamp();
         if let Ok(db) = self.db() {

@@ -48,6 +48,18 @@ pub fn run() -> eframe::Result {
         return Ok(());
     }
     init_tracing(&paths);
+    // 数据目录自检日志必须在 tracing 初始化**之后**再打一次（resolve() 里那条
+    // 早于 init_tracing，只会落到 stderr）；这里让「隔离是否生效」进正式日志，
+    // 便于事后核对，而不是靠猜。
+    if let Some(dir) = std::env::var_os("OPENPICASA_DATA_DIR") {
+        tracing::info!(
+            data_dir = %std::path::PathBuf::from(&dir).display(),
+            support = %paths.support.display(),
+            "启动数据目录（已隔离，不会读 ~/Library 的真实图库）"
+        );
+    } else {
+        tracing::info!(support = %paths.support.display(), "启动数据目录（默认 ~/Library）");
+    }
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

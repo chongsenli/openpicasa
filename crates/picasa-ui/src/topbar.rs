@@ -261,7 +261,9 @@ pub fn show(
             search_in_current,
             &mut out,
         );
-    } else if icon_btn(ui, &painter, search_r, Icon::Search, theme, true, "搜索").clicked() {
+    } else if icon_btn(ui, &painter, search_r, Icon::Search, theme, true, "搜索 · ⌘F")
+        .clicked()
+    {
         out.actions.push(TopbarAction::ToggleSearch);
     }
 
@@ -467,14 +469,14 @@ fn draw_zoom_pill(
             minus_r,
             Icon::Minus,
             !zoom_min,
-            "缩小缩略图（⌘−）",
+            "缩小缩略图 · ⌘−",
             TopbarAction::ZoomOut,
         ),
         (
             plus_r,
             Icon::Plus,
             !zoom_max,
-            "放大缩略图（⌘+）",
+            "放大缩略图 · ⌘+",
             TopbarAction::ZoomIn,
         ),
     ] {

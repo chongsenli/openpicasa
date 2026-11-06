@@ -117,6 +117,9 @@ pub struct OpenPicasaApp {
     tray_expanded: bool,
     favorites_collapsed: bool,
     folders_collapsed: bool,
+    /// M4：标签 / 相册分组折叠状态（会话级）
+    tags_collapsed: bool,
+    albums_collapsed: bool,
     folder_ctx: Option<(String, Pos2)>,
     /// 照片右键菜单：(photo_id, 当前是否收藏, 屏幕位置)
     photo_ctx: Option<(i64, bool, Pos2)>,
@@ -182,6 +185,17 @@ pub struct OpenPicasaApp {
     thumb_rx: Option<Receiver<picasa_core::ThumbStorage>>,
     /// 上次发起后台统计的时刻（用于节流：不是每次开页面都重算）
     thumb_req_at: Option<std::time::Instant>,
+    /// M4 EXIF 回填：**后台线程**收件口（`None` = 当前没有在算）。
+    /// ⚠️ 绝不在 UI 线程 `probe()` 文件——那会抢缩略图解码的帧预算，
+    /// 实测表现为「索引和展示缩略图变慢」。
+    exif_rx: Option<Receiver<(usize, usize)>>,
+    /// 是否还有待回填行（后台批次跑完后由结果置 false）
+    m4_exif_pending: bool,
+    /// M4 左栏标签 / 相册列表缓存（每帧绘制只读内存，不查库）。
+    /// 在数据集变化时由 `refresh_sidebar_groups()` 失效重取。
+    sidebar_tags: Vec<(String, i64)>,
+    sidebar_albums: Vec<(String, i64)>,
+    sidebar_groups_dirty: bool,
     /// 缩略图失败项数量（角标 + 菜单文案）。
     ///
     /// **必须缓存**：取它的 `library_thumb_stats()` 是全表扫描，25.9 万张时要几十毫秒，
@@ -290,6 +304,8 @@ impl OpenPicasaApp {
             tray_expanded: false,
             favorites_collapsed: false,
             folders_collapsed: false,
+            tags_collapsed: false,
+            albums_collapsed: false,
             folder_ctx: None,
             photo_ctx: None,
             caption_editor: None,
@@ -313,6 +329,11 @@ impl OpenPicasaApp {
             thumb_storage: None,
             thumb_rx: None,
             thumb_req_at: None,
+            exif_rx: None,
+            m4_exif_pending: true, // 启动时也回填一次（老库升级到 v8 后 status 全为 0）
+            sidebar_tags: Vec::new(),
+            sidebar_albums: Vec::new(),
+            sidebar_groups_dirty: true,
             verify: None,
             verify_done: false,
             verify_text: String::new(),
@@ -842,11 +863,8 @@ impl OpenPicasaApp {
                     self.vacuum();
                     self.invalidate_thumb_storage();
                 }
-                // 日志导出与帧直方图：本版接线到位，实现随 §4.9 / PERF-18 的工具落地
-                MgrAction::ExportDiagLog => {
-                    self.lib.toast =
-                        Some(("诊断日志导出（§4.9）待接线：需要系统保存对话框".into(), 3.0));
-                }
+                // M4-BUG-04：诊断日志导出接线（§4.9 / docs/11 §1.5）
+                MgrAction::ExportDiagLog => self.m4_export_diag_log(),
                 MgrAction::ToggleFrameStats(on) => {
                     self.lib.toast = Some((
                         if on {
@@ -857,8 +875,311 @@ impl OpenPicasaApp {
                         2.5,
                     ));
                 }
+                // ---- M4：索引导入 / 导出（docs/11 §2、docs/12 S2～S7）----
+                MgrAction::ExportIndex { with_thumbs } => self.m4_export_index(with_thumbs),
+                MgrAction::PickImportFile => self.m4_pick_import_file(),
+                MgrAction::SetImportStrategy(s) => {
+                    self.index_mgr.io.strategy = s;
+                }
+                MgrAction::StartImport => self.m4_start_import(),
+                MgrAction::CancelImport => self.m4_cancel_import(),
+                MgrAction::RemapRoot { from, .. } => self.m4_remap_root(&from),
             }
         }
+    }
+
+    /// M4 导出：选目标 → 校验目录 → 调 `export_index` → 四态反馈。
+    fn m4_export_index(&mut self, with_thumbs: bool) {
+        let io = &mut self.index_mgr.io;
+        io.state = crate::index_mgr::IoState::Preparing;
+        io.message.clear();
+        let start = self.paths.support.clone();
+        let Some(target) = crate::macos::pick_export_index(Some(&start), with_thumbs) else {
+            io.state = crate::index_mgr::IoState::Cancelled;
+            io.message = "已取消 · 现有索引未改动".into();
+            return;
+        };
+        // 目标目录不得落在任何已注册图库根目录内（R-M2-1）
+        let roots: Vec<String> = self.lib.root_paths().iter().map(|p| p.to_string_lossy().to_string()).collect();
+        let dir = target.parent().unwrap_or(&start);
+        if let Err(e) = picasa_db::check_export_dir(dir, &roots) {
+            io.state = crate::index_mgr::IoState::Failed;
+            io.message = e.to_string();
+            return;
+        }
+        io.state = crate::index_mgr::IoState::Running;
+        io.progress = "正在导出…".into();
+        io.fraction = None;
+        let now = chrono::Utc::now().timestamp();
+        let result = match self.lib.db() {
+            Ok(db) => picasa_db::export_index(
+                &db,
+                &target,
+                with_thumbs,
+                env!("CARGO_PKG_VERSION"),
+                now,
+            ),
+            Err(e) => Err(picasa_db::DbError::Other(e.to_string())),
+        };
+        match result {
+            Ok(rep) => {
+                io.state = crate::index_mgr::IoState::Success;
+                io.export_path = target.to_string_lossy().to_string();
+                io.message = format!(
+                    "导出成功 · {} · 照片 {} · 标签 {} · 相册 {}",
+                    crate::index_mgr::human_bytes(rep.bytes),
+                    rep.counts.photos,
+                    rep.counts.tags,
+                    rep.counts.albums
+                );
+                io.last_result = io.message.clone();
+                self.lib.toast = Some(("✓ 导出成功".into(), 3.0));
+            }
+            Err(e) => {
+                io.state = crate::index_mgr::IoState::Failed;
+                io.message = format!("导出失败：{}（现有索引未改动）", e);
+            }
+        }
+    }
+
+    /// M4 导入 Step1：选文件 → 校验 + 预览。
+    fn m4_pick_import_file(&mut self) {
+        let io = &mut self.index_mgr.io;
+        io.state = crate::index_mgr::IoState::Preparing;
+        io.message.clear();
+        let start = self.paths.support.clone();
+        let Some(src) = crate::macos::pick_import_index(Some(&start)) else {
+            io.state = crate::index_mgr::IoState::Cancelled;
+            io.message = "已取消 · 现有索引未改动".into();
+            return;
+        };
+        let work = self.paths.support.clone();
+        let result = match self.lib.db() {
+            Ok(db) => picasa_db::inspect_index(&db, &src, &work),
+            Err(e) => Err(picasa_db::DbError::Other(e.to_string())),
+        };
+        match result {
+            Ok(p) => {
+                io.state = crate::index_mgr::IoState::Idle;
+                io.import_path = src.to_string_lossy().to_string();
+                io.roots_to_remap = p
+                    .manifest
+                    .source_roots
+                    .iter()
+                    .map(|r| (r.path.clone(), std::path::Path::new(&r.path).exists()))
+                    .collect();
+                io.preview = Some(p);
+                io.import_step = crate::index_mgr::ImportStep::Validate;
+                io.understood = false;
+                io.report = None;
+            }
+            Err(e) => {
+                io.state = crate::index_mgr::IoState::Failed;
+                io.message = format!("无法导入：{}（现有索引未改动）", e);
+                io.preview = None;
+            }
+        }
+    }
+
+    /// M4 导入 Step3：执行（替换策略先二次确认由 UI 勾选 + 说明保证）。
+    fn m4_start_import(&mut self) {
+        let io = &mut self.index_mgr.io;
+        let Some(_preview) = &io.preview else { return };
+        let src = std::path::PathBuf::from(&io.import_path);
+        let strategy = io.strategy;
+        let work = self.paths.support.clone();
+        io.state = crate::index_mgr::IoState::Running;
+        io.progress = "正在导入…".into();
+        io.fraction = Some(0.3);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // 同步执行（导入是单事务，实测 10 万行以内 < 1s；后台化留作后续优化）
+        let result = match self.lib.db() {
+            Ok(mut db) => picasa_db::execute_import(&mut db, &src, &work, strategy, &cancel),
+            Err(e) => Err(picasa_db::DbError::Other(e.to_string())),
+        };
+        match result {
+            Ok(rep) => {
+                io.state = crate::index_mgr::IoState::Success;
+                io.message = format!(
+                    "导入完成 · 成功 {} · 跳过 {} · 失败 {} · 冲突 {}",
+                    rep.imported, rep.skipped, rep.failed, rep.conflicts
+                );
+                io.last_result = io.message.clone();
+                io.report = Some(rep);
+                io.import_step = crate::index_mgr::ImportStep::Result;
+                if let Err(e) = self.lib.reload_tree() {
+                    tracing::warn!(error = %e, "导入后刷新目录树失败");
+                } else if let Err(e) = self.lib.reload_photos() {
+                    tracing::warn!(error = %e, "导入后刷新照片失败");
+                }
+                self.lib.toast = Some(("✓ 导入完成".into(), 3.0));
+                self.sidebar_groups_dirty = true; // 导入可能带来新标签/相册
+                self.m4_exif_pending = true; // 导入的照片也要回填 EXIF
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                io.state = if msg.contains("取消") {
+                    crate::index_mgr::IoState::Cancelled
+                } else {
+                    crate::index_mgr::IoState::Failed
+                };
+                io.message = format!("{}（现有索引未改动）", msg);
+            }
+        }
+    }
+
+    /// M4：刷新左栏标签 / 相册缓存。只在脏标记置位时查库（不是每帧）。
+    ///
+    /// 触发点：启动、导入完成、标签/相册增删改、数据集变化。这样绘制每帧只读
+    /// `Vec`，不再跑 `all_tags()`（全表 GROUP BY）+ `all_albums()`（相关子查询）。
+    fn refresh_sidebar_groups(&mut self) {
+        if !self.sidebar_groups_dirty {
+            return;
+        }
+        if let Ok(db) = self.lib.db() {
+            self.sidebar_tags = db.all_tags().unwrap_or_default();
+            self.sidebar_albums = db
+                .all_albums()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| (a.name, a.photo_count))
+                .collect();
+            self.sidebar_groups_dirty = false;
+        }
+    }
+
+    /// M4：EXIF 回填**完全在后台线程**跑（docs/11 验收重点 6 / R-M2-3）。
+    ///
+    /// ⚠️ 性能回归教训：早期版本每帧在 UI 线程同步 `probe()` 20 个文件 + 20 次
+    /// 独立 `UPDATE` 事务提交，还用 `request_repaint_after(200ms)` 强制持续重绘——
+    /// 直接抢掉缩略图解码的帧预算，用户感知就是「索引和展示缩略图变慢」。
+    /// 现在改成：后台线程按 `try_lock` 短锁分批跑，UI 帧里只 `try_recv` 一个结果，
+    /// 不强制重绘（下一帧自然来），没有待处理行就彻底停手。
+    fn tick_m4_exif(&mut self, _ctx: &egui::Context) {
+        // 1) 先收上一批的结果（非阻塞，绝不等线程）
+        if let Some(rx) = &self.exif_rx {
+            match rx.try_recv() {
+                Ok((ok, _failed)) => {
+                    self.exif_rx = None;
+                    if ok == 0 {
+                        self.m4_exif_pending = false; // 全库回填完成
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // 线程异常退出：清掉收件口，下一帧重试（不把「回填中」钉死）
+                    self.exif_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if !self.m4_exif_pending || self.lib.scanning || self.exif_rx.is_some() {
+            return;
+        }
+        // 2) 发起一批后台任务（同一时刻最多一个在跑）
+        let db = Arc::clone(&self.lib.db);
+        let (tx, rx) = channel();
+        self.exif_rx = Some(rx);
+        std::thread::spawn(move || {
+            use picasa_core::m4_exif as exif;
+            // ⚠️ 锁粒度是性能红线：`probe()` 每个文件都要 File::open + 解析 EXIF，
+            // 绝不能持锁做。三段式：① 持锁取路径（毫秒）→ ② 完全无锁探测
+            // → ③ 持锁单事务写回（毫秒）。中间那段再慢也不堵索引/缩略图线程。
+            let pending = {
+                let mut out = None;
+                for _ in 0..40 {
+                    match db.try_lock() {
+                        Ok(guard) => {
+                            out = exif::collect_pending(&guard, 20).ok();
+                            break;
+                        }
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Err(std::sync::TryLockError::Poisoned(_)) => break,
+                    }
+                }
+                out
+            };
+            let Some(pending) = pending else { return }; // 通道断开 → UI 侧重试
+            let (items, failed) = exif::probe_paths(pending); // 无锁，最贵的一步
+            let written = {
+                let mut n = 0;
+                for _ in 0..40 {
+                    match db.try_lock() {
+                        Ok(guard) => {
+                            n = exif::write_batch(&guard, &items).unwrap_or(0);
+                            break;
+                        }
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Err(std::sync::TryLockError::Poisoned(_)) => break,
+                    }
+                }
+                n
+            };
+            let _ = tx.send((written, failed));
+        });
+    }
+
+    /// M4-BUG-04：导出诊断日志（§4.9）。只写用户显式选择的目标目录，
+    /// 先过 `check_export_dir` 保证不落在照片目录内（R-M2-1）。
+    fn m4_export_diag_log(&mut self) {
+        let Some(dir) = crate::macos::pick_folder(Some(&self.paths.support)) else {
+            self.lib.toast = Some(("已取消导出诊断日志".into(), 2.5));
+            return;
+        };
+        if let Err(e) = picasa_core::mgmt::check_export_dir(&dir, &self.mgmt) {
+            self.lib.toast = Some((e, 4.0));
+            return;
+        }
+        let name = format!(
+            "openpicasa-diag-{}.json",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        );
+        let target = dir.join(name);
+        let payload = serde_json::json!({
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "generated_at": chrono::Utc::now().to_rfc3339(),
+            "schema_version": self.lib.db().map(|d| d.schema_version().unwrap_or(0)).unwrap_or(0),
+            "all_photos": self.mgmt.all_photos,
+            "roots": self.mgmt.roots.iter().map(|r| serde_json::json!({
+                "path": picasa_core::mgmt::anonymize_path(&r.path),
+                "offline": r.offline, "closed": r.closed, "photo_count": r.photo_count,
+            })).collect::<Vec<_>>(),
+            "storage": {
+                "db_bytes": self.mgmt.storage.db_bytes,
+                "thumb_bytes": self.mgmt.storage.thumb_bytes,
+                "thumb_count": self.mgmt.storage.thumb_count,
+            },
+            "badge": self.mgmt.badge,
+        });
+        match std::fs::write(&target, serde_json::to_string_pretty(&payload).unwrap_or_default()) {
+            Ok(()) => self.lib.toast = Some((format!("✓ 已导出诊断日志：{}", target.display()), 3.0)),
+            Err(e) => self.lib.toast = Some((format!("诊断日志导出失败：{e}"), 4.0)),
+        }
+    }
+
+    fn m4_cancel_import(&mut self) {
+        let io = &mut self.index_mgr.io;
+        io.state = crate::index_mgr::IoState::Cancelled;
+        io.message = "已取消 · 现有索引未改动".into();
+        io.fraction = None;
+    }
+
+    fn m4_remap_root(&mut self, from: &str) {
+        let Some(to) = crate::macos::pick_remap_folder(None) else {
+            return;
+        };
+        let io = &mut self.index_mgr.io;
+        if let Some((_p, matched)) = io.roots_to_remap.iter_mut().find(|(p, _)| p == from) {
+            *matched = to.exists();
+        }
+        self.lib.add_root(&to);
+        if let Err(e) = self.lib.reload_tree() {
+            tracing::warn!(error = %e, "重新匹配后刷新目录树失败");
+        }
+        self.lib.toast = Some(("✓ 已重新匹配图库根目录".into(), 3.0));
     }
 
     /// 重试某一类失败项（**按 id 点名**，§4.3 的边界要求：不走整目录重建）。
@@ -1322,6 +1643,9 @@ impl OpenPicasaApp {
                     self.tray_rows_dirty = true;
                     // 一个批次收尾 → 失败项数量变了（重建完可能从 970 掉到 0），角标要跟上
                     self.refresh_failed_thumbs();
+                    // M4：扫描完成后由**后台线程**继续回填 EXIF（不占 UI 帧预算）。
+                    self.m4_exif_pending = true;
+                    self.sidebar_groups_dirty = true;
                 }
                 other => {
                     if self.lib.apply_event(other) {
@@ -1742,27 +2066,12 @@ impl OpenPicasaApp {
                             }
                             self.restore_scroll = Some(0.0);
                         }
-                        // 菜单项动作。按钮本身发的是 ToggleMoreMenu，由 draw_overlays 画菜单。
-                        TopbarAction::More(more) => match more {
-                            MoreAction::AddFolder => self.add_folder(),
-                            MoreAction::ToggleRecurse => self.toggle_recurse(),
-                            MoreAction::ToggleFullscreen => {
-                                let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
-                            }
-                            MoreAction::ToggleShowFilename => {
-                                self.grid_show_filename = !self.grid_show_filename;
-                            }
-                            MoreAction::About => {
-                                self.lib.toast = Some((
-                                    format!(
-                                        "OpenPicasa {} · 本地照片库（只读不改原文件）",
-                                        env!("CARGO_PKG_VERSION")
-                                    ),
-                                    3.0,
-                                ));
-                            }
-                        },
+                        // M4-BUG-01：`TopbarAction::More(...)` 只由 `toolbar::more_menu()` 发出，
+                        // 在 `draw_overlays` 里消费（见本文件 ~2254）。`topbar::show()` 永不发
+                        // 这个变体，所以这里不再重复翻转 grid_show_filename —— 两处都写会二次翻转。
+                        TopbarAction::More(_) => {
+                            tracing::warn!("菜单动作应只在 draw_overlays 消费");
+                        }
                     }
                 }
             });
@@ -1827,6 +2136,10 @@ impl OpenPicasaApp {
                         tray_expanded: self.tray_expanded,
                         favorites_collapsed: self.favorites_collapsed,
                         folders_collapsed: self.folders_collapsed,
+                        tags_collapsed: self.tags_collapsed,
+                        albums_collapsed: self.albums_collapsed,
+                        tags: &self.sidebar_tags,
+                        albums: &self.sidebar_albums,
                         has_focus: ctx.memory(|m| m.focused()).is_none(),
                         snapshot: &snap,
                     };
@@ -1967,12 +2280,7 @@ impl OpenPicasaApp {
                     // 清除年份筛选（保留其他筛选维度）
                     let mut f = self.lib.filter.clone().unwrap_or_default();
                     f.taken_range = None;
-                    let has = f.starred_only
-                        || f.tag.is_some()
-                        || f.taken_range.is_some()
-                        || f.size_class.is_some()
-                        || !f.formats.is_empty();
-                    if let Err(e) = self.lib.set_filter(has.then_some(f)) {
+                    if let Err(e) = self.lib.set_filter(f.is_active().then_some(f)) {
                         tracing::warn!(error = %e, "清除时间轴筛选失败");
                     }
                 } else {
@@ -1987,16 +2295,7 @@ impl OpenPicasaApp {
             SidebarAction::ToggleStarredFilter => {
                 let mut f = self.lib.filter.clone().unwrap_or_default();
                 f.starred_only = !f.starred_only;
-                let f = if f.starred_only
-                    || f.tag.is_some()
-                    || f.taken_range.is_some()
-                    || f.size_class.is_some()
-                    || !f.formats.is_empty()
-                {
-                    Some(f)
-                } else {
-                    None
-                };
+                let f = f.is_active().then_some(f);
                 if let Err(e) = self.lib.set_filter(f) {
                     tracing::warn!(error = %e, "切换收藏筛选失败");
                 }
@@ -2007,11 +2306,45 @@ impl OpenPicasaApp {
                 self.lib.mark_prefs_dirty();
             }
             SidebarAction::ToggleSection(title) => {
-                if title == "收藏" {
+                // M4-BUG 收口：section_title 传的是「图库」/「文件夹」，旧代码判「收藏」
+                // 永远不成立，导致点「图库」分组头实际折叠了文件夹组。
+                if title == "图库" {
                     self.favorites_collapsed = !self.favorites_collapsed;
-                } else {
+                } else if title == "文件夹" {
                     self.folders_collapsed = !self.folders_collapsed;
                 }
+            }
+            // ---- M4：标签 / 相册分组 ----
+            SidebarAction::ToggleSectionM4(title) => {
+                if title == "标签" {
+                    self.tags_collapsed = !self.tags_collapsed;
+                } else if title == "相册" {
+                    self.albums_collapsed = !self.albums_collapsed;
+                }
+            }
+            SidebarAction::FilterByTag(tag) => {
+                let mut f = self.lib.filter.clone().unwrap_or_default();
+                f.tag = Some(tag);
+                if let Err(e) = self.lib.set_filter(Some(f)) {
+                    tracing::warn!(error = %e, "标签筛选失败");
+                }
+                self.restore_scroll = Some(0.0);
+            }
+            SidebarAction::FilterByAlbum(album) => {
+                let mut f = self.lib.filter.clone().unwrap_or_default();
+                f.album = Some(album);
+                if let Err(e) = self.lib.set_filter(Some(f)) {
+                    tracing::warn!(error = %e, "相册筛选失败");
+                }
+                self.restore_scroll = Some(0.0);
+            }
+            SidebarAction::NewTag | SidebarAction::NewAlbum => {
+                // 新建走一个简单的行内输入（复用标签编辑器）；此处先给可见反馈，
+                // 完整 CRUD 在右键菜单 / 信息面板里（M4-ORG-01/07）。
+                self.lib.toast = Some((
+                    "在照片右键菜单或查看器信息面板中可新建标签 / 相册".into(),
+                    3.0,
+                ));
             }
             SidebarAction::TrayToggle => self.tray_expanded = !self.tray_expanded,
             SidebarAction::TrayClear => {
@@ -2251,6 +2584,12 @@ impl OpenPicasaApp {
                             3.0,
                         ));
                     }
+                    // M4-BUG-01：菜单动作在 draw_overlays 消费，不能落进 `_ => {}`。
+                    // 之前漏接这一支，导致「✓ 方格显示文件名」点击无效果（032-beta4
+                    // 验收报告的 P0 阻塞项）；翻转逻辑只放在这里，不再双写。
+                    crate::topbar::TopbarAction::More(MoreAction::ToggleShowFilename) => {
+                        self.grid_show_filename = !self.grid_show_filename;
+                    }
                     _ => {}
                 }
             }
@@ -2451,6 +2790,7 @@ impl OpenPicasaApp {
                         if !label.is_empty() {
                             match self.lib.batch_add_tag(&label) {
                                 Ok(n) if n > 0 => {
+                                    self.sidebar_groups_dirty = true; // 标签列表变了
                                     self.lib.toast =
                                         Some((format!("已为 {n} 张打上「{label}」"), 2.5));
                                 }
@@ -2664,38 +3004,55 @@ impl OpenPicasaApp {
         // 首帧尺寸未知会先落到一个错误位置，而窄宽约束还会把一行提示折成两行
         // （实测出现过「索引完 / 成：9 张」）。改为自己算 rect + 直接用 painter 画，
         // 位置与换行都由我们决定，且不需要额外一帧才收敛。
-        if let Some((msg, ttl)) = self.lib.toast.clone() {
-            let now = ctx.input(|i| i.time);
-            let remaining = ttl - now;
-            // 查看器是「沉浸式」的：提示框会直接压住照片（实测第一版就挡住了主体），
-            // 所以查看器打开时不画 toast——状态栏和索引结果在退出查看器后仍然可见。
-            if remaining <= 0.0 || self.viewer.is_some() {
-                if remaining <= 0.0 {
-                    self.lib.toast = None;
-                }
+        //
+        // M4-BUG-02：`lib.toast` 的第二元素是「持续秒数」（2.0～6.0），不是「到期时刻」。
+        // 旧代码写 `remaining = ttl - now`，而 `now` 是自启动累计秒数，导致启动几秒后
+        // 任何 toast 的 remaining 恒为负、被立刻清掉（032-beta4 报告 §6 附带观察）。
+        // 修法：每帧按 `stable_dt` 递减这个秒数，≤0 才清除。这样 app.rs 约 40 处、
+        // core/library.rs 4 处写入点（都只写持续秒数）全部无需改动，时间口径统一。
+        if let Some((msg, secs_left)) = self.lib.toast.clone() {
+            let dt: f64 = ctx.input(|i| i.stable_dt) as f64;
+            let secs_left = secs_left - dt;
+            if secs_left <= 0.0 {
+                self.lib.toast = None;
             } else {
-                let galley = ui.painter().layout_no_wrap(
-                    msg,
-                    egui::FontId::proportional(12.0),
-                    Color32::WHITE,
-                );
-                let pad = vec2(12.0, 6.0);
-                // egui 0.37 移除了 `Context::screen_rect()`，视口矩形改从 InputState 取
-                let screen = ctx.input(|i| i.viewport_rect());
-                let size = galley.size() + pad * 2.0;
-                let rect = Rect::from_center_size(
-                    egui::pos2(screen.center().x, screen.bottom() - 48.0 - size.y / 2.0),
-                    size,
-                );
-                let painter = ctx.layer_painter(egui::LayerId::new(
-                    egui::Order::Tooltip,
-                    egui::Id::unique("toast-layer"),
-                ));
-                painter.rect_filled(rect, 4.0, Color32::from_black_alpha(190));
-                painter.galley(rect.min + pad, galley, Color32::WHITE);
-                tracing::debug!(?rect, ?screen, "toast 位置");
-                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                self.lib.toast = Some((msg.clone(), secs_left));
+                // 查看器是「沉浸式」的：提示框会直接压住照片（实测第一版就挡住了主体），
+                // 所以查看器打开时不画 toast——状态栏和索引结果在退出查看器后仍然可见。
+                if self.viewer.is_none() {
+                    let galley = ui.painter().layout_no_wrap(
+                        msg,
+                        egui::FontId::proportional(12.0),
+                        Color32::WHITE,
+                    );
+                    let pad = vec2(12.0, 6.0);
+                    // egui 0.37 移除了 `Context::screen_rect()`，视口矩形改从 InputState 取
+                    let screen = ctx.input(|i| i.viewport_rect());
+                    let size = galley.size() + pad * 2.0;
+                    // 防御：窗口最小化 / 尺寸变化过渡帧里 viewport_rect 可能退化
+                    // （0 宽或负坐标）。此时画一个几何无效的 rect 会让 epaint 合并
+                    // Mesh 时触发 debug 断言 `Other mesh is invalid`（实机崩溃现场）。
+                    // 视口恢复正常后自然重画，不显示这一帧的 toast 即可。
+                    if screen.width() >= size.x + 8.0
+                        && screen.height() >= size.y + 56.0
+                        && screen.is_finite()
+                    {
+                        let rect = Rect::from_center_size(
+                            egui::pos2(screen.center().x, screen.bottom() - 48.0 - size.y / 2.0),
+                            size,
+                        );
+                        let painter = ctx.layer_painter(egui::LayerId::new(
+                            egui::Order::Tooltip,
+                            egui::Id::unique("toast-layer"),
+                        ));
+                        painter.rect_filled(rect, 4.0, Color32::from_black_alpha(190));
+                        painter.galley(rect.min + pad, galley, Color32::WHITE);
+                        tracing::debug!(?rect, ?screen, "toast 位置");
+                    }
+                }
             }
+            // 即使查看器打开时未画，也要继续递减直到过期；每帧重绘保证按时消失。
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
         // 错误横幅
@@ -3136,6 +3493,10 @@ impl eframe::App for OpenPicasaApp {
         self.tick_zoom();
         // M3：微缩图集（只在 ≤48 px 档工作）
         self.tick_atlas(&ctx);
+        // M4：EXIF 回填（后台线程，UI 帧只收结果，不读盘）
+        self.tick_m4_exif(&ctx);
+        // M4：左栏标签/相册缓存（脏时才查库，不每帧查）
+        self.refresh_sidebar_groups();
         self.flush_reload(&ctx);
         self.handle_keys(&ctx);
         // 索引进度：按 250 ms 节流取快照（不在 UI 线程做任何索引工作）
