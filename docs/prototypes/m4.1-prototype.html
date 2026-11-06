@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenPicasa · M4.1 界面原型（工具栏整理 / 三布局圆角 / 框选多选）</title>
+<style>
+  :root{
+    /* 取自 crates/picasa-ui/src/theme.rs:143-169 */
+    --text-primary:#202020; --text-secondary:#666666; --text-disabled:#AAAAAA;
+    --chrome:#F0F0F0; --grid:#FFFFFF; --sidebar:#F5F4F2; --separator:#C8C8C8;
+    --cell-border:#CFCFCF; --selected:#4A90D9; --warn:#C8861E; --danger:#C0392B;
+    --ok:#3E8E3E; /* v1.2：--seg-active 淡橙仅留给「非玻璃」的 M3.2 排布胶囊当前片等旧控件；玻璃选中态改用下方灰 token */
+    --hover:#E9E7E3; --card-shadow:0 6px 24px rgba(0,0,0,.14);
+    --font: -apple-system, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+    /* M4.1 玻璃态 token —— 按 Tessera UI「Fluid Glass / Glass Button」风格重做（docs/14 §9.2 v1.1）
+       参考：https://tessera-ui.github.io/zhHans/components/fluid_glass.html
+             https://tessera-ui.github.io/zhHans/components/glass_button.html
+       与旧版的本质差别：玻璃后面必须有「可透的内容」，否则半透明叠在纯白上仍看不出空间感。
+       四要素：半透明染色 + 背景高斯模糊(backdrop-filter) + 折射扭曲 + 边缘多层高光/色散 + 水波纹。 */
+    --glass-tint:rgba(255,255,255,.30);          /* 半透明染色（Tessera 动图：红底透过→浅粉） */
+    --glass-tint-hover:rgba(255,255,255,.46);
+    --glass-tint-disabled:rgba(255,255,255,.16);
+    /* v1.2（用户裁决）：玻璃按钮选中态 = 中性灰，不用 M3.2 的淡橙 #FBE2D5。
+       仍保持半透明可透（玻璃原则），灰阶取 #8C8C8C/55% 叠极淡底图后约 #BABABA。 */
+    --glass-tint-selected:rgba(140,140,140,.55);
+    --glass-selected-border:rgba(110,110,110,.60);
+    --toolbar-glass:rgba(255,255,255,.60);
+    --glass-blur:blur(10px) saturate(1.35);     /* 背景高斯模糊 + 轻微增饱和（Tessera blur + dispersion） */
+    --glass-blur-hover:blur(7px) saturate(1.5);
+    --glass-shadow:0 4px 12px rgba(0,0,0,.18), 0 1px 2px rgba(0,0,0,.10);
+    --glass-shadow-hover:0 6px 16px rgba(0,0,0,.22), 0 1px 2px rgba(0,0,0,.10);
+    --glass-inset:inset 0 1px 0 rgba(255,255,255,.95),
+                  inset 0 -1px 0 rgba(0,0,0,.10),
+                  inset 1px 0 0 rgba(255,255,255,.35),
+                  inset -1px 0 0 rgba(0,0,0,.05),
+                  inset 0 0 0 1px rgba(255,255,255,.18);
+    --glass-rim:rgba(255,255,255,.55);           /* 1px 亮边 */
+    --glass-rim-dark:rgba(0,0,0,.08);            /* 1px 暗边 */
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--font);color:var(--text-primary);background:#E8E6E2;font-size:13px;line-height:1.5}
+  /* ---------- 原型工具条（不属于产品界面） ---------- */
+  .protobar{position:sticky;top:0;z-index:50;background:#2B2B2B;color:#EEE;padding:9px 16px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+  .protobar .title{font-weight:600;margin-right:10px;color:#FFF;font-size:13px}
+  .protobar .tag{font-size:11px;color:#9AD;background:#3A3A3A;padding:2px 7px;border-radius:10px;margin-right:8px}
+  .protobar button{background:#444;color:#EEE;border:1px solid #555;border-radius:5px;padding:5px 10px;cursor:pointer;font-size:12px;font-family:var(--font)}
+  .protobar button:hover{background:#555}
+  .protobar button.on{background:var(--selected);border-color:var(--selected);color:#FFF}
+  .protobar .sep{width:1px;height:20px;background:#555;margin:0 6px}
+  .protobar .hint{font-size:11px;color:#999;margin-left:auto}
+  /* ---------- 舞台 ---------- */
+  .stage{padding:22px;display:flex;justify-content:center;align-items:flex-start;min-height:calc(100vh - 44px)}
+  .screen{display:none;width:1280px;max-width:100%}
+  .screen.active{display:block}
+  .caption{max-width:1280px;margin:0 auto 12px;color:#555;font-size:12px}
+  .caption b{color:#202020}
+  /* ---------- 主窗口 ---------- */
+  .app{width:1280px;height:820px;background:var(--grid);border:1px solid #B9B7B3;border-radius:10px;overflow:hidden;box-shadow:var(--card-shadow);display:flex;flex-direction:column;position:relative}
+  .titlebar{height:38px;background:linear-gradient(#F7F7F7,#ECECEA);border-bottom:1px solid var(--separator);display:flex;align-items:center;padding:0 14px;gap:8px;flex:none}
+  .lights{display:flex;gap:7px;margin-right:8px}
+  .lights i{width:12px;height:12px;border-radius:50%;display:block}
+  .lights i:nth-child(1){background:#FF5F57}.lights i:nth-child(2){background:#FEBC2E}.lights i:nth-child(3){background:#28C840}
+  .tb-title{font-size:12px;color:var(--text-secondary)}
+  /* 工具栏：M4.1 玻璃态（按 Tessera Fluid Glass 风格，可切换对照）
+     ⚠ 玻璃必须透出「背后的内容」才有空间感：给顶栏铺一层极淡的可透彩色底，
+        按钮的 backdrop-filter 才能真的模糊/折射到东西（对应实装的「顶栏底图」策略）。 */
+  .toolbar{height:58px;position:relative;isolation:isolate;
+        background:linear-gradient(100deg,rgba(255,235,232,.55),rgba(235,244,255,.55) 45%,rgba(255,245,232,.55));
+        border-bottom:1px solid rgba(0,0,0,.10);display:flex;align-items:center;padding:0 14px;gap:18px;flex:none;
+        backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur)}
+  .toolbar::before{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;
+        background:radial-gradient(circle at 22% 120%,rgba(74,144,217,.20),transparent 45%),
+                   radial-gradient(circle at 78% -20%,rgba(232,163,61,.18),transparent 42%)}
+  .app.flat .toolbar{background:#FFF;backdrop-filter:none}
+  .app.flat .toolbar::before{display:none}
+  .app.flat .tbtn,.app.flat .pill{background:#FFF;box-shadow:0 1px 3px rgba(0,0,0,.14);border-color:transparent;backdrop-filter:none}
+  .app.flat .tbtn::before,.app.flat .tbtn::after{display:none}   /* 改前对照：去掉镜面高光与色散，只留 M4 的白圆底+淡阴影 */
+  .tb-group{display:flex;align-items:center;gap:8px}
+  .tb-sep{flex:1}
+  /* 玻璃态按钮：Tessera Glass Button —— 半透明染色 + 背景模糊/折射 + 边缘多层高光 + 阴影 + 水波纹 */
+  .tbtn{height:34px;min-width:34px;padding:0 10px;border-radius:9px;
+        background:var(--glass-tint);color:var(--text-primary);font-size:12px;cursor:pointer;
+        display:inline-flex;align-items:center;gap:5px;font-family:var(--font);
+        border:1px solid var(--glass-rim);
+        border-bottom-color:var(--glass-rim-dark);
+        box-shadow:var(--glass-shadow),var(--glass-inset);
+        backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+        position:relative;overflow:hidden;
+        transition:background .18s,box-shadow .18s,transform .18s,backdrop-filter .18s}
+  /* 顶部镜面高光带（Tessera 动图：上缘亮、下缘暗，模拟玻璃厚度） */
+  .tbtn::before{content:"";position:absolute;left:8%;right:8%;top:0;height:45%;border-radius:9px 9px 40% 40%;
+        background:linear-gradient(180deg,rgba(255,255,255,.55),rgba(255,255,255,0));pointer-events:none}
+  /* 色散：左右两道极淡的 RGB 分离边（Tessera dispersion，egui 侧用两条半透明描边近似） */
+  .tbtn::after{content:"";position:absolute;inset:0;border-radius:9px;pointer-events:none;
+        box-shadow:inset 1px 0 0 rgba(255,120,120,.22),inset -1px 0 0 rgba(120,170,255,.22)}
+  .tbtn:hover{background:var(--glass-tint-hover);box-shadow:var(--glass-shadow-hover),var(--glass-inset);
+        backdrop-filter:var(--glass-blur-hover);transform:translateY(-1px)}
+  .tbtn:active{transform:scale(.94)}
+  .tbtn.primary{background:rgba(74,144,217,.85);color:#FFF;border-color:rgba(255,255,255,.45);
+        box-shadow:0 4px 12px rgba(74,144,217,.35),var(--glass-inset)}
+  .tbtn.active{background:var(--glass-tint-selected);border-color:var(--glass-selected-border);color:#FFF}
+  .tbtn.active .ico svg{stroke:#FFF}
+  .tbtn.disabled{background:var(--glass-tint-disabled);color:var(--text-disabled);box-shadow:none;
+        backdrop-filter:blur(3px);border-color:rgba(255,255,255,.25)}
+  .tbtn .ico{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;flex:none;line-height:1;position:relative;z-index:1}
+  .tbtn .ico svg{width:18px;height:18px;display:block}
+  /* 点击水波纹（Tessera RippleState）：一个从点击点扩散的浅色圆 */
+  .ripple{position:absolute;border-radius:50%;background:rgba(255,255,255,.55);transform:translate(-50%,-50%) scale(0);
+        pointer-events:none;animation:ripple .5s ease-out forwards;z-index:0}
+  @keyframes ripple{to{transform:translate(-50%,-50%) scale(9);opacity:0}}
+  .pill{display:inline-flex;border-radius:9px;overflow:hidden;
+        background:var(--glass-tint);border:1px solid var(--glass-rim);border-bottom-color:var(--glass-rim-dark);
+        box-shadow:var(--glass-shadow),var(--glass-inset);
+        backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur)}
+  .pill span{padding:8px 12px;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;min-width:40px;
+        transition:background .15s}
+  .pill span svg{width:18px;height:18px;display:block}
+  .pill span.on{background:var(--glass-tint-selected);box-shadow:inset 0 0 0 1px var(--glass-selected-border)}
+  /* 新四钮分隔：编辑之后加一条淡竖线提示分组 */
+  .tb-newgroup{display:flex;align-items:center;gap:8px;padding-left:8px;border-left:1px dashed rgba(0,0,0,.14)}
+  .body{flex:1;display:flex;min-height:0}
+  .sidebar{width:216px;background:var(--sidebar);border-right:1px solid var(--separator);display:flex;flex-direction:column;overflow:hidden;flex:none}
+  .side-scroll{overflow:auto;padding:8px 0;flex:1}
+  .sec{font-size:11px;color:var(--sidebar-section,#8A8A8A);padding:8px 14px 4px;display:flex;justify-content:space-between;align-items:center}
+  .nav{height:26px;display:flex;align-items:center;padding:0 14px;gap:7px;cursor:pointer;font-size:12.5px;color:#4D4D4D}
+  .nav:hover{background:var(--hover)}
+  .nav.on{background:#D6E4F7;border-left:3px solid var(--selected);padding-left:11px}
+  .nav .cnt{margin-left:auto;color:var(--text-secondary);font-size:11px}
+  .tray{height:34px;border-top:1px solid var(--separator);display:flex;align-items:center;padding:0 12px;gap:6px;font-size:11.5px;color:var(--text-secondary);flex:none}
+  .main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--grid)}
+  .viewhead{height:52px;padding:10px 24px 6px;border-bottom:1px solid #EEE;flex:none}
+  .viewhead h1{margin:0;font-size:15px;font-weight:600}
+  .viewhead .sub{font-size:11px;color:var(--text-secondary)}
+  .chips{display:flex;gap:6px;padding:7px 24px;align-items:center;min-height:34px;border-bottom:1px solid #F0F0F0;flex:none;flex-wrap:wrap}
+  .chip{background:#EDF3FA;border:1px solid #C9DDF0;color:#2C5F8A;border-radius:12px;padding:2px 9px;font-size:11px;display:inline-flex;gap:6px;align-items:center}
+  .chip b{cursor:pointer;color:#7A9AB8}
+  .chip.clear{background:transparent;border:none;color:var(--selected);cursor:pointer;font-size:11.5px}
+  /* 网格：M4.1 统一圆角 + 软阴影 */
+  .gridarea{flex:1;overflow:auto;padding:20px 24px;background:var(--grid);position:relative}
+  .grid{display:grid;gap:16px}
+  .cell{position:relative;background:linear-gradient(135deg,#D9E2EC,#B9C7D6);border-radius:8px;
+        box-shadow:0 1px 4px rgba(0,0,0,.12);display:flex;align-items:flex-end;justify-content:center;
+        font-size:11px;color:#4A5560;cursor:pointer;user-select:none;overflow:hidden}
+  .cell.square{aspect-ratio:1/1}
+  .cell.masonry{border-radius:8px}
+  .cell.sel{outline:2px solid var(--selected);outline-offset:1px}
+  .cell .corner{position:absolute;top:5px;left:5px;width:16px;height:16px;border-radius:50%;background:var(--selected);color:#FFF;font-size:10px;display:flex;align-items:center;justify-content:center;z-index:2}
+  .cell .star{position:absolute;top:5px;right:6px;color:#E8A33D;font-size:12px;z-index:2}
+  .cell .traydot{position:absolute;bottom:5px;right:6px;width:8px;height:8px;border-radius:2px;background:var(--selected);z-index:2}
+  .cell .fname{position:absolute;left:0;right:0;bottom:-14px;text-align:center;font-size:11px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .grid.with-names .cell{margin-bottom:9px}
+  .grid.before .cell{border-radius:0;border:1px solid var(--cell-border);box-shadow:none}
+  .grid.before .cell.square{aspect-ratio:1/1}
+  .grid.before .cell .fname{bottom:-19px}
+  .grid.before.with-names .cell{margin-bottom:18px}
+  /* 框选矩形 */
+  .marquee{position:absolute;border:1px solid var(--selected);background:rgba(74,144,217,.12);border-radius:2px;pointer-events:none;z-index:20;display:none}
+  .statusbar{height:24px;background:var(--chrome);border-top:1px solid var(--separator);display:flex;align-items:center;padding:0 14px;font-size:11.5px;color:#5A5A5A;flex:none}
+  .statusbar .sp{flex:1}
+  .statusbar .entry{color:var(--text-secondary);cursor:pointer;display:flex;gap:5px;align-items:center}
+  .statusbar .dot{width:6px;height:6px;border-radius:50%;background:var(--danger)}
+  /* ---------- 浮层卡片 ---------- */
+  .float{position:absolute;background:#FBFBFB;border:1px solid #D6D4D0;border-radius:8px;box-shadow:var(--card-shadow);padding:14px;z-index:30}
+  .float h3{margin:0 0 10px;font-size:13px}
+  .lbl{font-size:11px;color:var(--text-secondary);display:block;margin-bottom:3px}
+  .row{display:flex;align-items:center;gap:8px;margin:7px 0}
+  .inp{flex:1;border:1px solid var(--separator);border-radius:5px;padding:5px 8px;font-size:12px;font-family:var(--font);background:#FFF;min-width:0}
+  .btn{border:1px solid var(--separator);background:#FFF;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;font-family:var(--font);color:var(--text-primary)}
+  .btn:hover{background:var(--hover)}
+  .btn.pri{background:var(--selected);color:#FFF;border-color:var(--selected)}
+  .btn.ghost{background:transparent;border-color:transparent;color:var(--selected)}
+  .tag{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:9px;background:#EDF3FA;color:#2C5F8A;border:1px solid #C9DDF0}
+  .tag.m41{background:#EDEDED;color:#555;border-color:#CCC}
+  .fine{font-size:11px;color:var(--text-secondary)}
+  .hr{border:none;border-top:1px solid #EEE;margin:9px 0}
+  .toggle{border:1px solid var(--separator);background:#FFF;border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:var(--font)}
+  .toggle.on{background:var(--selected);color:#FFF;border-color:var(--selected)}
+  .toggle.all.on{background:var(--ok);border-color:var(--ok)}
+  .note{font-size:11px;color:var(--text-secondary);background:#F4F6F8;border-left:3px solid #C9DDF0;padding:7px 10px;border-radius:0 5px 5px 0;margin:8px 0}
+  .okbox{font-size:12px;border:1px solid #BEDDBE;background:#F1F8F1;color:#2C6B2C;padding:9px 11px;border-radius:6px;margin:8px 0}
+  .warnbox{font-size:12px;border:1px solid #EAD3A8;background:#FDF7EC;color:#8A5D12;padding:9px 11px;border-radius:6px;margin:8px 0}
+  .errbox{font-size:12px;border:1px solid #E6BDB8;background:#FCF0EF;color:#9B3227;padding:9px 11px;border-radius:6px;margin:8px 0}
+  .hidden{display:none!important}
+  /* 筛选面板 */
+  .filterpanel{right:26px;top:96px;width:360px;max-height:640px;overflow:auto}
+  /* 批量标签浮层 */
+  .tagpop{left:300px;top:96px;width:250px;padding:10px}
+  .tagpop .ti{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:5px;cursor:pointer;font-size:12px}
+  .tagpop .ti:hover{background:var(--hover)}
+  .tagpop .box{width:15px;height:15px;border:1px solid var(--separator);border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;flex:none;background:#FFF}
+  .tagpop .box.on{background:var(--selected);color:#FFF;border-color:var(--selected)}
+  .tagpop .box.part{background:#9EC4EA;color:#FFF;border-color:var(--selected)}
+  /* 说明窗口 */
+  .capwin{left:430px;top:210px;width:340px}
+  /* toast */
+  .toast{position:absolute;bottom:44px;left:50%;transform:translateX(-50%);background:rgba(20,20,20,.86);color:#FFF;padding:8px 16px;border-radius:6px;font-size:12px;display:none;z-index:45}
+  .toast.show{display:block;animation:fade 2.6s forwards}
+  @keyframes fade{0%{opacity:0}10%{opacity:1}85%{opacity:1}100%{opacity:0}}
+  /* 说明卡 / 对照表 */
+  .legend{max-width:1280px;margin:14px auto 0;background:#FFF;border:1px solid #D6D4D0;border-radius:8px;padding:12px 16px;font-size:12px}
+  .legend b{display:block;margin-bottom:6px}
+  .legend table{width:100%;border-collapse:collapse;font-size:11.5px}
+  .legend td,.legend th{text-align:left;padding:5px 8px;border-bottom:1px solid #EEE;vertical-align:top}
+  .legend td:first-child{color:var(--selected);font-family:monospace;width:120px;white-space:nowrap}
+  .legend .mono{font-family:monospace;font-size:11px}
+  /* 状态机 / 对照块 */
+  .panels{display:flex;gap:14px;flex-wrap:wrap}
+  .panel{flex:1;min-width:360px;background:#FFF;border:1px solid #D6D4D0;border-radius:8px;padding:14px}
+  .panel h4{margin:0 0 10px;font-size:13px}
+  .matrix{width:100%;border-collapse:collapse;font-size:11.5px}
+  .matrix th,.matrix td{border:1px solid #E2E0DC;padding:6px 8px;text-align:left}
+  .matrix th{background:#F4F6F8;color:var(--text-secondary);font-weight:600}
+  .swatch{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:5px}
+  /* 玻璃态对照（Tessera Fluid Glass 风格）
+     为了「看得见玻璃」，对照区背后铺一层彩色可透背景 —— 这正是 Tessera 动图的做法。 */
+  .glassstage{background:linear-gradient(120deg,#C0392B,#8E44AD 38%,#2980B9 70%,#16A085);
+        border-radius:8px;padding:14px;position:relative;overflow:hidden}
+  .glassstage::before{content:"";position:absolute;inset:0;
+        background:radial-gradient(circle at 20% 80%,rgba(255,255,255,.35),transparent 35%),
+                   radial-gradient(circle at 80% 15%,rgba(255,220,120,.4),transparent 30%);pointer-events:none}
+  .glassrow{display:flex;gap:18px;align-items:center;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.18);flex-wrap:wrap;position:relative;z-index:1}
+  .glassrow:last-child{border-bottom:none}
+  .glassrow .lb{width:70px;color:#FFF;font-size:11.5px;flex:none;text-shadow:0 1px 2px rgba(0,0,0,.4)}
+  .glassrow .fine{color:rgba(255,255,255,.9);text-shadow:0 1px 2px rgba(0,0,0,.35)}
+  .gbtn{height:34px;min-width:34px;padding:0 12px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;
+        font-size:12px;font-family:var(--font);color:var(--text-primary);position:relative;overflow:hidden;
+        border:1px solid var(--glass-rim);border-bottom-color:var(--glass-rim-dark);
+        backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur)}
+  .gbtn::before{content:"";position:absolute;left:8%;right:8%;top:0;height:45%;border-radius:9px 9px 40% 40%;
+        background:linear-gradient(180deg,rgba(255,255,255,.55),rgba(255,255,255,0));pointer-events:none}
+  .g-default{background:var(--glass-tint);box-shadow:var(--glass-shadow),var(--glass-inset)}
+  .g-hover{background:var(--glass-tint-hover);box-shadow:var(--glass-shadow-hover),var(--glass-inset);
+        border-color:rgba(255,255,255,.8);backdrop-filter:var(--glass-blur-hover);transform:translateY(-1px)}
+  .g-sel{background:var(--glass-tint-selected);border-color:var(--glass-selected-border);color:#FFF;
+        box-shadow:0 4px 12px rgba(0,0,0,.20),var(--glass-inset)}
+  .g-dis{background:var(--glass-tint-disabled);color:var(--text-disabled);box-shadow:none;
+        backdrop-filter:blur(3px);border-color:rgba(255,255,255,.25)}
+  .g-old{background:#FFF;box-shadow:0 1px 3px rgba(0,0,0,.14);border-color:transparent;backdrop-filter:none}
+  /* 布局对照屏 */
+  .cmp{display:flex;gap:16px;flex-wrap:wrap}
+  .cmpcol{flex:1;min-width:360px}
+  .cmpgrid{display:grid;gap:12px;padding:12px;background:#FFF;border:1px solid #E2E0DC;border-radius:8px}
+  .cmpgrid.g5{grid-template-columns:repeat(5,1fr)}
+  .cmpgrid.mv{grid-template-columns:repeat(4,1fr);grid-auto-rows:10px}
+  .cmpgrid.mh{grid-template-columns:repeat(3,1fr);grid-auto-rows:10px}
+  .cmpcell{background:linear-gradient(135deg,#D9E2EC,#B9C7D6);border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12);position:relative}
+  .cmpcell.old{border-radius:0;border:1px solid var(--cell-border);box-shadow:none}
+  .cmpcell .fn{position:absolute;left:0;right:0;bottom:-13px;text-align:center;font-size:10px;color:var(--text-primary)}
+  .cmpgrid .cmpcell{margin-bottom:12px}
+  .stateline{display:flex;gap:10px;align-items:center;margin:8px 0;font-size:11.5px;color:var(--text-secondary)}
+  .kbd{font-family:monospace;background:#EEE;border:1px solid #CCC;border-bottom-width:2px;border-radius:4px;padding:1px 6px;font-size:11px;color:#333}
+  .newbadge{display:inline-block;background:#EDEDED;color:#555;border:1px solid #CCC;border-radius:4px;padding:0 5px;font-size:10px;margin-left:4px}
+</style>
+</head>
+<body>
+
+<!-- ============ 原型工具条（非产品界面） ============ -->
+<div class="protobar">
+  <span class="title">OpenPicasa · M4.1 界面原型</span>
+  <span class="tag">v1.0 · 配套 docs/13 + docs/14</span>
+  <button data-screen="home" class="on">S0 主窗口</button>
+  <button data-screen="layout">S1 三布局对照</button>
+  <button data-screen="actions">S2 四按钮状态</button>
+  <button data-screen="filter">S3 筛选面板</button>
+  <button data-screen="select">S4 多选/框选</button>
+  <button data-screen="glass">S5 玻璃态</button>
+  <span class="sep"></span>
+  <span style="font-size:11px;color:#AAA">S0 开关：</span>
+  <button id="layoutBtn">布局：方格</button>
+  <button id="glassBtn" class="on">玻璃态：开</button>
+  <button id="selBtn">选中集：3 张</button>
+  <span class="hint">提示：S0 可切换三布局；S4 可用鼠标真实拖出框选矩形；全部为前端模拟，不写任何数据</span>
+</div>
+
+<div class="stage">
+
+<!-- ==================== S0 主窗口 ==================== -->
+<div class="screen active" id="scr-home">
+  <div class="caption"><b>S0 · 主窗口基线</b> —— 三行骨架不变；工具栏左段「编辑」后新增 ♥收藏 / ⓘ说明 / ⌗标签 / ▣照片托盘 四枚对象操作钮（P-M41-01）；默认态玻璃底；三种布局统一 8px 圆角；默认 96px 方格 + 文件名间距减半。</div>
+  <div class="app" id="homeApp">
+    <div class="titlebar"><div class="lights"><i></i><i></i><i></i></div><span class="tb-title">OpenPicasa 0.4.1 · 所有照片</span></div>
+    <div class="toolbar">
+      <!-- 左段：既有 4 枚 + 新增 4 枚 -->
+      <div class="tb-group">
+        <button class="tbtn" title="显示/隐藏边栏"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="19" height="15" rx="3.5"/><line x1="9" y1="4.5" x2="9" y2="19.5"/></svg></span></button>
+        <button class="tbtn primary" title="导入：添加文件夹…"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15 L3 21 L21 21 L21 15"/><line x1="12" y1="2" x2="12" y2="16"/><path d="M7.5 11.5 L12 16 L16.5 11.5"/></svg></span> 导入图片</button>
+        <button class="tbtn" title="幻灯片（下一版开放）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="4.2" width="20.4" height="15.6" rx="2.5"/><polygon points="10,8.6 10,15.4 16.6,12" fill="currentColor" stroke="none"/></svg></span></button>
+        <button class="tbtn" title="编辑（下一版开放）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 20 L17.5 7 L20 9.5 L7 22.5 Z"/><line x1="4.5" y1="20" x2="7" y2="22.5"/></svg></span></button>
+        <!-- ↓ M4.1 新增四钮（编辑之后） -->
+        <div class="tb-newgroup" id="newBtnGroup">
+          <button class="tbtn" id="btnFav" title="收藏" onclick="actToast('fav')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5 C12 20.5 3.5 15 3.5 9.2 C3.5 6.4 5.6 4.5 8 4.5 C9.7 4.5 11.2 5.4 12 6.9 C12.8 5.4 14.3 4.5 16 4.5 C18.4 4.5 20.5 6.4 20.5 9.2 C20.5 15 12 20.5 12 20.5 Z"/></svg></span></button>
+          <button class="tbtn" title="说明" onclick="actToast('cap')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5 h16 a2 2 0 0 1 2 2 v8 a2 2 0 0 1 -2 2 H9 l-4.5 3 v-3 H4 a2 2 0 0 1 -2 -2 v-8 a2 2 0 0 1 2 -2 Z"/><line x1="6" y1="9.5" x2="16" y2="9.5"/><line x1="6" y1="13" x2="13" y2="13"/></svg></span></button>
+          <button class="tbtn" title="标签" onclick="actToast('tag')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11.5 V4.5 a1 1 0 0 1 1 -1 h7 L20.5 12.5 a1.5 1.5 0 0 1 0 2.1 l-5.9 5.9 a1.5 1.5 0 0 1 -2.1 0 Z"/><circle cx="7.5" cy="7.5" r="1.4"/></svg></span></button>
+          <button class="tbtn" id="btnTray" title="照片托盘 · ⌘H" onclick="actToast('tray')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13 L3 20 L21 20 L21 13"/><line x1="12" y1="3" x2="12" y2="14"/><path d="M7.5 9.5 L12 14 L16.5 9.5"/></svg></span></button>
+        </div>
+      </div>
+      <!-- 中段 -->
+      <div class="tb-group">
+        <div class="pill" id="layoutPill">
+          <span class="on" data-layout="grid" title="方格"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="2" y="2" width="9" height="9" rx="1.6"/><rect x="13" y="2" width="9" height="9" rx="1.6"/><rect x="2" y="13" width="9" height="9" rx="1.6"/><rect x="13" y="13" width="9" height="9" rx="1.6"/></svg></span>
+          <span data-layout="mv" title="纵向瀑布流"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="2" y="2" width="5.5" height="13" rx="1.2"/><rect x="9.2" y="2" width="5.5" height="20" rx="1.2"/><rect x="16.5" y="2" width="5.5" height="9" rx="1.2"/></svg></span>
+          <span data-layout="mh" title="横向瀑布流"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="2" y="2" width="13" height="5.5" rx="1.2"/><rect x="2" y="9.2" width="20" height="5.5" rx="1.2"/><rect x="2" y="16.5" width="9" height="5.5" rx="1.2"/></svg></span>
+        </div>
+        <button class="tbtn" title="缩小缩略图 · ⌘−"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"/></svg></span></button>
+        <button class="tbtn" title="放大缩略图 · ⌘+"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="12" y1="3" x2="12" y2="21"/></svg></span></button>
+      </div>
+      <div class="tb-sep"></div>
+      <!-- 右段 -->
+      <div class="tb-group">
+        <button class="tbtn" title="搜索 · ⌘F"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9.5" cy="9.5" r="6.2"/><line x1="16.5" y1="16.5" x2="23" y2="23"/></svg></span></button>
+        <button class="tbtn" title="排序：拍摄日期（新在前）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="7.7,20 7.7,3.6 3.4,8.6"/><line x1="7.7" y1="3.6" x2="12" y2="8.6"/><polyline points="16.3,3.6 16.3,20 12,15.4"/><line x1="16.3" y1="20" x2="20.6" y2="15.4"/></svg></span></button>
+        <button class="tbtn active" title="筛选（日期 / 类型 / 尺寸 / 标签）"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><line x1="2.4" y1="6.7" x2="21.6" y2="6.7"/><line x1="2.4" y1="12" x2="21.6" y2="12"/><line x1="2.4" y1="17.3" x2="14.9" y2="17.3"/></svg></span></button>
+        <button class="tbtn" title="更多"><span class="ico"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5.3" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="18.7" cy="12" r="1.7"/></svg></span></button>
+      </div>
+    </div>
+    <div class="body">
+      <div class="sidebar">
+        <div class="side-scroll">
+          <div class="sec">图库</div>
+          <div class="nav on">所有照片 <span class="cnt">1 249</span></div>
+          <div class="nav">最近更改 <span class="cnt">38</span></div>
+          <div class="nav">星标 <span class="cnt">12</span></div>
+          <div class="sec" style="margin-top:8px">文件夹</div>
+          <div class="nav">▸ /Users/me/Photos <span class="cnt">9</span></div>
+          <div class="nav" style="padding-left:28px">▸ album-a</div>
+          <div class="nav" style="padding-left:28px">▸ album-b/nested</div>
+          <div class="sec" style="margin-top:8px">标签</div>
+          <div class="nav">旅行 <span class="cnt">12</span></div>
+          <div class="nav">家人 <span class="cnt">8</span></div>
+          <div class="sec" style="margin-top:8px">相册</div>
+          <div class="nav">2026 京都 <span class="cnt">20</span></div>
+        </div>
+        <div class="tray">▣ 照片托盘 · <b id="trayCount">3</b> 张 <span style="margin-left:auto">›</span></div>
+      </div>
+      <div class="main">
+        <div class="viewhead"><h1>所有照片</h1><div class="sub">1 249 张 · 拍摄时间：2010 年 3 月 — 2026 年 10 月</div></div>
+        <div class="chips"><span class="chip">格式 GIF <b>×</b></span><span class="clear">清除全部筛选</span><span class="fine" style="margin-left:auto">匹配 1 249 张（数字与主区标题同源）</span></div>
+        <div class="gridarea" id="homeGridArea">
+          <div class="grid with-names g5" id="homeGrid"></div>
+          <div class="marquee" id="homeMarquee"></div>
+        </div>
+        <div class="statusbar"><span id="homeSel">已选 3 张</span><span class="sp"></span><span class="entry"><span class="dot"></span> 索引管理 ›</span></div>
+      </div>
+    </div>
+    <!-- 浮层：批量标签 / 说明 -->
+    <div class="float tagpop hidden" id="homeTagPop">
+      <h3>批量标签 · <span id="tagPopN">3</span> 张照片 <span class="newbadge">M4.1 新</span></h3>
+      <div class="ti" onclick="toggleTagRow(this)"><span class="box on">✓</span> 旅行</div>
+      <div class="ti" onclick="toggleTagRow(this)"><span class="box part">–</span> 家人 <span class="fine" style="margin-left:auto">部分选中</span></div>
+      <div class="ti" onclick="toggleTagRow(this)"><span class="box"></span> 工作</div>
+      <hr class="hr"><div class="fine">＋ 新建标签并添加…</div>
+      <div class="note" style="margin-bottom:0">取消勾选 = 从 3 张同步移除该标签</div>
+    </div>
+    <div class="float capwin hidden" id="homeCapWin">
+      <h3>照片说明（<span id="capN">3</span> 张）</h3>
+      <textarea class="inp" style="width:100%;height:70px;resize:none" placeholder="2026 年京都旅行，清水寺前。"></textarea>
+      <div class="fine" style="margin:6px 0">ⓘ 将保存到选中的 3 张照片（只写应用索引，不改原图）</div>
+      <div class="row" style="justify-content:flex-end;margin-bottom:0"><button class="btn" onclick="hideFloats()">取消</button><button class="btn pri" onclick="hideFloats();toast('已保存 3 张说明')">保存</button></div>
+    </div>
+    <div class="toast" id="homeToast"></div>
+  </div>
+  <div class="legend">
+    <b>本屏 M4.1 变化点</b>
+    <table>
+      <tr><td>四新钮</td><td>♥收藏 / ⓘ说明 / ⌗标签 / ▣照片托盘，落「编辑」之后（P-M41-01）；♥/▣ 为<b>灰色</b>双态钮 · M41-UI-01</td></tr>
+      <tr><td>玻璃态</td><td>默认态半透明白底 + 1px 高光/暗边 + blur6 阴影，白底上不再「糊成一片」 · M41-UI-06</td></tr>
+      <tr><td>三布局圆角</td><td>方格 / 纵瀑 / 横瀑统一 8px 圆角 + 软阴影，删直角 1px 灰框 · M41-UI-02</td></tr>
+      <tr><td>默认密度</td><td>128→96px、FILENAME_H 18→9px、文件名间距 +1→+0.5px，一屏 ≥6 行 · M41-UI-03</td></tr>
+      <tr><td>右键退役</td><td>照片右键不再弹菜单，改为单选该张；功能收进四按钮 · M41-UI-05</td></tr>
+      <tr><td>框选</td><td>左键按住拖动 ≥4px 出半透明蓝框，松开即多选（S4 可实操） · M41-UI-10</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== S1 三布局对照 ==================== -->
+<div class="screen" id="scr-layout">
+  <div class="caption"><b>S1 · 三布局圆角与密度对照</b> —— 改前（直角 + 1px 灰框 + 128px）vs 改后（8px 圆角 + 软阴影 + 96px）。三布局共用一条 `RectShape::with_texture` 贴图通路，不新增纹理上传。</div>
+  <div class="panels">
+    <div class="panel">
+      <h4>方格 Grid <span class="tag m41">M41-UI-02/03</span></h4>
+      <div class="stateline"><b style="color:#202020">改前</b> 128px · 直角/圆角混用 · 文件名行 18px</div>
+      <div class="cmpgrid g5" id="cmpGridBefore"></div>
+      <div class="stateline" style="margin-top:18px"><b style="color:#202020">改后</b> 96px · 8px 圆角 + 软阴影 · 文件名行 9px</div>
+      <div class="cmpgrid g5" id="cmpGridAfter"></div>
+    </div>
+    <div class="panel">
+      <h4>纵向瀑布流 V <span class="tag m41">M41-UI-02</span></h4>
+      <div class="stateline"><b style="color:#202020">改前</b> radius=0 · painter.image 直角 · 1px 灰框</div>
+      <div class="cmpgrid mv" id="cmpMvBefore"></div>
+      <div class="stateline" style="margin-top:18px"><b style="color:#202020">改后</b> radius=8 · RectShape 圆角贴图 · 无灰框</div>
+      <div class="cmpgrid mv" id="cmpMvAfter"></div>
+    </div>
+    <div class="panel" style="min-width:100%">
+      <h4>横向瀑布流 H <span class="tag m41">M41-UI-02</span></h4>
+      <div class="cmp">
+        <div class="cmpcol"><div class="stateline"><b style="color:#202020">改前</b> 直角 + 灰框</div><div class="cmpgrid mh" id="cmpMhBefore"></div></div>
+        <div class="cmpcol"><div class="stateline"><b style="color:#202020">改后</b> 8px 圆角 + 软阴影</div><div class="cmpgrid mh" id="cmpMhAfter"></div></div>
+        <div class="cmpcol" style="max-width:330px">
+          <div class="stateline"><b style="color:#202020">密度对照（1280×820）</b></div>
+          <table class="matrix">
+            <tr><th>项</th><th>改前</th><th>改后</th></tr>
+            <tr><td>默认 cell</td><td>128 px</td><td><b>96 px</b></td></tr>
+            <tr><td>FILENAME_H</td><td>18 px</td><td><b>9 px</b></td></tr>
+            <tr><td>名→图间距</td><td>+1 px</td><td><b>+0.5 px</b></td></tr>
+            <tr><td>cell_h</td><td>146 px</td><td>105 px</td></tr>
+            <tr><td>行距</td><td>162 px</td><td>121 px</td></tr>
+            <tr><td>一屏行数</td><td>≈4–5</td><td><b>≥6</b></td></tr>
+          </table>
+          <div class="note" style="margin-top:10px">老库已存 <span class="mono">grid_cell_px</span> 偏好优先（P-M41-05）；`LOG_STEPS 22…512` / `step_log` / 拖动吸附一律不动。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="legend">
+    <b>绘制分支统一（grid.rs:1120-1175 概念图）</b>
+    <table>
+      <tr><td>frame_radius</td><td>三模式一律 `THUMB_RADIUS(8.0)`，删掉 `if mode==Grid` 分支 · M41-UI-02</td></tr>
+      <tr><td>Ready 贴图</td><td>瀑布流改用与方格相同的 `RectShape::filled(fitted,8.0,WHITE).with_texture(...)` + `thumb_shadow.as_shape(...)`，不再用 `painter.image` · M41-UI-02</td></tr>
+      <tr><td>常态描边</td><td>三模式一律 `Stroke::NONE`（软阴影 + 圆角表达边界），删瀑布流 1px 灰框；选中/当前/悬停三态保留 · M41-UI-02</td></tr>
+      <tr><td>纹理预算</td><td>同一张已上传 GPU 纹理，只是 Shape 不同；`TEX_UPLOAD_PER_FRAME=3` / `TEX_CACHE_CAP=120` 不变 · R-M41-2</td></tr>
+      <tr><td>非目标</td><td>≤48px 微缩图集仍走直角子矩形（P-M41-04 顺延） · docs/13 §7</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== S2 四按钮状态 ==================== -->
+<div class="screen" id="scr-actions">
+  <div class="caption"><b>S2 · 四按钮对象操作（双态状态机）</b> —— 无选中 → 选中 → ♥/▣ 双态 → ⓘ说明 / ⌗标签浮层。点下方「选中集」行可切换场景，看四枚按钮如何随状态变化。</div>
+  <div class="panels">
+    <div class="panel">
+      <h4>按钮状态矩阵 <span class="tag m41">M41-UI-01</span></h4>
+      <div class="stateline">当前场景：<b id="actScenario" style="color:#202020">已选 3 张（混合：1 张已收藏 / 2 张在托盘）</b></div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="btn" onclick="setScenario('none')">无选中</button>
+        <button class="btn" onclick="setScenario('one')">选中 1 张（未收藏/未入托盘）</button>
+        <button class="btn" onclick="setScenario('allfav')">选中 3 张（全已收藏 / 全在托盘）</button>
+        <button class="btn" onclick="setScenario('mixed')">选中 3 张（混合）</button>
+      </div>
+      <hr class="hr">
+      <div class="row" style="gap:10px" id="actButtons">
+        <button class="tbtn" id="actFav" title="收藏"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5 C12 20.5 3.5 15 3.5 9.2 C3.5 6.4 5.6 4.5 8 4.5 C9.7 4.5 11.2 5.4 12 6.9 C12.8 5.4 14.3 4.5 16 4.5 C18.4 4.5 20.5 6.4 20.5 9.2 C20.5 15 12 20.5 12 20.5 Z"/></svg></span> ♥ 收藏</button>
+        <button class="tbtn" id="actCap"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5 h16 a2 2 0 0 1 2 2 v8 a2 2 0 0 1 -2 2 H9 l-4.5 3 v-3 H4 a2 2 0 0 1 -2 -2 v-8 a2 2 0 0 1 2 -2 Z"/><line x1="6" y1="9.5" x2="16" y2="9.5"/><line x1="6" y1="13" x2="13" y2="13"/></svg></span> ⓘ 说明</button>
+        <button class="tbtn" id="actTag"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11.5 V4.5 a1 1 0 0 1 1 -1 h7 L20.5 12.5 a1.5 1.5 0 0 1 0 2.1 l-5.9 5.9 a1.5 1.5 0 0 1 -2.1 0 Z"/><circle cx="7.5" cy="7.5" r="1.4"/></svg></span> ⌗ 标签</button>
+        <button class="tbtn" id="actTray" title="照片托盘 · ⌘H"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13 L3 20 L21 20 L21 13"/><line x1="12" y1="3" x2="12" y2="14"/><path d="M7.5 9.5 L12 14 L16.5 9.5"/></svg></span> ▣ 托盘</button>
+      </div>
+      <div class="note" id="actExplain" style="margin-top:12px"></div>
+      <table class="matrix" style="margin-top:10px">
+        <tr><th>按钮</th><th>判定</th><th>点击</th></tr>
+        <tr><td>♥ 收藏</td><td>选中集全 `starred=true` → 灰色选中态</td><td>态=点→全部取消；常态→全部收藏</td></tr>
+        <tr><td>▣ 托盘</td><td>选中集全在 `lib.tray` → 灰色选中态</td><td>态=点→全部移出；常态→全部加入</td></tr>
+        <tr><td>ⓘ 说明</td><td>常态</td><td>开「照片说明（N 张）」Window</td></tr>
+        <tr><td>⌗ 标签</td><td>常态</td><td>开「批量标签 · N 张」浮层</td></tr>
+      </table>
+    </div>
+    <div class="panel">
+      <h4>状态机（♥ / ▣ 共用） <span class="tag m41">M41-UI-01</span></h4>
+      <pre style="font-size:11.5px;line-height:1.7;background:#F7F8FA;border:1px solid #E2E0DC;border-radius:6px;padding:12px;overflow:auto">
+   ┌──────────────┐ 选中集变化/操作完成 ┌──────────────┐
+   │  常态        │ ─────────────────► │ 灰色选中态   │
+   │（玻璃常态）  │ ◄───────────────── │（#8C8C8C/55%）│
+   └──────┬───────┘  任一张变为「假」  └──────┬───────┘
+          │ 点击：全部置「真」+ toast        │ 点击：全部置「假」+ toast
+          ▼                                  ▼
+   ┌──────────────────────────────────────────────┐
+   │ 混合态：任一张不满足 → 按「常态」渲染，      │
+   │ 点击 = 全部置为真。不做三态 indeterminate。 │
+   └──────────────────────────────────────────────┘</pre>
+      <h4 style="margin-top:14px">右键退役 <span class="tag m41">M41-UI-05</span></h4>
+      <pre style="font-size:11.5px;line-height:1.7;background:#F7F8FA;border:1px solid #E2E0DC;border-radius:6px;padding:12px">
+ 改前：右键照片 → ╔═ ★ 收藏 ═╗
+                  ║ 说明…   ║
+                  ║ 标签…   ║
+                  ╚═════════╝
+ 改后：右键照片 → 该张被单选（无菜单）
+                    ↓ 直接点工具栏 ♥ / ⓘ / ⌗ / ▣
+ ⚠ 文件夹树右键照常可用（78fa639 打开帧豁免保留）</pre>
+    </div>
+  </div>
+  <div class="legend">
+    <b>承接关系（M41-UI-08）</b>
+    <table>
+      <tr><td>筛选面板</td><td>删除「对所选：★收藏/☆取消」+「批量标签：打标签」两段 · 批量收藏改走 ♥、批量标签改走 ⌗</td></tr>
+      <tr><td>数据层</td><td>全部复用：`batch_set_starred` / `set_caption` / `add_tag` / `remove_tag` / `to_tray` / `tray_remove`；零 schema 迁移</td></tr>
+      <tr><td>零写入</td><td>四按钮只写自有 DB / Preferences，不碰照片目录、不碰 `.picasa.ini` · R-M2-1 / D-18</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== S3 筛选面板 ==================== -->
+<div class="screen" id="scr-filter">
+  <div class="caption"><b>S3 · 筛选面板（收口后）</b> —— 类型行首位新增「全部」；删除两段批量操作；「只看收藏」「按标签筛」作为筛选维度保留。点「GIF」看「全部」熄灭，点「全部」只清类型不清其他维度。</div>
+  <div class="app" style="position:relative">
+    <div class="titlebar"><div class="lights"><i></i><i></i><i></i></div><span class="tb-title">OpenPicasa 0.4.1 · 筛选照片</span></div>
+    <div class="toolbar"><div class="tb-group"><button class="tbtn" title="显示/隐藏边栏"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2.5" y="4.5" width="19" height="15" rx="3.5"/><line x1="9" y1="4.5" x2="9" y2="19.5"/></svg></span></button><button class="tbtn primary">导入图片</button><button class="tbtn">▶</button><button class="tbtn">✎</button><div class="tb-newgroup"><button class="tbtn">♥</button><button class="tbtn">ⓘ</button><button class="tbtn">⌗</button><button class="tbtn">▣</button></div></div><div class="tb-group"><div class="pill"><span class="on">◫</span><span>▥</span><span>▤</span></div><button class="tbtn">−</button><button class="tbtn">＋</button></div><div class="tb-sep"></div><div class="tb-group"><button class="tbtn">🔍</button><button class="tbtn">⇅</button><button class="tbtn active">⚑</button><button class="tbtn">⋯</button></div></div>
+    <div class="body"><div class="sidebar"><div class="side-scroll"><div class="sec">图库</div><div class="nav">所有照片 <span class="cnt">1 249</span></div><div class="nav on">搜索结果 <span class="cnt">1</span></div><div class="sec">标签</div><div class="nav">旅行 <span class="cnt">12</span></div></div><div class="tray">▣ 照片托盘 · 3 张</div></div>
+      <div class="main"><div class="viewhead"><h1>搜索结果</h1><div class="sub">1 张 · 拍摄时间：2010 年 3 月</div></div>
+        <div class="chips"><span class="chip" id="filterChip">格式 GIF <b>×</b></span><span class="clear" onclick="clearAll()">清除全部筛选</span></div>
+        <div class="gridarea"><div class="grid g5 with-names" id="filterGrid" style="grid-template-columns:repeat(5,1fr)"></div></div>
+        <div class="statusbar"><span>已选 0 张</span><span class="sp"></span><span class="entry">索引管理 ›</span></div>
+      </div>
+    </div>
+    <!-- 筛选面板 -->
+    <div class="float filterpanel">
+      <h3>筛选照片 <span class="tag m41">M41-UI-07/08</span></h3>
+      <div class="row"><span class="lbl" style="width:88px">文件名/路径</span><input class="inp" value="sample"><button class="btn" style="padding:5px 8px">文/全 ▾</button></div>
+      <div class="row"><span class="lbl" style="width:88px">图库根目录</span><input class="inp" value="全部 ▾"><input class="inp" value="文件夹：全部 ▾"></div>
+      <hr class="hr">
+      <div class="row"><span class="lbl" style="width:88px">拍摄时间</span><input class="inp" value="2010-01-01"><span>～</span><input class="inp" value="2010-12-31"></div>
+      <label class="fine" style="display:flex;gap:6px;align-items:center"><input type="checkbox"> 只看缺少拍摄时间的照片</label>
+      <hr class="hr">
+      <div class="fine" style="margin-bottom:4px">类型 <span class="newbadge">「全部」新增</span></div>
+      <div class="row" style="flex-wrap:wrap;gap:6px" id="typeRow">
+        <span class="toggle all on" data-t="all" onclick="pickType('all')">全部</span>
+        <span class="toggle" data-t="jpeg" onclick="pickType('jpeg')">JPEG</span>
+        <span class="toggle" data-t="png" onclick="pickType('png')">PNG</span>
+        <span class="toggle on" data-t="gif" onclick="pickType('gif')">GIF</span>
+        <span class="toggle" data-t="webp" onclick="pickType('webp')">WebP</span>
+        <span class="toggle" data-t="tiff" onclick="pickType('tiff')">TIFF</span>
+        <span class="toggle" data-t="svg" onclick="pickType('svg')">SVG</span>
+        <span class="toggle" data-t="heic" onclick="pickType('heic')">HEIC</span>
+        <span class="toggle" data-t="avif" onclick="pickType('avif')">AVIF</span>
+        <span class="toggle" data-t="raw" onclick="pickType('raw')">RAW</span>
+      </div>
+      <div class="note" id="typeNote">当前：只筛 GIF；点「全部」→ 清空类型维度，日期 / 尺寸等其他维度保持不变。</div>
+      <hr class="hr">
+      <div class="row"><span class="lbl" style="width:88px">尺寸</span><span class="toggle all on">全部</span><span class="toggle">小图</span><span class="toggle">中图</span><span class="toggle">大图</span></div>
+      <div class="row"><span class="lbl" style="width:88px">相机与镜头</span><input class="inp" value="全部机身 ▾"><input class="inp" value="全部镜头 ▾"></div>
+      <label class="fine" style="display:flex;gap:6px;align-items:center"><input type="checkbox"> 只看缺少元数据的照片</label>
+      <hr class="hr">
+      <div class="row"><span class="lbl" style="width:88px">标签 / 相册</span><input class="inp" value="全部 ▾"><input class="inp" value="全部 ▾"><label class="fine"><input type="checkbox"> 只看收藏</label></div>
+      <div class="fine" style="margin:6px 0 2px">近期搜索（上限 10 条）</div>
+      <div class="row" style="gap:6px;flex-wrap:wrap"><span class="chip">sample · GIF</span><span class="chip">京都 · 2010</span></div>
+      <hr class="hr">
+      <div class="errbox" style="font-size:11px;margin:6px 0">✗ 已删除（M41-UI-08）：<br>「对所选： ★ 收藏　☆ 取消」<br>「批量标签： [　　　] [打标签]」<br>→ 批量收藏走工具栏 ♥，批量标签走工具栏 ⌗ 浮层</div>
+      <div class="row" style="justify-content:space-between;margin-bottom:0"><span class="fine">匹配 <b id="filterMatch">1 张</b></span><button class="btn ghost" onclick="clearAll()">清除全部筛选</button></div>
+    </div>
+  </div>
+  <div class="legend">
+    <b>「全部」与「清除全部筛选」职责对照</b>
+    <table>
+      <tr><td>类型「全部」</td><td>只清空 `formats`，日期 / 尺寸 / 标签 / 时间等其他维度保持不变 · M41-UI-07</td></tr>
+      <tr><td>清除全部筛选</td><td>清空所有维度，恢复语境完整集合（`M4-SEARCH-06` 口径不变）</td></tr>
+      <tr><td>保留项</td><td>「只看收藏（星标）」checkbox、「按此标签筛」输入框是「查什么」，不是「对选中集做什么」</td></tr>
+      <tr><td>芯片同步</td><td>芯片「格式 ×」↔ 类型「全部」双向同步；RAW 家族一个 toggle 覆盖 5 个 slug</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== S4 多选/框选 ==================== -->
+<div class="screen" id="scr-select">
+  <div class="caption"><b>S4 · 多选与框选（可实操）</b> —— 在下方网格里 <b>按住鼠标左键拖动</b> 可真实拖出框选矩形；松开后相交的照片被选中。也可试普通单击 / ⌘ 点 / Shift 点 / 右键 / 点空白。按住 <span class="kbd">⌘</span> 拖框 = 追加选中。</div>
+  <div class="app" style="position:relative">
+    <div class="titlebar"><div class="lights"><i></i><i></i><i></i></div><span class="tb-title">OpenPicasa 0.4.1 · 多选交互</span></div>
+    <div class="toolbar"><div class="tb-group"><button class="tbtn">⊞</button><button class="tbtn primary">导入图片</button><button class="tbtn">▶</button><button class="tbtn">✎</button><div class="tb-newgroup"><button class="tbtn" id="s4Fav">♥</button><button class="tbtn">ⓘ</button><button class="tbtn">⌗</button><button class="tbtn" id="s4Tray">▣</button></div></div><div class="tb-group"><div class="pill"><span class="on">◫</span><span>▥</span><span>▤</span></div><button class="tbtn">−</button><button class="tbtn">＋</button></div><div class="tb-sep"></div><div class="tb-group"><button class="tbtn">🔍</button><button class="tbtn">⇅</button><button class="tbtn">⚑</button><button class="tbtn">⋯</button></div></div>
+    <div class="body"><div class="sidebar"><div class="side-scroll"><div class="sec">图库</div><div class="nav on">所有照片 <span class="cnt">1 249</span></div><div class="sec">操作提示</div><div class="fine" style="padding:8px 14px;line-height:1.9">
+      • 单击 = 单选<br>• ⌘ + 单击 = 反选<br>• Shift + 单击 = 连选<br>• 点空白 = 清空<br>• 右键 = 单选（无菜单）<br>• <b>按住拖动 ≥4px = 框选</b><br>• 双击 = 开查看器
+    </div></div><div class="tray">▣ 照片托盘 · <b id="s4TrayCount">0</b> 张</div></div>
+      <div class="main"><div class="viewhead"><h1>所有照片</h1><div class="sub">1 249 张 · 拍摄时间：2010 年 3 月 — 2026 年 10 月</div></div>
+        <div class="chips"><span class="fine">已激活筛选：无 · 在网格上拖动鼠标试试框选</span></div>
+        <div class="gridarea" id="s4Area">
+          <div class="grid with-names g5" id="s4Grid" style="grid-template-columns:repeat(6,1fr)"></div>
+          <div class="marquee" id="s4Marquee"></div>
+        </div>
+        <div class="statusbar"><span id="s4Sel">已选 0 张</span><span class="sp"></span><span class="fine" id="s4Hint">提示：按住左键从空白处拖出一个矩形</span><span class="sp"></span><span class="entry">索引管理 ›</span></div>
+      </div>
+    </div>
+    <div class="toast" id="s4Toast"></div>
+  </div>
+  <div class="legend">
+    <b>手势语义总表（M41-UI-09 / 10）</b>
+    <table>
+      <tr><td>普通单击</td><td>单选该张（清空 → 只留 1 张） · `click_select(index,false,false)`</td></tr>
+      <tr><td>⌘ / Ctrl + 单击</td><td>反选该张，其余保留 · 现有 `additive`</td></tr>
+      <tr><td>Shift + 单击</td><td>连选锚点→该张 · 现有 `range` + `anchor`</td></tr>
+      <tr><td>点空白</td><td>清空选中集 · 修 `grid.rs:1284-1296` 死逻辑，新增 `out.clear_selection` → `lib.select_none()`</td></tr>
+      <tr><td>右键</td><td>单选该张、无菜单（`photo_ctx` 退役） · M41-UI-05</td></tr>
+      <tr><td>按住拖动 ≥4px</td><td>框选：矩形与 `thumb_rect` 相交即命中；⌘ 拖 = union，否则替换；更新 `anchor` · M41-UI-10</td></tr>
+      <tr><td>单一真相源</td><td>四按钮双态 / 批量标签浮层 / 底栏「已选 N 张」/ 栅格 ✓ 角标共读 `lib.selection`</td></tr>
+      <tr><td>性能红线</td><td>只算当前视口可见格，不遍历全库、不逐张查库、不新增纹理 · R-M41-1/2</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== S5 玻璃态 ==================== -->
+<div class="screen" id="scr-glass">
+  <div class="caption"><b>S5 · 玻璃态四态对照（按 Tessera UI「Fluid Glass / Glass Button」风格重做）</b> —— 参考 <a href="https://tessera-ui.github.io/zhHans/components/fluid_glass.html" target="_blank">Fluid Glass</a> / <a href="https://tessera-ui.github.io/zhHans/components/glass_button.html" target="_blank">Glass Button</a>：半透明染色 + 背景高斯模糊 + 折射扭曲 + 色散 + 边缘多层高光 + 点击水波纹。<b>玻璃后面必须有可透的内容</b>，所以对照区铺一层彩色底（对应实装的「顶栏底图」策略）。</div>
+  <div class="panels">
+    <div class="panel">
+      <h4>四态逐项 <span class="tag m41">M41-UI-06 v1.1</span></h4>
+      <div class="glassstage">
+        <div class="glassrow"><span class="lb">默认</span><span class="gbtn g-default">♥ 收藏</span><span class="fine">白 30% 染色 + `blur(10px) saturate(1.35)` + 顶镜面高光带 + 5 层 inset 高光 + 外阴影 + 左右 RGB 色散边</span></div>
+        <div class="glassrow"><span class="lb">悬停</span><span class="gbtn g-hover">♥ 收藏</span><span class="fine">染色升到 46% + 模糊降到 7px + 亮边 + `translateY(-1px)` + 阴影加深</span></div>
+        <div class="glassrow"><span class="lb">选中</span><span class="gbtn g-sel">♥ 取消收藏</span><span class="fine">中性灰 `#8C8C8C` 半透明 55%（仍可透、玻璃原则）+ `#6E6E6E` 边、图标转白；♥/▣ 双态、排布胶囊当前片 —— <b>v1.2 用户裁决：选中态不用粉色</b></span></div>
+        <div class="glassrow"><span class="lb">禁用</span><span class="gbtn g-dis">＋ 放大</span><span class="fine">白 16% + `text_disabled` + 模糊降 3px + 无阴影（−/+ 端点）</span></div>
+        <div class="glassrow" style="border:none"><span class="lb">改前</span><span class="gbtn g-old">♥ 收藏</span><span class="fine">不透明白圆底 + blur3 α36 阴影 —— 白底上「糊成一片」，默认态最难认</span></div>
+        <div class="glassrow" style="border:none"><span class="lb">水波纹</span><span class="gbtn g-default" id="rippleDemo" style="cursor:pointer">点我 ▸</span><span class="fine">点击从触点扩散的浅色圆（对应 Tessera `RippleState`）</span></div>
+      </div>
+      <div class="note">⚠ 与初版原型的关键差别：初版 `white_alpha(.72)` 叠在<b>纯白工具栏</b>上，背后没有可透内容，半透明等于白、看不出空间感。v1.1 给顶栏铺极淡彩色底图 + 径向光斑，按钮的 `backdrop-filter` 才真的能模糊/折射到东西。</div>
+    </div>
+    <div class="panel">
+      <h4>状态层级与红线</h4>
+      <table class="matrix">
+        <tr><th>状态</th><th>染色</th><th>背景模糊</th><th>边缘 / 阴影</th></tr>
+        <tr><td>默认</td><td>白 30%</td><td>blur 10 + sat 1.35</td><td>亮边 + 暗底边 + 5 层 inset</td></tr>
+        <tr><td>悬停</td><td>白 46%</td><td>blur 7 + sat 1.5</td><td>亮边 + 上浮 1px + 阴影加深</td></tr>
+        <tr><td>按下</td><td>—</td><td>—</td><td>`scale(.94)` + 水波纹扩散</td></tr>
+        <tr><td>选中</td><td><b>灰 55%</b></td><td>blur 10</td><td>`#6E6E6E` 边 + 白图标</td></tr>
+        <tr><td>禁用</td><td>白 16%</td><td>blur 3</td><td>无阴影、无高光</td></tr>
+      </table>
+      <div class="okbox" style="font-size:11px;margin-top:10px">✓ 对比度 ≥ 4.5:1（M32-UI-13）；图标色 `#2A2A2A` 不变；`filter_active` 蓝圆描边、−/+ 端点置灰、tooltip 一律保留</div>
+      <div class="warnbox" style="font-size:11px">⚠ 不启用 `NSVisualEffectView` / vibrancy：沿用 `09` §1.2 自绘观感路线（P-M41-07）。<b>但 v1.1 新增一条实现红线</b>：egui 无 `backdrop-filter`，要在实装侧用「离屏把顶栏底图模糊一次 → 作为纹理贴到按钮 rect」近似折射/模糊，见 §6.2 的 egui 落地方案。</div>
+      <div class="okbox" style="font-size:11px">✓ 模糊底图<b>每帧只生成一次</b>（顶栏尺寸变化/主题切换时失效重算），按钮只贴同一张纹理；滚动 p99 ≤ 25 ms 不回退（R-M41-2）</div>
+    </div>
+  </div>
+  <div class="legend">
+    <b>新增视觉 token（docs/14 §9.2 v1.1，定稿后收录 ui-baseline）</b>
+    <table>
+      <tr><td>glass_tint / hover / disabled / selected</td><td>白 30% / 46% / 16% / <b>灰 55%</b> —— 全部半透明；<b>选中态 v1.2 由淡橙改中性灰</b>（用户裁决）</td></tr>
+      <tr><td>glass_blur</td><td>`blur(10px) saturate(1.35)`（Tessera：高斯模糊 + 轻微色散）；egui 侧 = 预模糊底图纹理</td></tr>
+      <tr><td>glass_inset</td><td>顶白高光 / 底暗边 / 左右侧高光 / 1px 内圈 —— 5 层，模拟玻璃厚度与折射</td></tr>
+      <tr><td>glass_rim / rim_dark</td><td>`white_alpha(.55)` / `black_alpha(.08)`</td></tr>
+      <tr><td>dispersion</td><td>左右两道 `rgba(255,120,120,.22)` / `rgba(120,170,255,.22)` inset 边，近似 Tessera 色散</td></tr>
+      <tr><td>ripple</td><td>点击点扩散的 `rgba(255,255,255,.55)` 圆，0.5s（Tessera `RippleState`）</td></tr>
+      <tr><td>toolbar_underlay</td><td>顶栏极淡渐变彩色底 + 两处径向光斑，<b>玻璃的「可透内容」</b>（本版新增）</td></tr>
+      <tr><td>control_shadow</td><td>blur 3→4、offset [0,1]→[0,4]、叠加 1px 近阴影 · `theme.rs:171-176`</td></tr>
+    </table>
+  </div>
+</div>
+
+</div><!-- /stage -->
+
+<script>
+/* ================= 屏幕切换 ================= */
+const SCREENS=['home','layout','actions','filter','select','glass'];
+function go(id){
+  document.querySelectorAll('.protobar button[data-screen]').forEach(b=>b.classList.toggle('on',b.dataset.screen===id));
+  SCREENS.forEach(s=>document.getElementById('scr-'+s).classList.toggle('active',s===id));
+  if(id==='filter') renderFilterGrid();
+  if(id==='select') renderS4();
+  if(id==='layout') renderCompare();
+}
+document.querySelectorAll('.protobar button[data-screen]').forEach(b=>b.addEventListener('click',()=>go(b.dataset.screen)));
+
+/* ================= 小工具 ================= */
+function toast(el,msg){
+  const t=document.getElementById(el); if(!t)return;
+  t.textContent=msg; t.classList.remove('show'); void t.offsetWidth; t.classList.add('show');
+}
+const NAMES=['IMG_20100314_0930.jpg','京都_清水寺.jpg','DSC_8821.png','扫描件_001.tiff','家庭合影.heic','旅途_042.jpg','海边日落.webp','旧相机里的猫.gif','樱花_2018.raw','夜景_长曝.jpg','证件照.jpg','街角咖啡.png'];
+function cellHTML(i,opt={}){
+  const star=opt.star?'<span class="star">★</span>':'';
+  const tray=opt.tray?'<span class="traydot"></span>':'';
+  const sel=opt.sel?' sel':'';
+  const corner=opt.sel?'<span class="corner">✓</span>':'';
+  return `<div class="cell ${opt.cls||'square'}${sel}" data-i="${i}">${corner}${star}${tray}<span class="fname">${NAMES[i%NAMES.length]}</span></div>`;
+}
+function fill(elid,n,opt){ document.getElementById(elid).innerHTML=Array.from({length:n},(_,i)=>cellHTML(i,opt)).join(''); }
+
+/* ================= S0 主窗口 ================= */
+let homeLayout='grid', homeGlass=true, homeSel=3;
+function renderHome(){
+  const g=document.getElementById('homeGrid');
+  const layouts={grid:'g5',mv:'mv',mh:'mh'};
+  g.className='grid with-names '+layouts[homeLayout];
+  let html='';
+  if(homeLayout==='grid'){
+    g.style.gridTemplateColumns='repeat(6,1fr)'; g.style.gridAutoRows='';
+    for(let i=0;i<30;i++) html+=cellHTML(i,{cls:'square',sel:i<homeSel,star:i===0||i===7,tray:i<2});
+  }else if(homeLayout==='mv'){
+    g.style.gridTemplateColumns='repeat(6,1fr)'; g.style.gridAutoRows='14px';
+    const spans=[6,9,5,8,7,10,5,7,9,6,8,5,9,6,7,10,5,8,6,9,7,5,8,6];
+    html=spans.map((s,i)=>`<div class="cell masonry${i<homeSel?' sel':''}" data-i="${i}" style="grid-row:span ${s};border-radius:8px">${i<homeSel?'<span class="corner">✓</span>':''}${i===0||i===7?'<span class="star">★</span>':''}${i<2?'<span class="traydot"></span>':''}</div>`).join('');
+  }else{
+    g.style.gridTemplateColumns='repeat(6,1fr)'; g.style.gridAutoRows='auto';
+    const spans=[2,3,2,3,2,2,3,2,2,3,2,3,2,2,3,2,3,2];
+    html=spans.map((s,i)=>`<div class="cell masonry${i<homeSel?' sel':''}" data-i="${i}" style="grid-column:span ${s};height:86px;border-radius:8px">${i<homeSel?'<span class="corner">✓</span>':''}${i===0||i===7?'<span class="star">★</span>':''}${i<2?'<span class="traydot"></span>':''}</div>`).join('');
+  }
+  g.innerHTML=html;
+  document.getElementById('homeApp').classList.toggle('flat',!homeGlass);
+  document.getElementById('homeSel').textContent='已选 '+homeSel+' 张';
+  // 双态：homeSel=3 时按「混合」演示（常态），homeSel=0 无选中
+  const fav=document.getElementById('btnFav'), tray=document.getElementById('btnTray');
+  fav.classList.remove('active'); tray.classList.remove('active');
+  fav.title=homeSel===0?'收藏':'收藏'; tray.title='照片托盘 · ⌘H';
+  document.getElementById('trayCount').textContent=homeSel>0?'3':'0';
+  document.getElementById('tagPopN').textContent=Math.max(homeSel,0);
+  document.getElementById('capN').textContent=Math.max(homeSel,0);
+  document.querySelectorAll('#layoutPill span').forEach(s=>s.classList.toggle('on',s.dataset.layout===homeLayout));
+}
+document.getElementById('layoutBtn').addEventListener('click',e=>{
+  const order=['grid','mv','mh'], names={grid:'方格',mv:'纵向瀑布流',mh:'横向瀑布流'};
+  homeLayout=order[(order.indexOf(homeLayout)+1)%3];
+  e.target.textContent='布局：'+names[homeLayout]; renderHome();
+});
+document.getElementById('glassBtn').addEventListener('click',e=>{
+  homeGlass=!homeGlass; e.target.classList.toggle('on',homeGlass);
+  e.target.textContent='玻璃态：'+(homeGlass?'开':'关（改前）'); renderHome();
+});
+/* Tessera RippleState：点玻璃按钮时从触点扩散一圈浅色水波（只在玻璃态开时生效） */
+function spawnRipple(btn,e){
+  if(!homeGlass)return;
+  const r=btn.getBoundingClientRect();
+  const s=document.createElement('span');
+  s.className='ripple';
+  s.style.left=(e.clientX-r.left)+'px'; s.style.top=(e.clientY-r.top)+'px';
+  s.style.width='24px'; s.style.height='24px';
+  btn.appendChild(s);
+  setTimeout(()=>s.remove(),520);
+}
+document.getElementById('homeApp').addEventListener('pointerdown',e=>{
+  const b=e.target.closest('.tbtn'); if(b) spawnRipple(b,e);
+});
+document.getElementById('selBtn').addEventListener('click',e=>{
+  homeSel=homeSel===0?3:0; e.target.textContent='选中集：'+(homeSel?homeSel+' 张':'0 张'); renderHome();
+});
+document.querySelectorAll('#layoutPill span').forEach(s=>s.addEventListener('click',()=>{
+  homeLayout=s.dataset.layout;
+  document.getElementById('layoutBtn').textContent='布局：'+({grid:'方格',mv:'纵向瀑布流',mh:'横向瀑布流'})[homeLayout];
+  renderHome();
+}));
+function hideFloats(){document.getElementById('homeTagPop').classList.add('hidden');document.getElementById('homeCapWin').classList.add('hidden');}
+function actToast(k){
+  if(homeSel===0){ toast('homeToast','请先选择照片'); return; }
+  if(k==='fav'){ const b=document.getElementById('btnFav'); b.classList.toggle('active');
+    toast('homeToast',b.classList.contains('active')?'已取消收藏 '+homeSel+' 张':'已收藏 '+homeSel+' 张'); }
+  else if(k==='tray'){ const b=document.getElementById('btnTray'); b.classList.toggle('active');
+    const inTray=b.classList.contains('active');
+    document.getElementById('trayCount').textContent=inTray?'0':'3';
+    toast('homeToast',inTray?'已移出托盘 '+homeSel+' 张':'已加入托盘 '+homeSel+' 张'); }
+  else if(k==='cap'){ hideFloats(); document.getElementById('homeCapWin').classList.remove('hidden'); }
+  else if(k==='tag'){ hideFloats(); document.getElementById('homeTagPop').classList.remove('hidden'); }
+}
+function toggleTagRow(el){
+  const b=el.querySelector('.box');
+  if(b.classList.contains('on')){b.className='box';b.textContent='';}
+  else {b.className='box on';b.textContent='✓';}
+  toast('homeToast','标签已更新（3 张同步）');
+}
+renderHome();
+
+/* ================= S2 四按钮状态 ================= */
+let scenario='mixed';
+function setScenario(s){
+  scenario=s;
+  const fav=document.getElementById('actFav'),tray=document.getElementById('actTray');
+  fav.classList.remove('active');tray.classList.remove('active');
+  const cap=document.getElementById('actCap'),tag=document.getElementById('actTag');
+  [fav,tray,cap,tag].forEach(b=>b.classList.remove('disabled'));
+  let label='';
+  if(s==='none'){
+    label='无选中（点任意按钮 → toast「请先选择照片」，数据零变化）';
+    [fav,tray,cap,tag].forEach(b=>b.title='请先选择照片');
+  }else if(s==='one'){
+    label='已选 1 张（未收藏 / 未入托盘）→ ♥/▣ 常态，点 → 收藏 / 加入';
+  }else if(s==='allfav'){
+    label='已选 3 张（全已收藏 / 全在托盘）→ ♥/▣ 灰色选中态，点 → 全部取消 / 移出';
+    fav.classList.add('active');tray.classList.add('active');
+    fav.title='取消收藏';tray.title='移出照片托盘';
+  }else{
+    label='已选 3 张（混合：1 张已收藏 / 2 张在托盘）→ ♥/▣ 仍按常态渲染，点 → 全部置为真';
+  }
+  document.getElementById('actScenario').textContent=label;
+  document.getElementById('actExplain').textContent=label;
+}
+document.getElementById('actFav').addEventListener('click',()=>{
+  if(scenario==='none'){toast('homeToast','请先选择照片');return;}
+  const b=document.getElementById('actFav');b.classList.toggle('active');
+  b.title=b.classList.contains('active')?'取消收藏':'收藏';
+});
+document.getElementById('actTray').addEventListener('click',()=>{
+  if(scenario==='none'){toast('homeToast','请先选择照片');return;}
+  const b=document.getElementById('actTray');b.classList.toggle('active');
+  b.title=b.classList.contains('active')?'移出照片托盘':'照片托盘 · ⌘H';
+});
+setScenario('mixed');
+
+/* ================= S3 筛选面板 ================= */
+let pickedTypes=new Set(['gif']);
+function pickType(t){
+  const all=document.querySelector('#typeRow [data-t="all"]');
+  if(t==='all'){ pickedTypes.clear(); }
+  else { if(pickedTypes.has(t))pickedTypes.delete(t); else pickedTypes.add(t); }
+  document.querySelectorAll('#typeRow .toggle').forEach(el=>{
+    const k=el.dataset.t;
+    if(k==='all') el.classList.toggle('on',pickedTypes.size===0);
+    else el.classList.toggle('on',pickedTypes.has(k));
+  });
+  const chip=document.getElementById('filterChip');
+  if(pickedTypes.size===0){chip.classList.add('hidden');document.getElementById('typeNote').textContent='「全部」已选中：类型维度清空，日期 / 尺寸等其他维度保持不变。';}
+  else {chip.classList.remove('hidden');chip.innerHTML='格式 '+[...pickedTypes].join('/').toUpperCase()+' <b>×</b>';
+        document.getElementById('typeNote').textContent='当前：只筛 '+[...pickedTypes].join('/').toUpperCase()+'；点「全部」→ 清空类型维度，日期 / 尺寸等其他维度保持不变。';}
+  document.getElementById('filterMatch').textContent=pickedTypes.size===0?'1 249 张':'1 张';
+  renderFilterGrid();
+}
+function clearAll(){pickedTypes.clear();pickType('all');toast('homeToast','已清除全部筛选');}
+function renderFilterGrid(){ fill('filterGrid',pickedTypes.size===0?10:1,{}); }
+renderFilterGrid();
+
+/* ================= S1 三布局对照 ================= */
+function cmpHTML(container,old,count,spans){
+  const el=document.getElementById(container);
+  let h='';
+  for(let i=0;i<count;i++){
+    const s=spans?spans[i%spans.length]:null;
+    const st=s?`grid-row:span ${s}`:'';
+    h+=`<div class="cmpcell${old?' old':''}" style="${st}"><span class="fn">${NAMES[i%NAMES.length]}</span></div>`;
+  }
+  el.innerHTML=h;
+}
+function renderCompare(){
+  cmpHTML('cmpGridBefore',false,10);
+  cmpHTML('cmpGridAfter',false,10);
+  // 改前用直角样式
+  document.querySelectorAll('#cmpGridBefore .cmpcell').forEach(c=>c.classList.add('old'));
+  cmpHTML('cmpMvBefore',true,12,[6,9,5,8,7,10,5,7,9,6,8,5]);
+  cmpHTML('cmpMvAfter',false,12,[6,9,5,8,7,10,5,7,9,6,8,5]);
+  cmpHTML('cmpMhBefore',true,9,[2,3,2,3,2,2,3,2,2]);
+  cmpHTML('cmpMhAfter',false,9,[2,3,2,3,2,2,3,2,2]);
+  // 横向瀑布流用列跨度
+  ['cmpMhBefore','cmpMhAfter'].forEach(id=>{
+    const spans=[2,3,2,3,2,2,3,2,2];
+    document.querySelectorAll('#'+id+' .cmpcell').forEach((c,i)=>{
+      c.style.gridRow='';c.style.gridColumn='span '+spans[i%spans.length];c.style.height='70px';
+    });
+  });
+  // 纵向瀑布流统一高度基准
+  ['cmpMvBefore','cmpMvAfter'].forEach(id=>{
+    document.querySelectorAll('#'+id+' .cmpcell').forEach(c=>c.style.gridColumn='');
+  });
+}
+
+/* ================= S4 多选 / 框选（可实操） ================= */
+let S4={sel:new Set(),anchor:0,dragging:false,start:null,additive:false,moved:false,suppressClick:false};
+function renderS4(){
+  const g=document.getElementById('s4Grid');
+  let h='';
+  for(let i=0;i<36;i++){
+    const sel=S4.sel.has(i);
+    h+=`<div class="cell square${sel?' sel':''}" data-i="${i}">${sel?'<span class="corner">✓</span>':''}${i===3||i===14?'<span class="star">★</span>':''}<span class="fname">${NAMES[i%NAMES.length]}</span></div>`;
+  }
+  g.innerHTML=h;
+  document.getElementById('s4Sel').textContent='已选 '+S4.sel.size+' 张';
+  document.getElementById('s4TrayCount').textContent=S4.sel.size>0?Math.min(S4.sel.size,9):0;
+  document.getElementById('s4Fav').classList.toggle('active',S4.sel.size>0&&[...S4.sel].every(i=>i===3||i===14));
+  document.getElementById('s4Tray').classList.toggle('active',false);
+}
+function s4Toast(m){toast('s4Toast',m);}
+const area=document.getElementById('s4Area'), grid=document.getElementById('s4Grid'), mq=document.getElementById('s4Marquee');
+function localPos(e){const r=area.getBoundingClientRect();return {x:e.clientX-r.left+area.scrollLeft,y:e.clientY-r.top+area.scrollTop};}
+area.addEventListener('pointerdown',e=>{
+  if(e.button!==0)return;
+  const p=localPos(e);
+  S4.dragging=true;S4.start=p;S4.additive=e.metaKey||e.ctrlKey;S4.moved=false;S4.shift=e.shiftKey;
+  S4.suppressClick=false;
+  mq.style.display='none';
+});
+window.addEventListener('pointermove',e=>{
+  if(!S4.dragging)return;
+  const p=localPos(e);
+  const dx=p.x-S4.start.x,dy=p.y-S4.start.y;
+  if(!S4.moved&&Math.hypot(dx,dy)<4)return;
+  S4.moved=true;
+  // mq 是 gridarea（滚动容器）内的绝对定位子元素，随内容一起滚动，
+  // 因此用「内容坐标」直接定位，与 commitMarquee 里 cell 的内容坐标同一基准。
+  mq.style.display='block';
+  mq.style.left=Math.min(S4.start.x,p.x)+'px';mq.style.top=Math.min(S4.start.y,p.y)+'px';
+  mq.style.width=Math.abs(dx)+'px';mq.style.height=Math.abs(dy)+'px';
+});
+window.addEventListener('pointerup',e=>{
+  if(!S4.dragging)return;
+  S4.dragging=false;mq.style.display='none';
+  if(S4.moved){S4.suppressClick=true;commitMarquee(localPos(e));}
+});
+function commitMarquee(end){
+  const r1={x1:Math.min(S4.start.x,end.x),y1:Math.min(S4.start.y,end.y),x2:Math.max(S4.start.x,end.x),y2:Math.max(S4.start.y,end.y)};
+  const ar=area.getBoundingClientRect();
+  const hit=new Set();
+  grid.querySelectorAll('.cell').forEach(c=>{
+    const cr=c.getBoundingClientRect();
+    const b={x1:cr.left-ar.left+area.scrollLeft,y1:cr.top-ar.top+area.scrollTop,x2:cr.right-ar.left+area.scrollLeft,y2:cr.bottom-ar.top+area.scrollTop};
+    if(b.x1<r1.x2&&b.x2>r1.x1&&b.y1<r1.y2&&b.y2>r1.y1) hit.add(+c.dataset.i);
+  });
+  if(S4.additive){hit.forEach(i=>S4.sel.add(i));}
+  else {S4.sel=hit;}
+  if(hit.size) S4.anchor=Math.max(...hit);
+  renderS4();
+  s4Toast((S4.additive?'追加':'框选')+'命中 '+hit.size+' 张 · 已选 '+S4.sel.size+' 张');
+}
+grid.addEventListener('click',e=>{
+  if(S4.suppressClick){S4.suppressClick=false;return;}  // 刚结束的拖框不回落成单击
+  const c=e.target.closest('.cell'); if(!c)return;
+  const i=+c.dataset.i;
+  if(e.shiftKey){const a=Math.min(S4.anchor,i),b=Math.max(S4.anchor,i);S4.sel=new Set();for(let k=a;k<=b;k++)S4.sel.add(k);}
+  else if(e.metaKey||e.ctrlKey){if(S4.sel.has(i))S4.sel.delete(i);else S4.sel.add(i);S4.anchor=i;}
+  else {S4.sel=new Set([i]);S4.anchor=i;}
+  renderS4();
+});
+grid.addEventListener('dblclick',()=>s4Toast('双击 → 打开查看器（选中集不变）'));
+grid.addEventListener('contextmenu',e=>{
+  e.preventDefault();const c=e.target.closest('.cell');if(!c)return;
+  const i=+c.dataset.i;S4.sel=new Set([i]);S4.anchor=i;renderS4();
+  s4Toast('右键 → 单选该张（不再弹出菜单）· M41-UI-05');
+});
+area.addEventListener('click',e=>{
+  if(S4.suppressClick){S4.suppressClick=false;return;}
+  if(e.target===area||e.target===grid){S4.sel.clear();renderS4();s4Toast('点空白 → 清空选中集');}
+});
+area.addEventListener('contextmenu',e=>{if(e.target===area||e.target===grid){e.preventDefault();S4.sel.clear();renderS4();}});
+renderS4();
+renderCompare();
+
+/* ================= S5 水波纹演示 ================= */
+document.getElementById('rippleDemo').addEventListener('pointerdown',e=>{
+  const b=e.currentTarget, r=b.getBoundingClientRect();
+  const s=document.createElement('span');
+  s.className='ripple';
+  s.style.left=(e.clientX-r.left)+'px'; s.style.top=(e.clientY-r.top)+'px';
+  s.style.width='24px'; s.style.height='24px';
+  b.appendChild(s);
+  setTimeout(()=>s.remove(),520);
+});
+</script>
+</body>
+</html>
