@@ -16,7 +16,7 @@ use eframe::egui::{self, Color32, Pos2, Ui};
 
 use picasa_core::ViewMode;
 
-pub use crate::topbar::{MoreAction, TopbarAction, TopbarOutput};
+pub use crate::topbar::{MoreAction, ObjectActionState, TopbarAction, TopbarOutput};
 
 /// 顶栏（转调 [`crate::topbar::show`]）。
 ///
@@ -41,6 +41,8 @@ pub fn show(
     zoom_max: bool,
     // 左栏当前宽度（左段右缘与文件夹树右缘对齐，M32-UI-01/02 v1.3）
     sidebar_w: f32,
+    // M4.1：四个对象操作按钮的双态判定
+    obj: crate::topbar::ObjectActionState,
 ) -> TopbarOutput {
     crate::topbar::show(
         ui,
@@ -55,6 +57,7 @@ pub fn show(
         zoom_min,
         zoom_max,
         sidebar_w,
+        obj,
     )
 }
 
@@ -78,18 +81,18 @@ pub fn more_menu(
 }
 
 /// 筛选面板的动作（M3.1 起与顶栏动作解耦，避免枚举递归）。
+///
+/// M4.1 `M41-UI-08`：删掉 `BatchStar` / `BatchAddTag` —— 筛选面板只管「查什么」，
+/// 「对选中集做什么」全部收进工具栏 ♥ / ⌗ 按钮。
 #[derive(Clone, Debug)]
 pub enum FilterPanelAction {
     Apply(Box<picasa_db::PhotoFilter>),
     Clear,
-    BatchStar(bool),
-    BatchAddTag,
 }
 
 /// 筛选弹出面板（M4 #5/#9：日期 / 类型 / 尺寸 / 标签 / 收藏）。
 ///
-/// 面板自己维护草稿（`draft_tag`），点「应用」才把整包 [`picasa_db::PhotoFilter`]
-/// 交给 App 提交——每点一个勾就重查全库会让筛选面板变得不可用。
+/// M4.1 `M41-UI-07`：类型组首位新增「全部」；`M41-UI-08`：删除两段批量操作 UI。
 /// 返回 `(可能的动作, 草稿标签回写)`——标签输入框的内容要跨帧保存在 App 里。
 ///
 /// M3.1 起观感改为 macOS 弹层（白卡、圆角 8、柔影），交互不变。
@@ -98,7 +101,6 @@ pub fn filter_menu(
     at: Pos2,
     current: &picasa_db::PhotoFilter,
     draft_tag: &mut String,
-    has_selection: bool,
 ) -> (Option<FilterPanelAction>, String) {
     let mut action = None;
     let mut tag_out = draft_tag.clone();
@@ -143,8 +145,14 @@ pub fn filter_menu(
                     }
 
                     // ---- 类型 ----
+                    // M4.1 `M41-UI-07`：首位「全部」只清空类型维度，不动其他维度。
                     ui.label("类型");
                     ui.horizontal_wrapped(|ui| {
+                        let mut all = draft.formats.is_empty();
+                        if ui.toggle_value(&mut all, "全部").clicked() && all {
+                            draft.formats.clear();
+                            action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
+                        }
                         for (slug, label) in [
                             ("jpeg", "JPEG"),
                             ("png", "PNG"),
@@ -263,31 +271,14 @@ pub fn filter_menu(
                         }
                     });
 
+                    // M4.1 `M41-UI-08`：批量收藏 / 批量打标签已移到工具栏 ♥ / ⌗ 按钮，
+                    // 筛选面板只保留「清除全部筛选」（清所有维度）。
                     ui.separator();
                     ui.horizontal(|ui| {
                         if ui.button("清除全部筛选").clicked() {
                             action = Some(FilterPanelAction::Clear);
                         }
-                        if has_selection {
-                            ui.separator();
-                            ui.label("对所选：");
-                            if ui.button("★ 收藏").clicked() {
-                                action = Some(FilterPanelAction::BatchStar(true));
-                            }
-                            if ui.button("☆ 取消").clicked() {
-                                action = Some(FilterPanelAction::BatchStar(false));
-                            }
-                        }
                     });
-                    if has_selection {
-                        ui.horizontal(|ui| {
-                            ui.label("批量标签：");
-                            ui.text_edit_singleline(&mut tag_out);
-                            if ui.button("打标签").clicked() {
-                                action = Some(FilterPanelAction::BatchAddTag);
-                            }
-                        });
-                    }
                 });
         });
     (action, tag_out)

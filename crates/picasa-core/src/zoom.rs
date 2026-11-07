@@ -39,10 +39,12 @@ pub const CELL_MAX_PX: f32 = 512.0;
 /// 档位边界是 [`tier_boundaries`]。
 pub const SNAP_POINTS: [f32; 3] = [48.0, 128.0, 256.0];
 
-/// 默认刻度（`07-A` §2.3：`⌘0` 回到它；P-57 后取 128 = 原 M 档）。
+/// 默认刻度（`07-A` §2.3：`⌘0` 回到它）。
 ///
-/// ⚠️ 原版默认值仍需 PM 量图（`08-D` §A-2.1「默认 128 ⚠️」）。
-pub const DEFAULT_CELL_PX: f32 = 128.0;
+/// M4.1 `M41-UI-03`：由 128 降到 **96**，让全新库 / `⌘0` 复位时一屏能看到更多行
+/// （行距 162 → 121 px）。96 本就在 [`LOG_STEPS`] 里，不新增档位。
+/// 老用户已保存的 `grid_cell_px` 偏好仍优先（`ZoomState::from_setting`），不会被覆盖。
+pub const DEFAULT_CELL_PX: f32 = 96.0;
 
 /// 拖到刻度点附近多少 px 内就吸附。
 pub const TIER_SNAP_PX: f32 = 6.0;

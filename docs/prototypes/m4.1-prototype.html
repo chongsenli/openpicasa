@@ -584,7 +584,7 @@
 
 <!-- ==================== S5 玻璃态 ==================== -->
 <div class="screen" id="scr-glass">
-  <div class="caption"><b>S5 · 玻璃态四态对照（按 Tessera UI「Fluid Glass / Glass Button」风格重做）</b> —— 参考 <a href="https://tessera-ui.github.io/zhHans/components/fluid_glass.html" target="_blank">Fluid Glass</a> / <a href="https://tessera-ui.github.io/zhHans/components/glass_button.html" target="_blank">Glass Button</a>：半透明染色 + 背景高斯模糊 + 折射扭曲 + 色散 + 边缘多层高光 + 点击水波纹。<b>玻璃后面必须有可透的内容</b>，所以对照区铺一层彩色底（对应实装的「顶栏底图」策略）。</div>
+  <div class="caption"><b>S5 · 玻璃态对照（⚠️ v1.7 已回退，本屏仅作历史设计记录）</b> —— 用户实机评审「太丑了」，按钮样式已整体回退到 M4 白圆底 + 淡阴影。以下玻璃规格不再代表当前实装。<br>按 Tessera UI「Fluid Glass / Glass Button」风格复刻 · v1.6 真算法加强</b> —— 参考 <a href="https://tessera-ui.github.io/zhHans/components/fluid_glass.html" target="_blank">Fluid Glass</a> / <a href="https://tessera-ui.github.io/zhHans/components/glass_button.html" target="_blank">Glass Button</a>：半透明染色 + 背景高斯模糊 + 折射扭曲 + 色散 + 边缘多层高光 + 点击水波纹。<b>玻璃后面必须有可透的内容</b>，所以对照区铺一层彩色底（沿用 Tessera 动图的红底做教学对照）；<b>v1.4 实装已改为中性灰白 + 真高斯模糊纹理</b>（用户要求去掉彩色工具栏背景）。</div>
   <div class="panels">
     <div class="panel">
       <h4>四态逐项 <span class="tag m41">M41-UI-06 v1.1</span></h4>
@@ -596,7 +596,7 @@
         <div class="glassrow" style="border:none"><span class="lb">改前</span><span class="gbtn g-old">♥ 收藏</span><span class="fine">不透明白圆底 + blur3 α36 阴影 —— 白底上「糊成一片」，默认态最难认</span></div>
         <div class="glassrow" style="border:none"><span class="lb">水波纹</span><span class="gbtn g-default" id="rippleDemo" style="cursor:pointer">点我 ▸</span><span class="fine">点击从触点扩散的浅色圆（对应 Tessera `RippleState`）</span></div>
       </div>
-      <div class="note">⚠ 与初版原型的关键差别：初版 `white_alpha(.72)` 叠在<b>纯白工具栏</b>上，背后没有可透内容，半透明等于白、看不出空间感。v1.1 给顶栏铺极淡彩色底图 + 径向光斑，按钮的 `backdrop-filter` 才真的能模糊/折射到东西。</div>
+      <div class="note">⚠ 与初版原型的关键差别：初版 `white_alpha(.72)` 叠在<b>纯白工具栏</b>上，背后没有可透内容，半透明等于白、看不出空间感。<b>v1.4 实装</b>：去掉彩色底，改由 `glass.rs` 生成 1/4 分辨率中性灰白图 → 3×box blur → `TextureHandle` 缓存 → 按钮贴 UV 子矩形；CSS 侧仍用 `backdrop-filter` 演示等效观感。点击水波纹在 v1.4 也已实装（`Ripple` 存 `IdTypeMap`，0.5s）。</div>
     </div>
     <div class="panel">
       <h4>状态层级与红线</h4>
@@ -620,9 +620,12 @@
       <tr><td>glass_blur</td><td>`blur(10px) saturate(1.35)`（Tessera：高斯模糊 + 轻微色散）；egui 侧 = 预模糊底图纹理</td></tr>
       <tr><td>glass_inset</td><td>顶白高光 / 底暗边 / 左右侧高光 / 1px 内圈 —— 5 层，模拟玻璃厚度与折射</td></tr>
       <tr><td>glass_rim / rim_dark</td><td>`white_alpha(.55)` / `black_alpha(.08)`</td></tr>
-      <tr><td>dispersion</td><td>左右两道 `rgba(255,120,120,.22)` / `rgba(120,170,255,.22)` inset 边，近似 Tessera 色散</td></tr>
-      <tr><td>ripple</td><td>点击点扩散的 `rgba(255,255,255,.55)` 圆，0.5s（Tessera `RippleState`）</td></tr>
-      <tr><td>toolbar_underlay</td><td>顶栏极淡渐变彩色底 + 两处径向光斑，<b>玻璃的「可透内容」</b>（本版新增）</td></tr>
+      <tr><td>dispersion (v1.6)</td><td><b>7 档 R/O/Y/G/C/B/P</b> 分通道，按 `chroma_multiplier=1.1` 偏移（照抄 Tessera `glass.wgsl`）</td></tr>
+      <tr><td>refraction (v1.6)</td><td><b>SDF 圆角矩形梯度法线 + `circle_map` + `eccentric_factor=0.2`</b> 网格切片逐格 UV 偏移（照抄 Tessera 折射算法）</td></tr>
+      <tr><td>ripple</td><td>点击点扩散的浅色圆，<b>600ms</b> 线性扩散、`(1-p)*0.3` 淡出（对齐 Tessera `RippleState`）</td></tr>
+      <tr><td>press (v1.5)</td><td>绘制 rect `scale(.94)`，交互 rect 不变</td></tr>
+      <tr><td>glass_underlay (v1.4)</td><td><b>中性灰白</b> CPU `ColorImage`（1/4 分辨率）→ 3×box blur → `TextureHandle`，按 `GlassKey` 缓存；<b>彩色工具栏背景已去掉</b></td></tr>
+      <tr><td>uv_for_button / ripple</td><td>按钮 UV 子矩形（clamp 0..1）；`Ripple{at,start}` 0.5s 扩散淡出，存活期才重绘</td></tr>
       <tr><td>control_shadow</td><td>blur 3→4、offset [0,1]→[0,4]、叠加 1px 近阴影 · `theme.rs:171-176`</td></tr>
     </table>
   </div>

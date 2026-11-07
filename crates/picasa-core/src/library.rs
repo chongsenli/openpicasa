@@ -809,6 +809,14 @@ impl Library {
         self.db()?.all_tags().map_err(CoreError::from)
     }
 
+    /// M4.1 `M41-UI-08`：一次查库拿到「带某标签的全部照片 id」。
+    ///
+    /// 批量标签浮层用它算「选中集里有多少张带此标签」，避免对每个标签 ×
+    /// 每个选中 id 各查一次 `tags_of`（选中 3 万张时会退化成几十万次查询）。
+    pub fn ids_with_tag(&self, label: &str) -> Result<Vec<i64>> {
+        self.db()?.ids_with_tag(label).map_err(CoreError::from)
+    }
+
     /// 时间轴：按拍摄年份的计数（左栏时间轴分组用）。
     pub fn timeline_years(&self) -> Result<Vec<(i32, i64)>> {
         self.db()?.timeline_years().map_err(CoreError::from)

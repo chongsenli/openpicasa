@@ -121,25 +121,14 @@ pub struct OpenPicasaApp {
     tags_collapsed: bool,
     albums_collapsed: bool,
     folder_ctx: Option<(String, Pos2)>,
-    /// 照片右键菜单：(photo_id, 当前是否收藏, 屏幕位置)
-    photo_ctx: Option<(i64, bool, Pos2)>,
-    /// 照片右键菜单**在哪一帧打开**。
-    /// ⚠️ 必须记这个，理由同 `folder_ctx_frame`：右键释放帧里
-    /// `secondary_clicked()` 与 `pointer.any_click()` 同时为真，不豁免就会
-    /// 「刚画出来就被自己关掉」——用户看到的就是「右键没任何反应」。
-    photo_ctx_frame: u64,
-    /// 说明编辑窗口打开中（photo_id）
+    /// M4.1：说明编辑窗口（`Some(-1)` = 多选集模式；否则为单张 photo_id）
     caption_editor: Option<i64>,
-    /// 标签编辑窗口打开中（photo_id）
+    /// M4.1：批量标签浮层（`Some(-1)` = 选中集模式）
     tag_editor: Option<i64>,
     /// 编辑框草稿
     caption_buf: String,
     tag_buf: String,
-    /// 右键菜单是在**哪一帧**打开的。
-    /// 必须记这个：右键释放的那一帧里，`secondary_clicked()` 与 `pointer.any_click()`
-    /// **同时**为真（egui 的 click 就是在 release 时判定）。菜单在 `draw_library`
-    /// 里被设好、在 `draw_overlays` 里画出来，紧接着同一个 `draw_overlays` 的
-    /// 「点别处就关」逻辑就把它清掉了——于是菜单只活了一帧，看起来就是「弹不出来」。
+    /// 文件夹右键菜单在哪一帧打开（打开帧豁免，避免「刚画出来就被自己关掉」）。
     folder_ctx_frame: u64,
     /// 「底层数据变了，界面该重载」的脏标记。
     ///
@@ -312,8 +301,6 @@ impl OpenPicasaApp {
             tags_collapsed: false,
             albums_collapsed: false,
             folder_ctx: None,
-            photo_ctx: None,
-            photo_ctx_frame: u64::MAX,
             caption_editor: None,
             tag_editor: None,
             caption_buf: String::new(),
@@ -1792,6 +1779,96 @@ impl OpenPicasaApp {
         }
     }
 
+    // ------------------------------------------------------------------
+    // M4.1 `M41-UI-01`：工具栏四枚对象操作钮（全部作用于当前 `lib.selection`）
+    // ------------------------------------------------------------------
+
+    /// 无选中时的统一提示（四个按钮共用，不隐藏、不置灰——功能已实装，
+    /// 只是条件不满足；`10` M32-UI-02「不放假入口」）。
+    fn need_selection(&mut self) -> bool {
+        if self.lib.selection.is_empty() {
+            self.lib.toast = Some(("请先选择照片".into(), 2.0));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// ♥ 收藏：选中集全已收藏 → 取消；否则（含混合态）→ 全部收藏。
+    fn object_favorite(&mut self) {
+        if self.need_selection() {
+            return;
+        }
+        let all = self
+            .lib
+            .photos
+            .iter()
+            .filter(|p| self.lib.selection.contains(&p.id))
+            .all(|p| p.starred);
+        let on = !all;
+        match self.lib.batch_set_starred(on) {
+            Ok(n) if n > 0 => {
+                self.lib.toast = Some((
+                    format!("{} {n} 张", if on { "已收藏" } else { "已取消收藏" }),
+                    2.0,
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "切换收藏失败"),
+        }
+    }
+
+    /// ⓘ 说明：打开多选版「照片说明」窗口（预填单张已有说明）。
+    fn object_caption(&mut self) {
+        if self.need_selection() {
+            return;
+        }
+        // 单张时预填已有说明；多选时留空（不把第一张的说明误灌给其余张）。
+        self.caption_buf = if self.lib.selection.len() == 1 {
+            let id = *self.lib.selection.iter().next().unwrap_or(&0);
+            self.lib.caption_of(id).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        self.caption_editor = Some(-1); // -1 = 多选集模式（作用在 lib.selection）
+    }
+
+    /// ⌗ 标签：打开批量标签浮层（复用 tag_editor，语义改为「选中集」）。
+    fn object_tag(&mut self) {
+        if self.need_selection() {
+            return;
+        }
+        self.tag_buf.clear();
+        self.tag_editor = Some(-1);
+    }
+
+    /// ▣ 照片托盘：选中集全在托盘 → 全部移出；否则 → 全部加入。
+    fn object_tray(&mut self) {
+        if self.need_selection() {
+            return;
+        }
+        let all = self
+            .lib
+            .selection
+            .iter()
+            .all(|id| self.lib.tray.contains(id));
+        let ids: Vec<i64> = self.lib.selection.iter().copied().collect();
+        if all {
+            for id in &ids {
+                self.lib.tray_remove(*id);
+            }
+            self.tray_rows_dirty = true;
+            self.lib.toast = Some((format!("已移出托盘 {} 张", ids.len()), 2.0));
+        } else {
+            let n = self.lib.to_tray();
+            if n > 0 {
+                self.tray_expanded = true;
+                self.tray_rows_dirty = true;
+            }
+            self.lib.toast = Some((format!("已加入托盘 {n} 张"), 2.0));
+        }
+    }
+
     fn apply_viewer_key(&mut self, action: KeyAction, ctx: &egui::Context) {
         // 翻页 / 退出要改选择集，不能同时借着 viewer。
         match action {
@@ -1942,6 +2019,23 @@ impl OpenPicasaApp {
                 // 标题与副标题已移到中区左侧（文件树之上）。
                 let zoom_min = picasa_core::at_log_bound(self.zoom.cell_px(), -1);
                 let zoom_max = picasa_core::at_log_bound(self.zoom.cell_px(), 1);
+                // M4.1 `M41-UI-01`：四个对象操作按钮的双态判定，只读内存、不查库。
+                let obj = toolbar::ObjectActionState {
+                    has_selection: !self.lib.selection.is_empty(),
+                    all_favorite: !self.lib.selection.is_empty()
+                        && self
+                            .lib
+                            .photos
+                            .iter()
+                            .filter(|p| self.lib.selection.contains(&p.id))
+                            .all(|p| p.starred),
+                    all_in_tray: !self.lib.selection.is_empty()
+                        && self
+                            .lib
+                            .selection
+                            .iter()
+                            .all(|id| self.lib.tray.contains(id)),
+                };
                 let out = toolbar::show(
                     ui,
                     &theme,
@@ -1965,6 +2059,7 @@ impl OpenPicasaApp {
                     } else {
                         Metrics::SIDEBAR_DEFAULT_W
                     },
+                    obj,
                 );
                 if let Some(rect) = out.sort_button {
                     self.sort_menu_pos = rect.left_bottom() + vec2(0.0, 2.0);
@@ -2078,6 +2173,11 @@ impl OpenPicasaApp {
                         TopbarAction::More(_) => {
                             tracing::warn!("菜单动作应只在 draw_overlays 消费");
                         }
+                        // ---- M4.1 `M41-UI-01`：四枚对象操作钮 ----
+                        TopbarAction::Favorite => self.object_favorite(),
+                        TopbarAction::Caption => self.object_caption(),
+                        TopbarAction::Tag => self.object_tag(),
+                        TopbarAction::Tray => self.object_tray(),
                     }
                 }
             });
@@ -2261,14 +2361,27 @@ impl OpenPicasaApp {
                 if let Some(index) = out.opened {
                     self.open_viewer(index);
                 }
-                if let Some((index, pos)) = out.context {
+                // M4.1 `M41-UI-05`：照片右键菜单退役 —— 右键只单选该张，
+                // 不再弹菜单；收藏/说明/标签全部由工具栏四按钮承接。
+                if let Some((index, _pos)) = out.context {
                     self.lib.click_select(index, false, false);
                     self.folder_ctx = None;
-                    // M4：照片右键菜单（收藏 / 说明 / 标签）
-                    if let Some(row) = self.lib.photos.get(index) {
-                        self.photo_ctx = Some((row.id, row.starred, pos));
-                        self.photo_ctx_frame = ctx.cumulative_frame_nr();
+                }
+                // M4.1 `M41-UI-09/10`：点空白清空 / 框选命中集。
+                if let Some(hit) = out.marquee {
+                    if hit.additive {
+                        for id in hit.ids {
+                            self.lib.selection.insert(id);
+                        }
+                    } else {
+                        self.lib.selection = hit.ids.into_iter().collect();
                     }
+                    if let Some(a) = hit.anchor_index {
+                        self.lib.anchor = Some(a);
+                    }
+                    self.anchor_id = None;
+                } else if out.clear_selection {
+                    self.lib.select_none();
                 }
             });
     }
@@ -2613,103 +2726,51 @@ impl OpenPicasaApp {
             }
         }
 
-        // 照片右键菜单（M4：收藏 / 说明 / 标签）
-        // 关闭豁免判定抽成纯函数（见文件尾 context_menu_open_frame_exempt），便于单测。
-        if let Some((photo_id, starred, pos)) = self.photo_ctx {
-            let mut close = false;
-            let mut action: Option<PhotoCtxAction> = None;
-            let area = egui::Area::new(egui::Id::unique("photo-ctx-menu"))
-                .fixed_pos(pos)
-                .order(egui::Order::Foreground)
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::new()
-                        .fill(egui::Color32::WHITE)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(0xC0)))
-                        .corner_radius(3.0)
-                        .inner_margin(egui::Margin::same(4))
-                        .shadow(egui::epaint::Shadow {
-                            offset: [1, 2],
-                            blur: 6,
-                            spread: 0,
-                            color: egui::Color32::from_black_alpha(40),
-                        })
-                        .show(ui, |ui| {
-                            let star_label = if starred {
-                                "☆ 取消收藏"
-                            } else {
-                                "★ 收藏"
-                            };
-                            if ui.button(star_label).clicked() {
-                                action = Some(PhotoCtxAction::ToggleStar);
-                            }
-                            if ui.button("说明…").clicked() {
-                                action = Some(PhotoCtxAction::EditCaption);
-                            }
-                            if ui.button("标签…").clicked() {
-                                action = Some(PhotoCtxAction::EditTags);
-                            }
-                        });
-                });
-            if let Some(act) = action {
-                match act {
-                    PhotoCtxAction::ToggleStar => {
-                        match self.lib.batch_set_starred_ids(vec![photo_id], !starred) {
-                            Ok(_) => {}
-                            Err(e) => tracing::warn!(error = %e, "切换收藏失败"),
-                        }
-                        close = true;
-                    }
-                    PhotoCtxAction::EditCaption => {
-                        self.caption_editor = Some(photo_id);
-                        close = true;
-                    }
-                    PhotoCtxAction::EditTags => {
-                        self.tag_editor = Some(photo_id);
-                        close = true;
-                    }
-                }
-            }
-            // 关闭规则（三条，顺序与 folder_ctx 一致）：
-            //   1. 点了菜单项 → 关
-            //   2. 本帧刚打开 → **豁免**。右键释放帧里 `secondary_clicked()` 与
-            //      `pointer.any_click()` 同时为真，不豁免就会「刚画出来就被自己关掉」
-            //      —— 这正是「照片右键没有任何反应」的根因。
-            //   3. 点击落在菜单矩形外 → 关。用 Area 实测矩形，不猜尺寸。
-            let opened_this_frame =
-                context_menu_open_frame_exempt(self.photo_ctx_frame, ctx.cumulative_frame_nr());
-            if !opened_this_frame && !close {
-                let menu_rect = area.response.rect;
-                let clicked_outside = ctx.input(|i| i.pointer.any_click())
-                    && ctx
-                        .input(|i| i.pointer.interact_pos())
-                        .is_some_and(|p| !menu_rect.contains(p));
-                if clicked_outside {
-                    close = true;
-                }
-            }
-            if close {
-                self.photo_ctx = None;
-            }
-        }
+        // M4.1 `M41-UI-05`：照片右键菜单已退役（收藏/说明/标签全部收进工具栏四按钮）。
+        // 右键改为「单选该张」，不弹任何菜单；`folder_ctx` 的打开帧豁免机制保留。
 
-        // 说明编辑窗口（M4 #8：说明只存应用库）
-        if let Some(photo_id) = self.caption_editor {
+        // M4.1 `M41-UI-01`：说明窗口（多选版）。`caption_editor = Some(-1)` 表示
+        // 作用于整个 `lib.selection`；`Some(id)` 保留单张语义（兼容既有调用）。
+        if let Some(target) = self.caption_editor {
+            let multi = target == -1;
+            let n = if multi { self.lib.selection.len() } else { 1 };
+            let title = if multi {
+                format!("照片说明（{n} 张）")
+            } else {
+                "照片说明".to_string()
+            };
             let mut open = true;
-            egui::Window::new("照片说明")
+            egui::Window::new(&title)
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .order(egui::Order::Foreground)
                 .show(ui, |ui| {
                     ui.text_edit_multiline(&mut self.caption_buf);
+                    if multi {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "将保存到选中的 {n} 张照片（只写应用索引，不改原图）"
+                            ))
+                            .size(11.0)
+                            .color(egui::Color32::GRAY),
+                        );
+                    }
                     ui.horizontal(|ui| {
                         if ui.button("保存").clicked() {
-                            if let Err(e) = self.lib.set_caption(photo_id, &self.caption_buf) {
-                                tracing::warn!(error = %e, "保存说明失败");
+                            let ids: Vec<i64> = if multi {
+                                self.lib.selection.iter().copied().collect()
                             } else {
-                                self.lib.toast = Some(("说明已保存".into(), 2.0));
-                                self.caption_editor = None; // 直接关闭，绕开 open 的借用
+                                vec![target]
+                            };
+                            let mut ok = 0usize;
+                            for id in &ids {
+                                if self.lib.set_caption(*id, &self.caption_buf).is_ok() {
+                                    ok += 1;
+                                }
                             }
+                            self.lib.toast = Some((format!("已保存 {ok} 张说明"), 2.0));
+                            self.caption_editor = None; // 直接关闭，绕开 open 的借用
                         }
                     });
                 });
@@ -2718,70 +2779,106 @@ impl OpenPicasaApp {
             }
         }
 
-        // 标签编辑窗口（M4 #8：标签只存应用库）
-        if let Some(photo_id) = self.tag_editor {
+        // M4.1 `M41-UI-01/08`：批量标签浮层（多选集）。`tag_editor = Some(-1)`。
+        // 列表来自 `lib.all_tags()`；勾选状态按「选中集里有多少张带此标签」分三态。
+        if let Some(_target) = self.tag_editor {
+            let ids: Vec<i64> = self.lib.selection.iter().copied().collect();
+            let n = ids.len();
+            let all_tags = self.lib.all_tags().unwrap_or_default();
+            // M4.1：每个标签只查一次库（ids_with_tag），与选中集求交集得三态，
+            // 避免 O(标签数 × 选中集大小) 次 tags_of 查询（R-M41-1）。
+            let ids_set: std::collections::HashSet<i64> = ids.iter().copied().collect();
+            // M4.1：每个标签只查一次库（ids_with_tag），与选中集求交集得三态，
+            // 避免 O(标签数 × 选中集大小) 次 tags_of 查询（R-M41-1）。
+            let tag_counts: std::collections::HashMap<String, usize> = all_tags
+                .iter()
+                .map(|(label, _)| {
+                    let with = self
+                        .lib
+                        .ids_with_tag(label)
+                        .map(|tagged| tagged.iter().filter(|id| ids_set.contains(id)).count())
+                        .unwrap_or(0);
+                    (label.clone(), with)
+                })
+                .collect();
             let mut open = true;
-            let existing = self.lib.tags_of(photo_id).unwrap_or_default();
-            egui::Window::new("照片标签")
+            let mut changed = false;
+            let mut toast_msg: Option<String> = None;
+            egui::Window::new(if n > 1 { format!("批量标签 · {n} 张照片") } else { "批量标签".into() })
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .order(egui::Order::Foreground)
                 .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for t in &existing {
-                            if ui
-                                .button(format!("{t} ×"))
-                                .on_hover_text("点击移除这个标签")
-                                .clicked()
-                            {
-                                let _ = self.lib.batch_remove_tag_id(photo_id, t);
+                    for (label, _count) in &all_tags {
+                        let with = *tag_counts.get(label).unwrap_or(&0);
+                        let mark = if with == n && n > 0 {
+                            "☑"
+                        } else if with > 0 {
+                            "▣"
+                        } else {
+                            "☐"
+                        };
+                        if ui.button(format!("{mark} {label}")).clicked() {
+                            if with == n && n > 0 {
+                                if let Ok(k) = self.lib.batch_remove_tag(label) { changed |= k > 0; }
+                            } else if let Ok(k) = self.lib.batch_add_tag(label) {
+                                changed |= k > 0;
+                                toast_msg = Some(format!("已为 {k} 张打上「{label}」"));
                             }
                         }
-                        if existing.is_empty() {
-                            ui.label("（还没有标签）");
-                        }
-                    });
+                    }
+                    if all_tags.is_empty() {
+                        ui.label("（还没有标签，可在下方新建）");
+                    }
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(&mut self.tag_buf);
-                        if ui.button("添加").clicked() {
+                        if ui.button("新建并添加").clicked() {
                             let label = self.tag_buf.trim().to_string();
                             if !label.is_empty() {
-                                let _ = self.lib.batch_add_tag_id(photo_id, &label);
+                                if let Ok(k) = self.lib.batch_add_tag(&label) {
+                                    changed |= k > 0;
+                                    toast_msg = Some(format!("已为 {k} 张打上「{label}」"));
+                                }
                                 self.tag_buf.clear();
                             }
                         }
                     });
+                    ui.label(
+                        egui::RichText::new("取消勾选 = 从选中集同步移除该标签")
+                            .size(11.0)
+                            .color(egui::Color32::GRAY),
+                    );
                 });
+            if changed {
+                self.sidebar_groups_dirty = true;
+            }
+            if let Some(m) = toast_msg {
+                self.lib.toast = Some((m, 2.0));
+            }
             if !open {
                 self.tag_editor = None;
             }
         }
 
-        // 筛选面板（日期/类型/尺寸/标签/收藏 + 批量操作）
+        // M4.1 `M41-UI-08`：筛选面板只管「查什么」；批量收藏 / 批量标签
+        // 已收进工具栏 ♥ / ⌗ 按钮，这里不再有批量操作分支。
         if self.filter_menu_open && self.viewer.is_none() {
             let current = self.lib.filter.clone().unwrap_or_default();
-            let has_selection = !self.lib.selection.is_empty();
-            let (action, tag_out) = toolbar::filter_menu(
+            let (action, _tag_out) = toolbar::filter_menu(
                 ui,
                 self.filter_menu_pos,
                 &current,
                 &mut self.filter_draft_tag,
-                has_selection,
             );
-            if tag_out != self.filter_draft_tag {
-                // 文本框的实时回写已发生在 &mut 借用里，这里无需处理
-            }
             if let Some(action) = action {
                 match action {
                     FilterPanelAction::Apply(f) => {
                         let f = *f;
-                        let has = f.starred_only
-                            || f.tag.is_some()
-                            || f.taken_range.is_some()
-                            || f.size_class.is_some()
-                            || !f.formats.is_empty();
+                        // 用 `PhotoFilter::is_active()` 统一判定「全默认不算筛选」
+                        // （M4 §4.1 语义），避免此处漏掉 M4 新增维度。
+                        let has = f.is_active();
                         if let Err(e) = self.lib.set_filter(has.then_some(f)) {
                             tracing::warn!(error = %e, "应用筛选失败");
                         }
@@ -2794,30 +2891,6 @@ impl OpenPicasaApp {
                         }
                         self.filter_menu_open = false;
                         self.restore_scroll = Some(0.0);
-                    }
-                    FilterPanelAction::BatchStar(on) => match self.lib.batch_set_starred(on) {
-                        Ok(n) if n > 0 => {
-                            self.lib.toast = Some((
-                                format!("{} {n} 张照片", if on { "已收藏" } else { "已取消收藏" }),
-                                2.5,
-                            ));
-                        }
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!(error = %e, "批量收藏失败"),
-                    },
-                    FilterPanelAction::BatchAddTag => {
-                        let label = self.filter_draft_tag.trim().to_string();
-                        if !label.is_empty() {
-                            match self.lib.batch_add_tag(&label) {
-                                Ok(n) if n > 0 => {
-                                    self.sidebar_groups_dirty = true; // 标签列表变了
-                                    self.lib.toast =
-                                        Some((format!("已为 {n} 张打上「{label}」"), 2.5));
-                                }
-                                Ok(_) => {}
-                                Err(e) => tracing::warn!(error = %e, "批量加标签失败"),
-                            }
-                        }
                     }
                 }
             }
@@ -2952,7 +3025,8 @@ impl OpenPicasaApp {
             //   2. 本帧刚打开 → **豁免**。右键释放的那一帧 `secondary_clicked()` 与
             //      `pointer.any_click()` 同时为真，不豁免就会「刚画出来就被自己关掉」
             //   3. 点击落在菜单矩形外 → 关。用 Area 实测矩形，不猜尺寸
-            let opened_this_frame = self.folder_ctx_frame == ctx.cumulative_frame_nr();
+            let opened_this_frame =
+                context_menu_open_frame_exempt(self.folder_ctx_frame, ctx.cumulative_frame_nr());
             if !opened_this_frame {
                 let menu_rect = area.response.rect;
                 let clicked_outside = ctx.input(|i| i.pointer.any_click())
@@ -3581,18 +3655,11 @@ impl eframe::App for OpenPicasaApp {
     }
 }
 
-/// 照片右键菜单的动作。
-enum PhotoCtxAction {
-    ToggleStar,
-    EditCaption,
-    EditTags,
-}
-
 /// 右键菜单在「打开帧」是否应豁免关闭判定（纯函数，可单测）。
 ///
 /// 右键释放帧里 `secondary_clicked()` 与 `pointer.any_click()` 同时为真，
 /// 若不豁免，菜单会在画出来的同一帧被自己关掉——用户看到「右键没反应」。
-/// `folder_ctx` 早有此豁免；`photo_ctx` 的遗漏是 M4 实机反馈的 bug。
+/// `folder_ctx` 与旧 `photo_ctx` 都依赖它；M4.1 照片菜单退役后仍被 folder_ctx 使用。
 fn context_menu_open_frame_exempt(opened_frame: u64, current_frame: u64) -> bool {
     opened_frame == current_frame
 }
@@ -3602,7 +3669,7 @@ mod m4_tests {
     use super::context_menu_open_frame_exempt;
 
     #[test]
-    fn photo_context_menu_survives_its_opening_frame() {
+    fn context_menu_open_frame_exempt_is_precise() {
         // 打开帧必须豁免：否则右键释放的 any_click 会立刻把菜单关掉
         assert!(context_menu_open_frame_exempt(42, 42));
         // 之后的帧不再豁免，点空白可正常关闭

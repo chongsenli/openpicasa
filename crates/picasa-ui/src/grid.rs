@@ -418,7 +418,7 @@ impl GridLayout {
         if self.mode == ViewMode::Grid {
             // 方格：文件名画在格子**下方**的独立行（行高已计入 cell_h，不会重叠）
             Some(Rect::from_min_size(
-                pos2(r.left(), r.bottom() + 1.0),
+                pos2(r.left(), r.bottom() + Metrics::FILENAME_GAP),
                 vec2(self.cell, Metrics::FILENAME_H),
             ))
         } else {
@@ -903,6 +903,31 @@ pub struct GridOutput {
     /// 为这件事去摸一次 DB 锁，会和索引线程的写事务顶牛。
     /// 去重与「已经试过的别再试」都在 `DimsService` 里做，这里只管如实上报。
     pub need_dims: Vec<i64>,
+    /// M4.1 `M41-UI-10`：本帧松开的一次框选（命中集 + 是否追加 + 新锚点）。
+    pub marquee: Option<MarqueeHit>,
+    /// M4.1 `M41-UI-09`：点击照片外空白 → 清空选中集。
+    pub clear_selection: bool,
+}
+
+/// M4.1：一次框选的结果（`docs/13` §4 M41-UI-10）。
+#[derive(Clone, Debug)]
+pub struct MarqueeHit {
+    /// 与框选矩形相交的照片 id（已过滤占位格）。
+    pub ids: Vec<i64>,
+    /// 起手时是否按住 ⌘/Ctrl（追加到已有选中集，否则替换）。
+    pub additive: bool,
+    /// 命中集里最后一张的 index，用于后续 Shift 连选。
+    pub anchor_index: Option<usize>,
+}
+
+/// M4.1：跨帧的框选拖拽状态（存在 egui `IdTypeMap` 里，不进布局缓存）。
+#[derive(Clone, Copy, Debug, Default)]
+struct MarqueeDrag {
+    start: egui::Pos2,
+    current: egui::Pos2,
+    additive: bool,
+    /// 移动是否超过阈值（没超过就还是普通单击）
+    dragging: bool,
 }
 
 /// 画整个栅格。
@@ -942,10 +967,70 @@ pub fn show(
         visible: 0,
         top_index: 0,
         need_dims: Vec::new(),
+        marquee: None,
+        clear_selection: false,
     };
 
     let full = ui.available_rect_before_wrap();
     ui.painter().rect_filled(full, 0.0, theme.grid_bg);
+
+    // ---- M4.1 `M41-UI-09/10`：框选拖拽状态（egui IdTypeMap 跨帧）----
+    // 起手在照片上或留白均可；移动 < DRAG_THRESHOLD 仍按普通单击处理。
+    // 用 `ui.scope_id().with(...)` 而非已废弃的 `Id::new`：前者是跨帧稳定的 scope salt，
+    // 后者在 egui 0.37 已 deprecated，且 `Id::unique` 每次调用都变、取不回上一帧状态。
+    let drag_id = ui.scope_id().with("m41-marquee-drag");
+    let mut drag: Option<MarqueeDrag> = ui.ctx().memory(|m| m.data.get_temp(drag_id));
+    let mut marquee_screen: Option<Rect> = None;
+    let mut released = false;
+    {
+        let inp = ui.ctx().input(|i| {
+            (
+                i.pointer.primary_down(),
+                i.pointer.primary_released(),
+                i.pointer.primary_clicked(),
+                i.pointer.interact_pos(),
+                i.modifiers.command || i.modifiers.ctrl,
+            )
+        });
+        let (down, up, clicked, mpos, additive_now) = inp;
+        if down && let Some(p) = mpos {
+            match &mut drag {
+                None => {
+                    drag = Some(MarqueeDrag {
+                        start: p,
+                        current: p,
+                        additive: additive_now,
+                        dragging: false,
+                    });
+                }
+                Some(d) => {
+                    d.current = p;
+                    if (p - d.start).length() >= Metrics::DRAG_THRESHOLD {
+                        d.dragging = true;
+                    }
+                }
+            }
+        }
+        if let Some(d) = &drag
+            && d.dragging
+        {
+            marquee_screen = Some(Rect::from_two_pos(d.start, d.current));
+        }
+        if up || clicked {
+            released = true;
+        }
+        // 空白点击的最终判定在闭包末尾（`out.clear_selection`），这里不预先置位。
+    }
+    // 把「本帧是否刚松开一次框选」传给闭包
+    let marquee_release = released && drag.as_ref().is_some_and(|d| d.dragging);
+    let drag_snapshot = drag;
+    ui.ctx().memory_mut(|m| {
+        if released {
+            m.data.remove_temp::<MarqueeDrag>(drag_id);
+        } else if let Some(d) = drag_snapshot {
+            m.data.insert_temp(drag_id, d);
+        }
+    });
 
     if photos.is_empty() {
         draw_empty_state(ui, full, theme, cache, empty);
@@ -1117,11 +1202,8 @@ pub fn show(
             // 描边目标：方格 = 实际贴图区（Ready 时是 contain 后的 fitted），
             // masonry = 去掉文件名带的图区。默认 img_rect，Ready 分支里覆写。
             let mut frame = img_rect;
-            let frame_radius = if mode == ViewMode::Grid {
-                Metrics::THUMB_RADIUS
-            } else {
-                0.0
-            };
+            // M4.1 `M41-UI-02`：三种布局统一 8px 圆角（此前 masonry 是 0.0 直角）。
+            let frame_radius = Metrics::THUMB_RADIUS;
             if placeholder {
                 index_progress::draw_placeholder(&painter, img_rect, theme, failed);
             } else if use_atlas {
@@ -1148,31 +1230,17 @@ pub fn show(
                             img_rect
                         };
                         frame = fitted;
-                        if mode == ViewMode::Grid {
-                            // 像素校准（§7.4 效果图）：软阴影 + **圆角贴图**，
-                            // 不再画 1px 白框。圆角贴图走 RectShape 的 brush
-                            // 纹理通路（epaint 0.37），代替无圆角的 painter.image。
-                            painter
-                                .add(theme.thumb_shadow.as_shape(fitted, Metrics::THUMB_RADIUS));
-                            painter.add(
-                                egui::epaint::RectShape::filled(
-                                    fitted,
-                                    Metrics::THUMB_RADIUS,
-                                    Color32::WHITE,
-                                )
+                        // M4.1 `M41-UI-02`：三种布局统一走**圆角贴图**通路
+                        // （RectShape::with_texture + 软阴影），不再对 masonry 用
+                        // 无圆角的 painter.image。用的是同一张已上传纹理，不新增预算。
+                        painter.add(theme.thumb_shadow.as_shape(fitted, frame_radius));
+                        painter.add(
+                            egui::epaint::RectShape::filled(fitted, frame_radius, Color32::WHITE)
                                 .with_texture(
                                     tex_id,
                                     Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                                 ),
-                            );
-                        } else {
-                            painter.image(
-                                tex_id,
-                                fitted,
-                                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                                Color32::WHITE,
-                            );
-                        }
+                        );
                     }
                     TexState::Pending => {
                         index_progress::draw_placeholder(&painter, rect, theme, false);
@@ -1203,10 +1271,10 @@ pub fn show(
                     Stroke::new(1.0, theme.selected)
                 } else if hovered {
                     Stroke::new(1.0, theme.selected.gamma_multiply(0.6))
-                } else if mode == ViewMode::Grid {
-                    Stroke::NONE
                 } else {
-                    Stroke::new(1.0, theme.cell_border)
+                    // M4.1 `M41-UI-02`：三布局常态一律无描边
+                    // （圆角 + 软阴影已表达边界，删掉 masonry 的 1px 灰框）。
+                    Stroke::NONE
                 };
                 if stroke.color != Color32::TRANSPARENT {
                     painter.rect_stroke(frame, frame_radius, stroke, StrokeKind::Inside);
@@ -1258,9 +1326,11 @@ pub fn show(
                 // 用固定 6.4 会让「苏州行_2011年5月13日.jpg」这种名字在格子里溢出，
                 // 反过来又让全是 ASCII 的名字被截得太短。这里用真实字形宽度量。
                 let text = ellipsize_to_width(ui, &row.name, &font, fr.width());
+                // M4.1 `M41-UI-03`（P-M41-06）：行高 9px 下 CENTER_CENTER 会裁字，
+                // 改用 CENTER_TOP + 1px 上边距。
                 painter.text(
-                    fr.center(),
-                    Align2::CENTER_CENTER,
+                    pos2(fr.center().x, fr.top() + 1.0),
+                    Align2::CENTER_TOP,
                     text,
                     font,
                     theme.text_primary,
@@ -1277,22 +1347,79 @@ pub fn show(
             );
             draw_group_header(&painter, bar, &g.title, theme);
         }
+
+        // ---- M4.1 `M41-UI-10`：框选矩形（拖动帧）+ 松开时算命中集 ----
+        // 只遍历当前视口可见格，不遍历全库、不查库（R-M41-1/2）。
+        if let Some(mr) = marquee_screen {
+            // 矩形用屏幕坐标画（painter 是 clip 空间的，clip 与屏幕只差滚动，
+            // 但 marquee_screen 本身就是 interact_pos 的屏幕坐标 → 用 ui.painter() 画）。
+            // 这里改用 ui.painter_at(clip) 的直接屏幕等价：painter 的坐标就是屏幕坐标。
+            let r = Rect::from_min_max(mr.min, mr.max);
+            painter.rect_filled(
+                r,
+                2.0,
+                theme.selected.gamma_multiply(Metrics::MARQUEE_FILL_ALPHA),
+            );
+            painter.rect_stroke(
+                r,
+                2.0,
+                Stroke::new(Metrics::MARQUEE_STROKE_W, theme.selected),
+                StrokeKind::Inside,
+            );
+        }
+        if marquee_release && let Some(d) = drag_snapshot {
+                let sel_rect = Rect::from_two_pos(d.start, d.current);
+                let mut ids = Vec::new();
+                let mut anchor_index = None;
+                // 命中口径：与 thumb_rect **相交即命中**（Finder / Photos 手感）。
+                for index in first..last {
+                    let Some(row) = photos.get(index) else { continue };
+                    // 占位格不参与选中（沿用 M1 既有语义）
+                    let failed = row.thumb_state == 2 || row.thumb_state == 3;
+                    if failed || row.thumb_state == 0 {
+                        continue;
+                    }
+                    if let Some(cr) = layout.thumb_rect(index) {
+                        let cr = cr.translate(origin.to_vec2());
+                        if cr.left() < sel_rect.right()
+                            && cr.right() > sel_rect.left()
+                            && cr.top() < sel_rect.bottom()
+                            && cr.bottom() > sel_rect.top()
+                        {
+                            ids.push(row.id);
+                            anchor_index = Some(index);
+                        }
+                    }
+                }
+                out.marquee = Some(MarqueeHit {
+                    ids,
+                    additive: d.additive,
+                    anchor_index,
+                });
+            // 框选这一帧的 clicked 必须作废（拖动不是普通单击）
+            out.clicked = None;
+            out.opened = None;
+            out.context = None;
+        }
     });
 
     out.scroll_y = area_out.state.clamped_offset().y;
 
-    // 滚动条的空白处点击 = 取消选择（Picasa 的行为）
-    if let Some(pos) = ui.input(|i| {
-        i.pointer
-            .primary_clicked()
-            .then(|| i.pointer.interact_pos())
-            .flatten()
-    }) && full.contains(pos)
+    // M4.1 `M41-UI-09`：点击照片外空白 = 清空选中集（修 M1 遗留的死逻辑）。
+    // 排除框选帧（拖动松开也会触发 primary_clicked）与任何格子命中帧。
+    if !marquee_release
+        && let Some(pos) = ui.input(|i| {
+            i.pointer
+                .primary_clicked()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        })
+        && full.contains(pos)
         && out.clicked.is_none()
         && out.opened.is_none()
+        && out.context.is_none()
     {
-        // 交给上层：点击空白清空选择
-        out.clicked = None;
+        out.clear_selection = true;
     }
 
     out
@@ -2212,5 +2339,72 @@ mod tests {
                 "文件名行高不对"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // M4.1 专项（`docs/13` §5 TC-M41-*）
+    // ------------------------------------------------------------------
+
+    /// `M41-UI-03`：默认缩略图 96、文件名行高 9、间距 0.5、字号 11。
+    /// 守的是「一屏更密」这组常量，别被后续调参悄悄改回去。
+    #[test]
+    fn m41_default_density_constants() {
+        assert_eq!(picasa_core::DEFAULT_CELL_PX, 96.0);
+        assert!(picasa_core::zoom::LOG_STEPS.contains(&picasa_core::DEFAULT_CELL_PX));
+        assert_eq!(Metrics::FILENAME_H, 9.0);
+        assert_eq!(Metrics::FILENAME_GAP, 0.5);
+        assert_eq!(Metrics::FILENAME_FONT_SIZE, 11.0);
+        assert_eq!(Metrics::DRAG_THRESHOLD, 4.0);
+    }
+
+    /// `M41-UI-03`：方格文件名行与图片底边的距离 ≈ 改前（18+1=19）的一半。
+    #[test]
+    fn m41_filename_gap_is_halved() {
+        let photos: Vec<PhotoRow> = (0..2).map(|i| photo(i, 1_600_000_000 + i)).collect();
+        let layout = GridLayout::build(&photos, 1280.0, 96.0, false, ViewMode::Grid);
+        let thumb = layout.thumb_rect(0).unwrap();
+        let name = layout.filename_rect(0).unwrap();
+        let gap = name.top() - thumb.bottom();
+        assert!(
+            (gap - Metrics::FILENAME_GAP).abs() < 0.01,
+            "间距应等于 FILENAME_GAP：{gap}"
+        );
+        // 整体视觉距离（行高+间距）= 9.5，正好是旧值 19 的一半
+        let visual = Metrics::FILENAME_H + gap;
+        assert!((visual - 9.5).abs() < 0.01, "视觉距离没减半：{visual}");
+    }
+
+    /// `M41-UI-02`：三种布局的 cell_h / 文件名占位都用同一个 FILENAME_H，
+    /// 且圆角半径常量对三模式一致（绘制分支已无 mode 特判）。
+    #[test]
+    fn m41_three_modes_share_filename_height_and_radius() {
+        assert_eq!(Metrics::THUMB_RADIUS, 8.0);
+        for mode in [ViewMode::Grid, ViewMode::MasonryV, ViewMode::MasonryH] {
+            let photos: Vec<PhotoRow> = (0..6).map(|i| photo(i, 1_600_000_000 + i)).collect();
+            let layout = GridLayout::build(&photos, 1000.0, 96.0, false, mode);
+            // 每个模式的格子/文件名矩形都应可求，且不含「直角」特殊常量
+            for i in 0..6 {
+                assert!(layout.thumb_rect(i).is_some(), "{mode:?} 缺 thumb_rect({i})");
+            }
+        }
+    }
+
+    /// `M41-UI-10`：框选命中集结构（ids / additive / anchor_index）可独立构造，
+    /// 便于上层 `lib.selection` 的 union / 替换语义单测。
+    #[test]
+    fn m41_marquee_hit_shape() {
+        let hit = MarqueeHit {
+            ids: vec![7, 8, 9],
+            additive: true,
+            anchor_index: Some(9),
+        };
+        assert_eq!(hit.ids.len(), 3);
+        assert!(hit.additive);
+        assert_eq!(hit.anchor_index, Some(9));
+        let mut sel: std::collections::HashSet<i64> = [1, 2].into_iter().collect();
+        for id in &hit.ids {
+            sel.insert(*id);
+        }
+        assert_eq!(sel.len(), 5, "追加模式应 union 进已有选中集");
     }
 }

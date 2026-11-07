@@ -100,8 +100,14 @@ pub struct Theme {
     pub seg_active_orange: Color32,
     /// 白圆钮 / 白胶囊的软阴影（毛玻璃观感的来源）
     pub control_shadow: egui::Shadow,
+    /// M4.1 v1.8：紧贴控件底边的「接触阴影」——白底白钮容易糊在一起，
+    /// 光靠一层大模糊阴影不够，再压一道更紧更暗的近阴影把边界托出来。
+    pub control_contact_shadow: egui::Shadow,
+    /// M4.1 v1.8：白控件的发丝边（1px），与接触阴影配合解决「和背景重合」。
+    pub control_hairline: Color32,
     /// 方格缩略图的软阴影（效果图：圆角 + 极淡落影，无描边）
     pub thumb_shadow: egui::Shadow,
+
 }
 
 impl Theme {
@@ -167,13 +173,23 @@ impl Theme {
             sidebar_hover: Color32::from_rgb(0xE9, 0xE7, 0xE3),
             // 量自定稿效果图（openpicasa-3row-final.jpg 选中片采样 ≈ 251,226,213）
             seg_active_orange: Color32::from_rgb(0xFB, 0xE2, 0xD5),
-            // 阴影很淡：只为把白色控件从白底上「托」出来（毛玻璃感）
+            // M4.1 v1.8：用户反馈「按钮和背景有点重合」→ 加深外阴影。
+            // 原来是 offset[0,1]/blur3/alpha36，白底白钮几乎看不出边界。
             control_shadow: egui::Shadow {
-                offset: [0, 1],
-                blur: 3,
+                offset: [0, 2],
+                blur: 6,
                 spread: 0,
-                color: Color32::from_black_alpha(36),
+                color: Color32::from_black_alpha(64),
             },
+            // 更紧更暗的近阴影：贴着底边压一圈，让白圆钮「浮」在白底上
+            control_contact_shadow: egui::Shadow {
+                offset: [0, 1],
+                blur: 2,
+                spread: 0,
+                color: Color32::from_black_alpha(48),
+            },
+            // 1px 发丝边（极淡，不是描边式边框，不破坏 M4 白圆底观感）
+            control_hairline: Color32::from_black_alpha(22),
             thumb_shadow: egui::Shadow {
                 offset: [0, 1],
                 blur: 4,
@@ -268,16 +284,28 @@ impl Metrics {
     pub const GRID_PAD: f32 = 32.0;
     /// U-30：日期分组头高度
     pub const GROUP_HEADER_H: f32 = 26.0;
-    /// U-26：文件名行高。像素校准：字号提到 12.5 后行高随之 +2。
-    pub const FILENAME_H: f32 = 18.0;
+    /// U-26：文件名行高。
+    ///
+    /// M4.1 `M41-UI-03`：18 → **9**，把「照片名称与照片的视觉距离」减半
+    /// （配合 [`Self::FILENAME_GAP`] 由 1.0 → 0.5）。
+    pub const FILENAME_H: f32 = 9.0;
+    /// M4.1：方格布局里「图片底边 → 文件名行」的间距（[`GridLayout::filename_rect`]）。
+    pub const FILENAME_GAP: f32 = 0.5;
     /// U-26：文件名字号。
     ///
-    /// 像素校准：定稿效果图的文件名明显比旧值 11 大且更深（近黑、≈13px）。
-    /// 取 12.5 兼顾中档格（144px）的行高余量；行高见 [`Self::FILENAME_H`]。
-    pub const FILENAME_FONT_SIZE: f32 = 12.5;
+    /// M4.1 `M41-UI-03`（P-M41-06）：行高降到 9 后 12.5px 会被裁，降到 **11.0**
+    /// 并改用 `Align2::CENTER_TOP` 绘制，避免 9px 行高裁字。
+    pub const FILENAME_FONT_SIZE: f32 = 11.0;
 
     /// 方格缩略图圆角半径（量自定稿效果图 ≈8）。
+    /// M4.1 `M41-UI-02`：改为**三种布局统一使用**（瀑布流此前是 0.0 直角）。
     pub const THUMB_RADIUS: f32 = 8.0;
+
+    /// M4.1 `M41-UI-10`：鼠标按下后移动超过此阈值才进入框选（否则算普通单击）。
+    pub const DRAG_THRESHOLD: f32 = 4.0;
+    /// M4.1：框选矩形填充 / 描边。
+    pub const MARQUEE_FILL_ALPHA: f32 = 0.12;
+    pub const MARQUEE_STROKE_W: f32 = 1.0;
 
     /// 滚动条宽度（U-20：细滚动条，不占内容宽度）
     pub const SCROLLBAR: f32 = 8.0;
@@ -435,4 +463,25 @@ fn install_cjk_fallback(ctx: &egui::Context) {
         return;
     }
     tracing::warn!("未找到可用的 CJK 回退字体，中文可能显示为方框");
+}
+
+#[cfg(test)]
+mod m41_v18_tests {
+    use super::Theme;
+
+    /// v1.8：白底白钮「脱底」三件套的常量必须真的比 M4 基线更明显，
+    /// 防止后续调参悄悄调回 offset[0,1]/blur3/alpha36 导致又和背景重合。
+    #[test]
+    fn control_chrome_is_stronger_than_m4_baseline() {
+        let t = Theme::picasa();
+        // 外阴影：M4 是 offset[0,1] blur3 alpha36
+        assert!(t.control_shadow.blur > 3, "外阴影应比 M4 的 blur3 更散");
+        assert!(t.control_shadow.color.a() > 36, "外阴影应比 M4 的 alpha36 更深");
+        assert!(t.control_shadow.offset[1] >= 2, "外阴影下移量应加大");
+        // 接触阴影：更紧（blur 更小）但存在
+        assert!(t.control_contact_shadow.blur < t.control_shadow.blur);
+        assert!(t.control_contact_shadow.color.a() > 0);
+        // 发丝边是极淡的半透明，不是实黑框
+        assert!(t.control_hairline.a() > 0 && t.control_hairline.a() < 60);
+    }
 }

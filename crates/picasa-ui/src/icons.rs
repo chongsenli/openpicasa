@@ -85,6 +85,11 @@ pub enum Icon {
     LayoutMasonryV,
     /// 排布：横向瀑布流
     LayoutMasonryH,
+    // ---- M4.1：工具栏对象操作（矢量自绘，不提取原版资源）----
+    /// 标签（吊牌轮廓 + 圆孔）
+    Tag,
+    /// 说明（对话气泡 + 两条横线文本）
+    Caption,
 }
 
 /// 在 `rect` 内绘制图标。线条宽度按 `stroke` 缩放（Retina 下自动变细）。
@@ -548,6 +553,27 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
                     color,
                 );
             }
+        }
+        // M4.1：标签（吊牌：圆角多边形轮廓 + 左上角圆孔）
+        Icon::Tag => {
+            painter.line_segment([ip(0.12, 0.16), ip(0.52, 0.16)], s);
+            painter.line_segment([ip(0.12, 0.16), ip(0.12, 0.52)], s);
+            painter.line_segment([ip(0.12, 0.52), ip(0.52, 0.88)], s);
+            painter.line_segment([ip(0.52, 0.16), ip(0.88, 0.52)], s);
+            painter.line_segment([ip(0.88, 0.52), ip(0.52, 0.88)], s);
+            painter.circle_filled(ip(0.30, 0.34), rect.width() * 0.055, color);
+        }
+        // M4.1：说明（圆角对话气泡 + 两条横线 + 尾部小尖）
+        Icon::Caption => {
+            painter.line_segment([ip(0.10, 0.20), ip(0.90, 0.20)], s);
+            painter.line_segment([ip(0.10, 0.20), ip(0.10, 0.68)], s);
+            painter.line_segment([ip(0.10, 0.68), ip(0.30, 0.68)], s);
+            painter.line_segment([ip(0.30, 0.68), ip(0.24, 0.88)], s);
+            painter.line_segment([ip(0.24, 0.88), ip(0.44, 0.68)], s);
+            painter.line_segment([ip(0.44, 0.68), ip(0.90, 0.68)], s);
+            painter.line_segment([ip(0.90, 0.20), ip(0.90, 0.68)], s);
+            painter.line_segment([ip(0.24, 0.36), ip(0.76, 0.36)], s);
+            painter.line_segment([ip(0.24, 0.52), ip(0.64, 0.52)], s);
         }
     }
 }

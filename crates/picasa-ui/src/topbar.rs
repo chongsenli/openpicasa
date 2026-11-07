@@ -63,6 +63,15 @@ pub enum TopbarAction {
     SearchChanged(String),
     /// 点了搜索框左侧的范围小按钮（当前文件夹 / 全部图库）
     ToggleSearchScope,
+    // ---- M4.1 `M41-UI-01`：工具栏对象操作（作用于当前选中集）----
+    /// 收藏 / 取消收藏（双态，由 App 按选中集判定）
+    Favorite,
+    /// 打开「照片说明」窗口（多选版）
+    Caption,
+    /// 打开「批量标签」浮层
+    Tag,
+    /// 加入 / 移出照片托盘（双态）
+    Tray,
 }
 
 /// 「…」菜单里的真实功能项。
@@ -84,6 +93,36 @@ pub struct TopbarOutput {
     pub filter_button: Option<Rect>,
     /// 「…」按钮的矩形（App 用它定位弹出菜单）
     pub more_button: Option<Rect>,
+}
+
+/// M4.1：四个对象操作按钮的**双态判定**（`docs/13` §1 M41-UI-01）。
+///
+/// 由 App 每帧从内存 `lib.selection` / `lib.tray` 计算，顶栏只负责画，不查库。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ObjectActionState {
+    /// 有选中照片
+    pub has_selection: bool,
+    /// 选中集全部已收藏 → 收藏按钮为「选中态」，点击=取消收藏
+    pub all_favorite: bool,
+    /// 选中集全部已在托盘 → 托盘按钮为「选中态」，点击=移出托盘
+    pub all_in_tray: bool,
+}
+
+/// M4.1：四枚对象操作钮的矩形（♥ 收藏 / ⓘ 说明 / ⌗ 标签 / ▣ 托盘）。
+///
+/// 放在「编辑」右侧，组间留白 12px、组内 6px，按钮尺寸恒为 `d`（不缩小）。
+/// 窗口最窄 900 时由 `show` 把**中段右移**让位（左段优先），而不是压缩按钮。
+/// 纯函数，便于单测。
+fn object_button_rects(edit_right: f32, center_y: f32, d: f32) -> [Rect; 4] {
+    const GROUP_GAP: f32 = 12.0;
+    const INNER_GAP: f32 = 6.0;
+    let first_center = edit_right + GROUP_GAP + d / 2.0;
+    std::array::from_fn(|i| {
+        Rect::from_center_size(
+            pos2(first_center + i as f32 * (d + INNER_GAP), center_y),
+            vec2(d, d),
+        )
+    })
 }
 
 /// 顶栏入参。
@@ -108,6 +147,8 @@ pub fn show(
     zoom_max: bool,
     // 左栏当前宽度（M32-UI-01/02 v1.3：左段右缘与文件夹树右缘对齐）
     sidebar_w: f32,
+    // M4.1：四个对象操作按钮的双态判定（App 从内存选中集算好传入）
+    obj: ObjectActionState,
 ) -> TopbarOutput {
     let mut out = TopbarOutput {
         actions: Vec::new(),
@@ -121,6 +162,8 @@ pub fn show(
     );
     let _ = ui.allocate_space(rect.size());
     let painter = ui.painter_at(rect);
+    // M4.1 v1.7：用户裁决「按钮样式回退到 M4」——玻璃整套（模糊底图/折射/
+    // 色散/水波纹）移除，顶栏恢复 M4 的纯色底。
     painter.rect_filled(rect, 0.0, theme.toolbar_bg);
     // 底边发丝线（半透明，压在内容上不抢眼）
     painter.line_segment(
@@ -166,21 +209,6 @@ pub fn show(
     out.sort_button = Some(sort_r);
     let search_r = circle_at(sort_r.left() - 14.0);
 
-    // ---- 中段（居中）：排布胶囊 + −/+ ----
-    let layout_w = 3.0 * 34.0;
-    let zoom_w = 76.0;
-    let mid_gap = 10.0;
-    let mid_w = layout_w + mid_gap + zoom_w;
-    let mid_left = rect.left() + (rect.width() - mid_w) / 2.0;
-    let layout_rect = Rect::from_min_size(
-        pos2(mid_left, bar2_center - Metrics::ZOOM_PILL_H / 2.0),
-        vec2(layout_w, Metrics::ZOOM_PILL_H),
-    );
-    let zoom_rect = Rect::from_min_size(
-        pos2(layout_rect.right() + mid_gap, bar2_center - Metrics::ZOOM_PILL_H / 2.0),
-        vec2(zoom_w, Metrics::ZOOM_PILL_H),
-    );
-
     // ---- 左段（从左往右）：侧栏开关 导入 …… 幻灯片 编辑 ----
     // M32-UI-01/02 v1.4：
     // * 侧栏开关、导入贴窗口最左（红绿灯在上行，下行不必让位）；
@@ -194,6 +222,33 @@ pub fn show(
     let seg_left = (rect.left() + sidebar_w).max(import_r.right() + 6.0);
     let slide_r = Rect::from_center_size(pos2(seg_left + d / 2.0, bar2_center), vec2(d, d));
     let edit_r = Rect::from_center_size(pos2(slide_r.right() + 6.0 + d / 2.0, bar2_center), vec2(d, d));
+    // M4.1 `M41-UI-01`（用户 #4 定稿）：四枚对象操作钮放在「编辑」之后。
+    // 纯函数算 rect，便于单测「不与中段重叠」（窗口最窄 900 时也要守住）。
+    let obj_rects = object_button_rects(edit_r.right(), bar2_center, d);
+    let [fav_r, cap_r, tag_r, tray_r] = obj_rects;
+    // ---- 中段（排布胶囊 + −/+）：默认居中；窄窗口让左段优先 ----
+    // M4.1：左段在「编辑」之后新增四枚对象操作钮。窗口最窄 900 时绝对居中会
+    // 与新增按钮重叠——此时把中段右移到四按钮组之后（1280 默认值仍居中）。
+    let layout_w = 3.0 * 34.0;
+    let zoom_w = 76.0;
+    let mid_gap = 10.0;
+    let mid_w = layout_w + mid_gap + zoom_w;
+    let centered_mid_left = rect.left() + (rect.width() - mid_w) / 2.0;
+    let after_objects = obj_rects[3].right() + 18.0;
+    let mid_left = centered_mid_left
+        .max(after_objects)
+        // 右移后不能顶出右段（搜索/排序/筛选/…）
+        .min(search_r.left() - mid_w - 12.0)
+        .max(centered_mid_left);
+    let layout_rect = Rect::from_min_size(
+        pos2(mid_left, bar2_center - Metrics::ZOOM_PILL_H / 2.0),
+        vec2(layout_w, Metrics::ZOOM_PILL_H),
+    );
+    let zoom_rect = Rect::from_min_size(
+        pos2(layout_rect.right() + mid_gap, bar2_center - Metrics::ZOOM_PILL_H / 2.0),
+        vec2(zoom_w, Metrics::ZOOM_PILL_H),
+    );
+
 
     // ---- ① 侧栏开关 ----
     if icon_btn(
@@ -238,6 +293,38 @@ pub fn show(
             out.actions.push(action.clone());
         }
     }
+
+    // ---- ②′ M4.1 四枚对象操作钮（编辑之后）----
+    // 双态判定由 App 传入 `obj`；`has_selection=false` 时按钮仍可点（App 弹 toast）。
+    let fav_tip = if obj.all_favorite && obj.has_selection {
+        "取消收藏"
+    } else {
+        "收藏"
+    };
+    let tray_tip = if obj.all_in_tray && obj.has_selection {
+        "移出照片托盘"
+    } else {
+        "照片托盘 · ⌘H"
+    };
+    let obj_btns: &[(Rect, Icon, &str, TopbarAction, bool)] = &[
+        (fav_r, Icon::Heart, fav_tip, TopbarAction::Favorite, obj.all_favorite && obj.has_selection),
+        (cap_r, Icon::Caption, "说明", TopbarAction::Caption, false),
+        (tag_r, Icon::Tag, "标签", TopbarAction::Tag, false),
+        (tray_r, Icon::Tray, tray_tip, TopbarAction::Tray, obj.all_in_tray && obj.has_selection),
+    ];
+    for (r, icon, tip, action, selected) in obj_btns {
+        if icon_btn_ex(ui, &painter, *r, *icon, theme, true, *selected, tip).clicked() {
+            out.actions.push(action.clone());
+        }
+    }
+    // 组分隔虚线（提示「对象操作组」结束，不影响交互）
+    painter.line_segment(
+        [
+            pos2(tray_r.right() + 8.0, bar2_center - 10.0),
+            pos2(tray_r.right() + 8.0, bar2_center + 10.0),
+        ],
+        egui::Stroke::new(1.0, Color32::from_black_alpha(24)),
+    );
 
     // ---- ③ 排布：无文字三图标连体胶囊 ----
     draw_layout_pill(ui, &painter, layout_rect, theme, view_mode, &mut out);
@@ -395,8 +482,18 @@ fn draw_breadcrumb(
     }
 }
 
-/// 圆形图标按钮：**常驻白圆底 + 软阴影**（毛玻璃观感，对齐定稿效果图），
-/// 悬停压浅灰。无文字。
+/// M4.1 v1.8：白色控件的「脱底」三件套 —— 外阴影 + 接触阴影 + 1px 发丝边。
+///
+/// 用户反馈白圆钮和白工具栏背景重合；只加深一层模糊阴影仍会糊，
+/// 所以补一道**紧贴底边的近阴影**（边界立刻可辨）与一圈极淡发丝边。
+/// 圆钮与两个胶囊共用，保证视觉语言一致。
+fn draw_control_chrome(painter: &egui::Painter, rect: Rect, radius: f32, theme: &Theme) {
+    painter.add(theme.control_shadow.as_shape(rect, radius));
+    painter.add(theme.control_contact_shadow.as_shape(rect, radius));
+}
+
+/// 圆形图标按钮：**常驻白圆底 + 软阴影**（M4 原版样式，v1.7 回退）。
+/// 悬停压浅灰，无文字。
 fn icon_btn(
     ui: &mut Ui,
     painter: &egui::Painter,
@@ -406,20 +503,47 @@ fn icon_btn(
     enabled: bool,
     tooltip: &str,
 ) -> Response {
+    icon_btn_ex(ui, painter, rect, icon, theme, enabled, false, tooltip)
+}
+
+/// 带「选中态」的图标按钮（♥ 收藏 / ▣ 托盘双态）。
+/// v1.7：回退到 M4 白圆底绘法；双态选中沿用 M4 排布胶囊那款淡橙
+/// `seg_active_orange`（`09` §7.2 像素校准），不再是玻璃的灰/粉。
+#[allow(clippy::too_many_arguments)]
+fn icon_btn_ex(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    rect: Rect,
+    icon: Icon,
+    theme: &Theme,
+    enabled: bool,
+    selected: bool,
+    tooltip: &str,
+) -> Response {
     let sense = if enabled {
         Sense::click()
     } else {
         Sense::hover()
     };
     let resp = ui.interact(rect, ui.scope_id().with(("topbar-btn", tooltip)), sense);
-    // 白圆底 + 软阴影：常驻（毛玻璃的「浮起来」感靠阴影，不靠描边）
-    painter.add(theme.control_shadow.as_shape(rect, Metrics::TOPBAR_ICON_D / 2.0));
-    let fill = if enabled && resp.hovered() {
+    // v1.8：外阴影 + 接触阴影（脱底）
+    let radius = rect.width() / 2.0;
+    draw_control_chrome(painter, rect, radius, theme);
+    let fill = if selected {
+        theme.seg_active_orange
+    } else if enabled && resp.hovered() {
         theme.sidebar_hover
     } else {
         Color32::WHITE
     };
-    painter.rect_filled(rect, Metrics::TOPBAR_ICON_D / 2.0, fill);
+    painter.rect_filled(rect, radius, fill);
+    // 1px 发丝边：白底上给白圆钮一圈可辨的轮廓（极淡，不是实边框）
+    painter.rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0, theme.control_hairline),
+        egui::StrokeKind::Inside,
+    );
     if enabled && resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -428,7 +552,7 @@ fn icon_btn(
     } else {
         theme.text_disabled
     };
-    let inner = rect.shrink(Metrics::TOPBAR_ICON_D * 0.28);
+    let inner = rect.shrink(rect.width() * 0.28);
     icons::draw(painter, icon, inner, color, 1.4);
     if enabled {
         resp.clone().on_hover_text(tooltip);
@@ -440,6 +564,7 @@ fn icon_btn(
 ///
 /// 点击走**对数档**（`picasa_core::step_log`）——与 ⌘+/⌘− 同一条路径；
 /// 到端点后按钮置灰（截图里按钮永远可见，端点行为由置灰表达）。
+#[allow(clippy::too_many_arguments)]
 fn draw_zoom_pill(
     ui: &mut Ui,
     painter: &egui::Painter,
@@ -449,8 +574,15 @@ fn draw_zoom_pill(
     zoom_max: bool,
     out: &mut TopbarOutput,
 ) {
-    painter.add(theme.control_shadow.as_shape(rect, rect.height() / 2.0));
+    // v1.8：回退 M4 白底胶囊，但用三件套阴影脱底。
+    draw_control_chrome(painter, rect, rect.height() / 2.0, theme);
     painter.rect_filled(rect, rect.height() / 2.0, Color32::WHITE);
+    painter.rect_stroke(
+        rect,
+        rect.height() / 2.0,
+        egui::Stroke::new(1.0, theme.control_hairline),
+        egui::StrokeKind::Inside,
+    );
     // 中缝竖线
     let mid_x = rect.center().x;
     painter.line_segment(
@@ -528,8 +660,15 @@ fn draw_layout_pill(
     current: ViewMode,
     out: &mut TopbarOutput,
 ) {
-    painter.add(theme.control_shadow.as_shape(rect, rect.height() / 2.0));
+    // v1.8：回退 M4 白底胶囊，但用三件套阴影脱底。
+    draw_control_chrome(painter, rect, rect.height() / 2.0, theme);
     painter.rect_filled(rect, rect.height() / 2.0, Color32::WHITE);
+    painter.rect_stroke(
+        rect,
+        rect.height() / 2.0,
+        egui::Stroke::new(1.0, theme.control_hairline),
+        egui::StrokeKind::Inside,
+    );
     // 与 −|+ 同款中缝：未选中的两片之间有一条极淡的竖线。
     let w = rect.width() / 3.0;
     for i in 1..3 {
@@ -551,7 +690,7 @@ fn draw_layout_pill(
         );
         let active = *mode == current;
         if active {
-            // 选中态 = 内切淡橙圆（定稿效果图：橙是圆形浮在白胶囊里，不是整片填充）
+            // v1.7：回退 M4 的淡橙内切圆（定稿效果图采样）。
             let d = rect.height() - 6.0;
             let circle = Rect::from_center_size(piece.center(), vec2(d, d));
             painter.rect_filled(circle, d / 2.0, theme.seg_active_orange);
@@ -808,4 +947,59 @@ pub fn sort_menu(ui: &mut Ui, at: Pos2, current: picasa_db::SortSpec) -> Option<
                 });
         });
     action
+}
+
+#[cfg(test)]
+mod m41_tests {
+    use super::*;
+
+    /// `M41-UI-01`：四枚按钮都在「编辑」右侧、互不重叠、尺寸恒为 d。
+    #[test]
+    fn object_buttons_sit_after_edit_with_stable_size() {
+        let d = Metrics::TOPBAR_ICON_D;
+        let rects = object_button_rects(300.0, 60.0, d);
+        assert_eq!(rects.len(), 4);
+        for (i, r) in rects.iter().enumerate() {
+            assert!(r.left() >= 300.0, "第 {i} 枚跑到编辑左侧了");
+            assert_eq!(r.width(), d, "第 {i} 枚尺寸被压缩了");
+            if i > 0 {
+                assert!(
+                    r.left() >= rects[i - 1].right(),
+                    "第 {i} 枚与前一枚重叠"
+                );
+            }
+        }
+    }
+
+    /// `M41-UI-01`：窄窗口（900）时中段必须右移到四按钮组之后 —— 守
+    /// `show` 里 `mid_left = centered.max(after_objects)` 这条让位逻辑。
+    #[test]
+    fn middle_group_yields_to_object_buttons_on_narrow_window() {
+        let d = Metrics::TOPBAR_ICON_D;
+        let rects = object_button_rects(300.0, 60.0, d);
+        let after_objects = rects[3].right() + 18.0;
+        for width in [1280.0_f32, 900.0_f32] {
+            let mid_w = 3.0 * 34.0 + 10.0 + 76.0;
+            let centered = (width - mid_w) / 2.0;
+            let search_left = width - 14.0 - 4.0 * d - 2.0 * 4.0 - 14.0; // 右段近似左缘
+            let mid_left = centered
+                .max(after_objects)
+                .min(search_left - mid_w - 12.0)
+                .max(centered);
+            assert!(
+                mid_left >= rects[3].right(),
+                "{width}px：中段 {mid_left} 仍与四按钮右缘 {} 重叠",
+                rects[3].right()
+            );
+        }
+    }
+
+    /// `M41-UI-01`：双态判定的默认值（无选中）应让两个按钮都不进选中态。
+    #[test]
+    fn object_action_state_default_is_unselected() {
+        let s = ObjectActionState::default();
+        assert!(!s.has_selection);
+        assert!(!s.all_favorite);
+        assert!(!s.all_in_tray);
+    }
 }
