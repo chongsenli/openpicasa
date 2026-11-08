@@ -78,5 +78,10 @@ Section "Uninstall"
   RMDir /r "$INSTDIR\docs"
   RMDir "$INSTDIR"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenPicasa"
+  ; 安装时写入的三个值必须逐个删除，否则 /ifempty 永远不成立：
+  ; 卸载后 HKCU\Software\OpenPicasa 会残留（Windows ARM64 安装/卸载实测复现）。
+  DeleteRegValue HKCU "Software\OpenPicasa" "InstallDir"
+  DeleteRegValue HKCU "Software\OpenPicasa" "Version"
+  DeleteRegValue HKCU "Software\OpenPicasa" "Arch"
   DeleteRegKey /ifempty HKCU "Software\OpenPicasa"
 SectionEnd
