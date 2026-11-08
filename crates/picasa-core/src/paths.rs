@@ -32,15 +32,34 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
-    /// 按 macOS 惯例解析（支持 `OPENPICASA_DATA_DIR` 覆盖，测试与便携模式用）。
+    /// 按平台惯例解析（支持 `OPENPICASA_DATA_DIR` 覆盖，测试与便携模式用）。
+    ///
+    /// - macOS / Unix：`~/Library`（下挂 Application Support / Preferences / …）
+    /// - Windows：`%LOCALAPPDATA%\OpenPicasa`（无该变量时退到 `%USERPROFILE%\AppData\Local\OpenPicasa`）
+    ///
+    /// 四个子目录名在 `from_root` 里保持不变，隔离自检与日志格式全平台一致。
     pub fn resolve() -> Self {
         if let Some(dir) = std::env::var_os("OPENPICASA_DATA_DIR") {
             return Self::from_root(PathBuf::from(&dir));
         }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        Self::from_root(home.join("Library"))
+        #[cfg(target_os = "windows")]
+        {
+            let root = std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("USERPROFILE")
+                        .map(|h| PathBuf::from(h).join("AppData").join("Local"))
+                })
+                .unwrap_or_else(|| PathBuf::from("C:/Users/Default/AppData/Local"));
+            Self::from_root(root.join(APP_NAME))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/tmp"));
+            Self::from_root(home.join("Library"))
+        }
     }
 
     /// 从指定的容器根拼出四个目录，并做**隔离自检**（可单测，不依赖环境变量）。

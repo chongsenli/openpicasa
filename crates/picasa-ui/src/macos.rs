@@ -119,7 +119,18 @@ pub fn reveal_in_finder(path: &Path) -> Result<(), String> {
         }
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        // `explorer /select,<path>` 在资源管理器中定位并选中该文件。
+        // 注意参数必须作为一个整体传（逗号是 explorer 的语法，不是分隔符）。
+        let arg = format!("/select,{}", path.display());
+        std::process::Command::new("explorer")
+            .arg(arg)
+            .status()
+            .map_err(|e| format!("无法调用 explorer：{e}"))?;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         return Err("当前平台暂不支持「在文件管理器中显示」".to_string());
     }
@@ -135,7 +146,10 @@ pub fn open_folder(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     let program = "xdg-open";
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let program = "";
 
     if program.is_empty() {

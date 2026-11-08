@@ -54,18 +54,32 @@ pub fn move_to_trash(path: &Path) -> Result<PathBuf> {
 /// 两者都**不在照片目录内**——除非用户把照片直接放在卷根目录，
 /// 那种情况下 `.Trashes` 与照片同级但不同目录，仍不构成「改写用户的照片目录内容」。
 fn trash_dir_for(path: &Path) -> Result<PathBuf> {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix("/Volumes/") {
-        let vol = rest.split('/').next().unwrap_or("");
-        if !vol.is_empty() {
-            let uid = unsafe { libc_getuid() };
-            return Ok(PathBuf::from(format!("/Volumes/{vol}/.Trashes/{uid}")));
-        }
+    // Windows 的回收站不是普通目录，rename 到某个 `.Trash` 不会进系统回收站。
+    // 本版（首次 Windows 交叉构建）明确返回「不支持」，绝不把文件悄悄移到
+    // 一个假的目录里冒充删除成功；后续接入 SHFileOperationW 时替换此分支。
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        return Err(CoreError::Other(
+            "当前平台暂不支持移到回收站（Windows 需要 SHFileOperationW）".into(),
+        ));
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| CoreError::Other("无法确定 HOME 目录".into()))?;
-    Ok(home.join(".Trash"))
+
+    #[cfg(unix)]
+    {
+        let s = path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix("/Volumes/") {
+            let vol = rest.split('/').next().unwrap_or("");
+            if !vol.is_empty() {
+                let uid = unsafe { libc_getuid() };
+                return Ok(PathBuf::from(format!("/Volumes/{vol}/.Trashes/{uid}")));
+            }
+        }
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| CoreError::Other("无法确定 HOME 目录".into()))?;
+        Ok(home.join(".Trash"))
+    }
 }
 
 /// 重名时加 ` 1`、` 2` 后缀——与 Finder 的命名习惯一致。
@@ -96,6 +110,9 @@ fn unique_destination(trash_dir: &Path, src: &Path) -> PathBuf {
 }
 
 /// `getuid(2)`：只为一个数字引入 `libc` crate 不值得，直接用 FFI 声明。
+/// ⚠️ Windows CRT 没有 `getuid` 符号，无条件声明会在链接期 LNK2019；
+/// 仅在 unix 下存在（配合 `trash_dir_for` 的 `#[cfg(unix)]` 分支）。
+#[cfg(unix)]
 unsafe fn libc_getuid() -> u32 {
     unsafe extern "C" {
         fn getuid() -> u32;
