@@ -907,6 +907,12 @@ pub struct GridOutput {
     pub marquee: Option<MarqueeHit>,
     /// M4.1 `M41-UI-09`：点击照片外空白 → 清空选中集。
     pub clear_selection: bool,
+    /// M4.2 `M42-PERF-00`：本帧可见格里「未出图（占位）」的格数，供诊断探针
+    /// 算空白格率；纯统计，不进任何绘制决策。
+    pub blank_cells: usize,
+    /// 本帧实际上传的贴图张数（正常纹理档 = 预算初值 − 剩余预算；图集档为 0），
+    /// 用于核对「每帧上传 ≤ TEX_UPLOAD_PER_FRAME」的锁死常量。
+    pub uploads_this_frame: u8,
 }
 
 /// M4.1：一次框选的结果（`docs/13` §4 M41-UI-10）。
@@ -921,13 +927,59 @@ pub struct MarqueeHit {
 }
 
 /// M4.1：跨帧的框选拖拽状态（存在 egui `IdTypeMap` 里，不进布局缓存）。
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// M4.2 `M42-UI-03`：去掉 `Copy`、加 `accumulated`——边缘自动滚动会把视口外更远处的
+/// 格子逐帧带进视口，每个拖拽帧把「当帧与框选矩形相交的 id」并入这里，松手时用它
+/// 而不是只算当前视口（AC-01/AC-02 跨页连续框选）。`Vec<i64>` 满足 `IdTypeMap` 的
+/// `Clone + Send + Sync + Default`，可随 `MarqueeDrag` 一起存进 temp。
+#[derive(Clone, Debug, Default)]
 struct MarqueeDrag {
     start: egui::Pos2,
     current: egui::Pos2,
     additive: bool,
     /// 移动是否超过阈值（没超过就还是普通单击）
     dragging: bool,
+    /// 跨页累积命中（去重保序），松手时作为最终命中集。
+    accumulated: Vec<i64>,
+}
+
+/// M4.2 `M42-UI-03`：框选拖到视口边缘时的自动滚动参数（交互参数，不进
+/// `theme::Metrics` 的性能锁死区；P-M42-09 锁的是 TEX_UPLOAD_PER_FRAME / TEX_CACHE_CAP / SCROLLBAR）。
+const MARQUEE_EDGE_PX: f32 = 36.0;
+const MARQUEE_MAX_STEP: f32 = 24.0;
+
+/// M4.2 `M42-UI-03`：按指针距视口四边的距离算自动滚动增量。
+///
+/// - 只在拖拽进行中调用；`clip` 外返回 0（不越界滚、不抢滚轮，AC-03）。
+/// - 越靠边越快（线性梯度），单帧位移上限 `max_step`。
+/// - 返回值直接喂 `ui.scroll_with_delta_animation`：**符号按 egui 0.37 约定**——
+///   `ScrollArea::end` 里 `let mut delta = -scroll_delta;`，故 y<0 = 往下看、x<0 = 往右看。
+///   贴下边 → y 负；贴上边 → y 正；贴右边 → x 负；贴左边 → x 正。
+fn marquee_edge_delta(pos: egui::Pos2, clip: Rect, edge: f32, max_step: f32) -> Vec2 {
+    if !clip.contains(pos) {
+        return Vec2::ZERO;
+    }
+    let ramp = |d: f32| {
+        if d < edge {
+            (1.0 - d / edge).clamp(0.0, 1.0) * max_step
+        } else {
+            0.0
+        }
+    };
+    let left = ramp(pos.x - clip.left());
+    let right = ramp(clip.right() - pos.x);
+    let top = ramp(pos.y - clip.top());
+    let bottom = ramp(clip.bottom() - pos.y);
+    vec2(left - right, top - bottom)
+}
+
+/// M4.2 `M42-UI-03`：把本帧命中并入跨页累积集，去重保序（AC-02：滚动前后已划过的格子保持选中）。
+fn merge_marquee_ids(acc: &mut Vec<i64>, frame_ids: impl IntoIterator<Item = i64>) {
+    for id in frame_ids {
+        if !acc.contains(&id) {
+            acc.push(id);
+        }
+    }
 }
 
 /// 画整个栅格。
@@ -969,6 +1021,8 @@ pub fn show(
         need_dims: Vec::new(),
         marquee: None,
         clear_selection: false,
+        blank_cells: 0,
+        uploads_this_frame: 0,
     };
 
     let full = ui.available_rect_before_wrap();
@@ -1001,6 +1055,8 @@ pub fn show(
                         current: p,
                         additive: additive_now,
                         dragging: false,
+                        // M42-UI-03：每次新起手都从空累积集开始（跨页命中只属于本次拖拽）。
+                        accumulated: Vec::new(),
                     });
                 }
                 Some(d) => {
@@ -1023,16 +1079,19 @@ pub fn show(
     }
     // 把「本帧是否刚松开一次框选」传给闭包
     let marquee_release = released && drag.as_ref().is_some_and(|d| d.dragging);
-    let drag_snapshot = drag;
-    ui.ctx().memory_mut(|m| {
-        if released {
-            m.data.remove_temp::<MarqueeDrag>(drag_id);
-        } else if let Some(d) = drag_snapshot {
-            m.data.insert_temp(drag_id, d);
-        }
-    });
+    // M42-UI-03：`MarqueeDrag` 不再 `Copy`（含累积 Vec），且命中要在 show_viewport
+    // 闭包内逐帧并入，故 temp 写回统一挪到帧尾（见 `area.show_viewport` 之后）。
+    let mut drag_snapshot = drag;
 
     if photos.is_empty() {
+        // 无照片时也要维护拖拽 temp 的生命周期，避免起手状态滞留到下一帧。
+        ui.ctx().memory_mut(|m| {
+            if released {
+                m.data.remove_temp::<MarqueeDrag>(drag_id);
+            } else if let Some(d) = drag_snapshot.take() {
+                m.data.insert_temp(drag_id, d);
+            }
+        });
         draw_empty_state(ui, full, theme, cache, empty);
         return out;
     }
@@ -1136,6 +1195,47 @@ pub fn show(
         out.visible = last.saturating_sub(first);
         out.top_index = first.min(photos.len());
 
+        // ---- M4.2 `M42-UI-03`：跨页逐帧累积命中 + 拖到边缘自动滚动 ----
+        // 只在「正在拖拽」时按输入事件驱动：空闲帧零额外重绘、不读滚轮输入
+        // （AC-03 / AC-04 / R-M41-1）。边缘自动滚动把视口外更远处的格子逐帧
+        // 带进视口，本帧与框选矩形相交的 id 并入 `accumulated`（union，AC-02）。
+        if let Some(d) = drag_snapshot.as_mut()
+            && d.dragging
+        {
+            let sel_rect = Rect::from_two_pos(d.start, d.current);
+            // (1) 本帧可见格 ∩ 框选矩形 → 并入累积集（占位格不参与，沿用 M1 语义）。
+            let frame_ids = (first..last).filter_map(|index| {
+                let row = photos.get(index)?;
+                if row.thumb_state == 2 || row.thumb_state == 3 || row.thumb_state == 0 {
+                    return None;
+                }
+                let cr = layout.thumb_rect(index)?.translate(origin.to_vec2());
+                let hit = cr.left() < sel_rect.right()
+                    && cr.right() > sel_rect.left()
+                    && cr.top() < sel_rect.bottom()
+                    && cr.bottom() > sel_rect.top();
+                hit.then_some(row.id)
+            });
+            merge_marquee_ids(&mut d.accumulated, frame_ids);
+            // (2) 指针贴到视口边缘：按距离梯度让 ScrollArea 同帧滚动。
+            //     `ScrollAnimation::none()` = 瞬时滚动，避免 offset_target 动画在松手后
+            //     残留继续滚；松开帧（`released`）不再滚。非主轴分量清零，防止
+            //     egui 0.37 `end()` 只 take 启用轴的 scroll_delta 导致泄漏到别处。
+            if !released
+                && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+            {
+                let mut delta = marquee_edge_delta(pos, clip, MARQUEE_EDGE_PX, MARQUEE_MAX_STEP);
+                if horizontal {
+                    delta.y = 0.0;
+                } else {
+                    delta.x = 0.0;
+                }
+                if delta != Vec2::ZERO {
+                    ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
+                }
+            }
+        }
+
         // ---- 普通分组头：画在各自的位置上（吸顶头是「滚出去之后」的替身，两者互斥）----
         if layout.has_headers {
             for gi in layout.groups_in_range(first, last) {
@@ -1204,6 +1304,8 @@ pub fn show(
             let mut frame = img_rect;
             // M4.1 `M41-UI-02`：三种布局统一 8px 圆角（此前 masonry 是 0.0 直角）。
             let frame_radius = Metrics::THUMB_RADIUS;
+            // M4.2 `M42-PERF-00`：本格是否画了占位（未出图）。只做统计，不改绘制。
+            let mut blank = placeholder;
             if placeholder {
                 index_progress::draw_placeholder(&painter, img_rect, theme, failed);
             } else if use_atlas {
@@ -1217,6 +1319,7 @@ pub fn show(
                     false => {
                         // 还没进图集：画占位，等它进来（不阻塞本帧）
                         index_progress::draw_placeholder(&painter, rect, theme, false);
+                        blank = true;
                     }
                 }
             } else {
@@ -1233,22 +1336,28 @@ pub fn show(
                         // M4.1 `M41-UI-02`：三种布局统一走**圆角贴图**通路
                         // （RectShape::with_texture + 软阴影），不再对 masonry 用
                         // 无圆角的 painter.image。用的是同一张已上传纹理，不新增预算。
+                        // M4.2 `M42-UI-02`：与微缩图集档共用 [`rounded_image_shape`]，
+                        // 让「圆角」成为单一结构性不变量，任一路都回退不了直角。
                         painter.add(theme.thumb_shadow.as_shape(fitted, frame_radius));
-                        painter.add(
-                            egui::epaint::RectShape::filled(fitted, frame_radius, Color32::WHITE)
-                                .with_texture(
-                                    tex_id,
-                                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                                ),
-                        );
+                        painter.add(rounded_image_shape(
+                            fitted,
+                            tex_id,
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        ));
                     }
                     TexState::Pending => {
                         index_progress::draw_placeholder(&painter, rect, theme, false);
+                        blank = true;
                     }
                     TexState::Failed => {
                         index_progress::draw_placeholder(&painter, rect, theme, true);
+                        blank = true;
                     }
                 }
+            }
+            // M4.2 `M42-PERF-00`：累计空白格数（可见格里画了占位的）。
+            if blank {
+                out.blank_cells += 1;
             }
 
             if placeholder {
@@ -1293,6 +1402,17 @@ pub fn show(
                     let d = pos2(c.x + 3.4, c.y - 2.4);
                     painter.line_segment([a, b], w);
                     painter.line_segment([b, d], w);
+                }
+
+                // ---- 星标角标（M42-UI-01）----
+                // 数据层只有 `starred: bool`（0/1 收藏态，没有 1~5 评分列，
+                // R-M42-2 不新增 DB 字段），所以 `true` → 右上角一颗金色五角星，
+                // `false` → 不画。星形自绘（`icons::draw_star`，不依赖字体 glyph），
+                // 直接读 `row.starred` 零查库；与左上选中角标分置两侧、不重叠。
+                if row.starred {
+                    let (c, r) = star_badge(frame);
+                    painter.circle_filled(c, r + 2.0, Color32::from_black_alpha(150));
+                    icons::draw_star(&painter, c, r, Color32::GOLD);
                 }
 
                 if hovered {
@@ -1367,39 +1487,46 @@ pub fn show(
                 StrokeKind::Inside,
             );
         }
-        if marquee_release && let Some(d) = drag_snapshot {
-                let sel_rect = Rect::from_two_pos(d.start, d.current);
-                let mut ids = Vec::new();
-                let mut anchor_index = None;
-                // 命中口径：与 thumb_rect **相交即命中**（Finder / Photos 手感）。
-                for index in first..last {
-                    let Some(row) = photos.get(index) else { continue };
-                    // 占位格不参与选中（沿用 M1 既有语义）
-                    let failed = row.thumb_state == 2 || row.thumb_state == 3;
-                    if failed || row.thumb_state == 0 {
-                        continue;
-                    }
-                    if let Some(cr) = layout.thumb_rect(index) {
-                        let cr = cr.translate(origin.to_vec2());
-                        if cr.left() < sel_rect.right()
-                            && cr.right() > sel_rect.left()
-                            && cr.top() < sel_rect.bottom()
-                            && cr.bottom() > sel_rect.top()
-                        {
-                            ids.push(row.id);
-                            anchor_index = Some(index);
-                        }
-                    }
-                }
-                out.marquee = Some(MarqueeHit {
-                    ids,
-                    additive: d.additive,
-                    anchor_index,
-                });
+        if marquee_release && let Some(d) = &drag_snapshot {
+            // M42-UI-03：命中集用「跨页逐帧累积」的 union，而不是只算松手帧
+            // 当前视口可见格（AC-01/AC-02：滚动前后已划过的格子保持选中）。
+            // 注意用 `&drag_snapshot` 借用而非 move：本闭包前面刚用 `as_mut()`
+            // 逐帧并入过命中集，且 `MarqueeDrag` 已不再是 `Copy`。
+            let ids = d.accumulated.clone();
+            // 锚点取本视口内、属于累积集的最后一个可见格（shift 连续选起点）；
+            // 自动滚动把旧格全带出视口时退化为 None，不影响框选结果。只遍历
+            // 可见格，不遍历全库（R-M41-1/2）。
+            let anchor_index = (first..last).rev().find(|&index| {
+                photos
+                    .get(index)
+                    .is_some_and(|row| d.accumulated.contains(&row.id))
+            });
+            out.marquee = Some(MarqueeHit {
+                ids,
+                additive: d.additive,
+                anchor_index,
+            });
             // 框选这一帧的 clicked 必须作废（拖动不是普通单击）
             out.clicked = None;
             out.opened = None;
             out.context = None;
+        }
+    });
+
+    // M4.2 `M42-PERF-00`：本帧贴图上传数 = 预算初值 − 剩余预算。图集档走
+    // `tick_atlas` 单独上传（不消耗这里的每帧 3 张预算），故图集档记为 0，
+    // 诊断页的「≤3」语义针对的是正常纹理档。纯统计，不改绘制/上传调度。
+    out.uploads_this_frame =
+        (Metrics::TEX_UPLOAD_PER_FRAME - budget).min(u8::MAX as usize) as u8;
+
+    // M42-UI-03：帧尾统一维护拖拽 temp（`MarqueeDrag` 不再是 `Copy`，帧首不再写回）。
+    // 松开帧移除状态；拖拽进行中把「逐帧累积命中集」写回，供下一帧接着累积
+    // （跨页连续框选）。此前帧首的写回块已删除，这里是唯一真相源。
+    ui.ctx().memory_mut(|m| {
+        if released {
+            m.data.remove_temp::<MarqueeDrag>(drag_id);
+        } else if let Some(d) = drag_snapshot {
+            m.data.insert_temp(drag_id, d);
         }
     });
 
@@ -1462,6 +1589,33 @@ fn interact_cell(
     resp
 }
 
+/// 构造一张「带圆角的贴图矩形」，正常纹理档与微缩图集档**共用**。
+///
+/// M4.2 `M42-UI-02`：把此前图集档用的直角 `painter.image` 收编到同一通路，
+/// 用 `Metrics::THUMB_RADIUS`（8px）四角圆角。两条路径用同一张已上传纹理、
+/// 不新增任何 GPU 上传/预算。UV 语义与 `painter.image` 完全一致
+/// （epaint `tessellator` 对圆角 path 做 `fill_with_uv`）；图集档 `slot_uv`
+/// 精确到像素边界，圆角不会让相邻槽串色（见 `atlas.rs::slot_uv` 注释）。
+///
+/// 抽成纯函数是为了让「圆角」成为可单测锁定的**结构性不变量**：
+/// 只要两条绘制路径都经过这里，任何一路都回退不了 `painter.image` 直角。
+fn rounded_image_shape(rect: Rect, tex_id: egui::TextureId, uv: Rect) -> egui::epaint::RectShape {
+    egui::epaint::RectShape::filled(rect, Metrics::THUMB_RADIUS, Color32::WHITE)
+        .with_texture(tex_id, uv)
+}
+
+/// M4.2 M42-UI-01：星标角标的位置与半径（右上，避开左上角选中角标）。
+///
+/// 选中角标固定在 `rect.left()+8, rect.top()+8, r=7`（`docs/10` M32-UI-10），
+/// 星标角标放**右上角**，两者水平相距整格宽、永不重叠（AC-03）。半径随格子
+/// 缩放并夹到 `[3.5, 7.0]`，22px 的微缩图集格也放得下。抽成纯函数便于单测
+/// 锁定「右上 + 不与选中角标重叠」这个结构性不变量。
+fn star_badge(frame: Rect) -> (egui::Pos2, f32) {
+    let r = (frame.width() * 0.14).clamp(3.5, 7.0);
+    let c = pos2(frame.right() - r - 3.0, frame.top() + r + 3.0);
+    (c, r)
+}
+
 /// 从图集里画一格。返回 `false` 表示这张还没进图集（调用方画占位）。
 ///
 /// ## 为什么这里不「顺手装进去」
@@ -1482,12 +1636,11 @@ fn draw_from_atlas(
     let Some(tex) = atlas.texture_of(slot.page) else {
         return false;
     };
-    painter.image(
-        tex.id(),
+    painter.add(rounded_image_shape(
         rect,
+        tex.id(),
         Rect::from_min_max(slot.uv[0], slot.uv[1]),
-        Color32::WHITE,
-    );
+    ));
     true
 }
 
@@ -2389,6 +2542,55 @@ mod tests {
         }
     }
 
+    /// `M42-UI-02`：微缩图集档与正常纹理档共用圆角贴图通路，四角半径恒为
+    /// `Metrics::THUMB_RADIUS`（8px），不得回退成直角 `painter.image`。
+    /// 用纯函数构造 `RectShape` 并直接读 `corner_radius` / `brush`，
+    /// 不依赖 GPU/egui Context，守住「圆角是结构性不变量」。
+    #[test]
+    fn m42_atlas_thumb_is_rounded_like_normal_path() {
+        assert_eq!(Metrics::THUMB_RADIUS, 8.0);
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(32.0, 32.0));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        let shape = rounded_image_shape(rect, egui::TextureId::default(), uv);
+        let r = shape.corner_radius;
+        assert_eq!(r.nw, 8, "左上圆角");
+        assert_eq!(r.ne, 8, "右上圆角");
+        assert_eq!(r.sw, 8, "左下圆角");
+        assert_eq!(r.se, 8, "右下圆角");
+        assert_eq!(r, egui::CornerRadius::same(8));
+        // 贴图确实挂上了（否则只是个圆角白块，等于把图弄丢了）
+        let brush = shape.brush.expect("圆角贴图必须带 texture brush");
+        assert_eq!(brush.uv, uv);
+    }
+
+    /// `M42-UI-01` AC-03：星标角标在右上、与左上选中角标不重叠；22px 微缩
+    /// 图集格也放得下（半径被夹到 3.5）。纯几何断言，不依赖 GPU。
+    #[test]
+    fn m42_star_badge_is_top_right_and_clear_of_selection_badge() {
+        let frame = Rect::from_min_size(pos2(100.0, 100.0), vec2(96.0, 96.0));
+        let (star, r) = star_badge(frame);
+        // 右上：靠近右边、靠近上边
+        assert!(star.x > frame.center().x, "星标须在右半格");
+        assert!(star.y < frame.center().y, "星标须在上半格");
+        assert!(star.x + r + 3.0 <= frame.right() + 0.001, "不越右边界");
+        assert!(star.y - r - 3.0 >= frame.top() - 0.001, "不越上边界");
+        // 选中角标：左上角 (left+8, top+8, r=7)
+        let sel = pos2(frame.left() + 8.0, frame.top() + 8.0);
+        let sel_r = 7.0;
+        let dist = ((star.x - sel.x).powi(2) + (star.y - sel.y).powi(2)).sqrt();
+        assert!(
+            dist >= r + sel_r,
+            "星标角标与选中角标不得重叠：距离 {dist} < {}",
+            r + sel_r
+        );
+        // 22px 微缩格：半径夹到 3.5，仍在格内
+        let tiny = Rect::from_min_size(pos2(0.0, 0.0), vec2(22.0, 22.0));
+        let (tc, tr) = star_badge(tiny);
+        assert_eq!(tr, 3.5);
+        assert!(tc.x - tr >= tiny.left());
+        assert!(tc.y + tr <= tiny.bottom());
+    }
+
     /// `M41-UI-10`：框选命中集结构（ids / additive / anchor_index）可独立构造，
     /// 便于上层 `lib.selection` 的 union / 替换语义单测。
     #[test]
@@ -2406,5 +2608,61 @@ mod tests {
             sel.insert(*id);
         }
         assert_eq!(sel.len(), 5, "追加模式应 union 进已有选中集");
+    }
+
+    /// `M42-UI-03` TC-M42-B-03-01/03：边缘自动滚动是「clip 内、贴边、按距离
+    /// 梯度」的，clip 外返回零（不越界滚、不抢滚轮 AC-03）。纯几何断言。
+    #[test]
+    fn m42_marquee_edge_delta_ramp_and_bounds() {
+        let clip = Rect::from_min_max(pos2(100.0, 100.0), pos2(900.0, 700.0));
+        let edge = 36.0;
+        let max_step = 24.0;
+        // clip 外（左上、右下）一律零
+        assert_eq!(
+            marquee_edge_delta(pos2(99.0, 99.0), clip, edge, max_step),
+            Vec2::ZERO
+        );
+        assert_eq!(
+            marquee_edge_delta(pos2(901.0, 701.0), clip, edge, max_step),
+            Vec2::ZERO
+        );
+        // 正中间：远离所有边 → 零（空闲帧不滚，R-M41-1）
+        assert_eq!(
+            marquee_edge_delta(clip.center(), clip, edge, max_step),
+            Vec2::ZERO
+        );
+        // 贴下边 → y 负（往下看）；贴上边 → y 正；且贴得越紧幅度越大
+        let near_bottom = marquee_edge_delta(pos2(500.0, 699.0), clip, edge, max_step);
+        let far_bottom = marquee_edge_delta(pos2(500.0, 680.0), clip, edge, max_step);
+        assert!(near_bottom.y < 0.0, "贴下边须 y<0：{near_bottom:?}");
+        assert!(near_bottom.y < far_bottom.y, "越靠边幅度越大");
+        assert_eq!(near_bottom.x, 0.0, "只贴下边不应有水平分量");
+        let near_top = marquee_edge_delta(pos2(500.0, 101.0), clip, edge, max_step);
+        assert!(near_top.y > 0.0, "贴上边须 y>0：{near_top:?}");
+        // 贴右边 → x 负（往右看）；贴左边 → x 正
+        assert!(marquee_edge_delta(pos2(899.0, 400.0), clip, edge, max_step).x < 0.0);
+        assert!(marquee_edge_delta(pos2(101.0, 400.0), clip, edge, max_step).x > 0.0);
+        // 单帧幅度不超过 max_step（四边同时贴的角落也不超）
+        let corner = marquee_edge_delta(pos2(100.0, 100.0), clip, edge, max_step);
+        assert!(corner.x.abs() <= max_step && corner.y.abs() <= max_step);
+    }
+
+    /// `M42-UI-03` TC-M42-B-03-02：跨页累积 union——滚动前后已划过的格子
+    /// 保持选中、去重且保序；空累积/重复帧不破坏结果。
+    #[test]
+    fn m42_merge_marquee_ids_is_union_and_ordered() {
+        let mut acc = Vec::new();
+        // 空累积 + 空帧 → 空
+        merge_marquee_ids(&mut acc, std::iter::empty::<i64>());
+        assert!(acc.is_empty());
+        // 第一屏命中 3、5、7
+        merge_marquee_ids(&mut acc, [3, 5, 7]);
+        assert_eq!(acc, vec![3, 5, 7]);
+        // 自动滚动后第二屏：3 重复、新增 9、11（3 不重复、顺序保持）
+        merge_marquee_ids(&mut acc, [3, 9, 11]);
+        assert_eq!(acc, vec![3, 5, 7, 9, 11], "跨页不丢旧、不重复、保序");
+        // 重复帧无副作用
+        merge_marquee_ids(&mut acc, [5, 7]);
+        assert_eq!(acc, vec![3, 5, 7, 9, 11]);
     }
 }

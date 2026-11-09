@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>M4.2 界面原型 · 展示打磨与展示性能（7 屏）</title>
+<style>
+  :root{
+    /* v1.8 白圆底体系（锁死：不引入玻璃/渐变/彩色顶栏） */
+    --bg:#f4f5f7; --panel:#ffffff; --toolbar:#fafbfc; --ink:#1f2329; --ink2:#5a616b;
+    --line:#e3e6ea; --accent:#2f6fed; --accent-soft:#e8effd; --star:#f2a63b;
+    --sel:#2f6fed; --danger:#d9483b; --ok:#2e9e6b; --ph:#d8dde3;
+    --shadow:0 2px 6px rgba(23,32,48,.18),0 1px 1px rgba(23,32,48,.10); /* control_shadow offset[0,2]/blur6/alpha64 + contact + hairline */
+    --hair:0 0 0 1px rgba(23,32,48,.06);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font:13px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,sans-serif;color:var(--ink);background:#e9ebee}
+  .app{display:flex;height:100vh;overflow:hidden}
+
+  /* 左侧「屏导航」——原型外壳，不是产品界面 */
+  .nav{width:210px;flex:none;background:#20252e;color:#cdd3dc;padding:14px 10px;overflow:auto}
+  .nav h1{font-size:13px;margin:2px 6px 4px;color:#fff;letter-spacing:.3px}
+  .nav .sub{font-size:11px;color:#8b95a4;margin:0 6px 14px;line-height:1.5}
+  .nav .grp{font-size:10px;color:#6f7a89;letter-spacing:1px;margin:14px 6px 6px}
+  .nav button{display:block;width:100%;text-align:left;border:0;border-radius:9px;background:transparent;color:#cdd3dc;padding:9px 10px;margin:2px 0;cursor:pointer;font-size:12.5px;transition:.15s}
+  .nav button:hover{background:#2c333e;color:#fff}
+  .nav button.active{background:var(--accent);color:#fff;box-shadow:0 2px 6px rgba(47,111,237,.4)}
+  .nav button .sid{opacity:.6;font-size:10px;margin-right:6px}
+  .nav .note{margin-top:18px;padding:10px;background:#2a303a;border-radius:9px;font-size:10.5px;color:#9aa4b2;line-height:1.6}
+  .nav .note b{color:#e6c98a}
+
+  /* 右侧「屏」舞台 */
+  .stage{flex:1;display:flex;flex-direction:column;min-width:0}
+  .stage-bar{height:44px;flex:none;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;padding:0 18px}
+  .stage-bar .t{font-weight:600;font-size:13px}
+  .stage-bar .d{font-size:11.5px;color:var(--ink2)}
+  .stage-bar .tag{margin-left:auto;font-size:10.5px;color:var(--ink2);background:var(--bg);border:1px solid var(--line);padding:3px 9px;border-radius:20px}
+  .canvas{flex:1;overflow:auto;padding:22px;display:flex;align-items:flex-start;justify-content:center}
+  .screen{display:none;width:100%;max-width:1080px}
+  .screen.active{display:block;animation:fade .18s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+  /* 通用控件（白圆底 + 加深阴影 + 发丝边） */
+  .btn{border:0;background:#fff;color:var(--ink);border-radius:999px;padding:7px 14px;cursor:pointer;font-size:12px;box-shadow:var(--shadow),var(--hair);transition:.12s;white-space:nowrap}
+  .btn:hover{transform:translateY(-1px)}
+  .btn:active{transform:none}
+  .btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+  .btn.primary{background:var(--accent);color:#fff}
+  .btn.danger{background:var(--danger);color:#fff}
+  .btn.sq{width:30px;height:30px;padding:0;border-radius:50%;display:inline-flex;align-items:center;justify-content:center}
+  .chip{display:inline-flex;align-items:center;gap:4px;background:#fff;border-radius:999px;padding:4px 10px;font-size:11px;box-shadow:var(--shadow),var(--hair)}
+  .win{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 8px 30px rgba(23,32,48,.12);overflow:hidden}
+  .win .topbar{height:50px;background:var(--toolbar);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:0 14px}
+  .win .topbar .sp{flex:1}
+  .win .body{display:flex;min-height:460px}
+  .side{width:184px;flex:none;border-right:1px solid var(--line);padding:12px 10px;background:#fcfcfd}
+  .side .h{font-size:10px;color:var(--ink2);letter-spacing:1px;margin:10px 6px 6px}
+  .side .row{padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:6px}
+  .side .row:hover{background:var(--bg)}
+  .side .add{color:var(--accent);font-size:11.5px}
+  .side .add:hover{background:var(--accent-soft)}
+  .side input.inline{width:100%;border:1px solid var(--accent);border-radius:7px;padding:5px 7px;font-size:11.5px;outline:none}
+  .main{flex:1;min-width:0;padding:14px}
+  .toolrow{display:flex;align-items:center;gap:7px;margin-bottom:12px;flex-wrap:wrap}
+  .toolrow .lbl{font-size:11.5px;color:var(--ink2);margin-right:2px}
+  .grid{display:grid;gap:16px}
+  .cell{position:relative;border-radius:10px;overflow:hidden;background:linear-gradient(135deg,#cfd6df,#aeb8c6);aspect-ratio:1/1;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  .cell.ph{background:repeating-linear-gradient(45deg,var(--ph),var(--ph) 8px,#e6eaef 8px,#e6eaef 16px)}
+  .cell img{width:100%;height:100%;object-fit:cover;display:block}
+  .cell .star{position:absolute;top:6px;right:6px;background:rgba(255,255,255,.94);color:var(--star);border-radius:999px;padding:2px 7px;font-size:10.5px;font-weight:700;box-shadow:var(--hair)}
+  .cell .selmark{position:absolute;bottom:6px;left:6px;width:16px;height:16px;border-radius:50%;background:var(--sel);border:2px solid #fff;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center}
+  .cell.selected{outline:3px solid var(--sel);outline-offset:-3px}
+  .cell .selmark::after{content:"●";font-size:8px}
+  .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(20px);opacity:0;background:#fff;border-radius:999px;padding:10px 20px;box-shadow:0 6px 24px rgba(23,32,48,.22),var(--hair);font-size:12.5px;transition:.25s;z-index:99;pointer-events:none}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .toast.err{color:var(--danger)}
+  .legend{font-size:11px;color:var(--ink2);background:#fff;border:1px dashed var(--line);border-radius:10px;padding:9px 12px;margin-bottom:12px;line-height:1.7}
+  .legend b{color:var(--ink)}
+  .kbd{font:11px ui-monospace,Menlo,monospace;background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+  .modal{position:fixed;inset:0;background:rgba(20,26,36,.40);display:none;align-items:center;justify-content:center;z-index:80}
+  .modal.show{display:flex}
+  .modal .box{background:#fff;border-radius:14px;padding:20px 22px;max-width:340px;box-shadow:0 16px 50px rgba(0,0,0,.28)}
+  .modal .box h3{margin:0 0 8px;font-size:14px}
+  .modal .box p{margin:0 0 16px;color:var(--ink2);font-size:12px;line-height:1.6}
+  .modal .box .acts{display:flex;gap:8px;justify-content:flex-end}
+
+  /* S1 顶栏缩放 */
+  .zoom{display:flex;align-items:center;gap:6px}
+  .zoom .val{font-size:11px;color:var(--ink2);min-width:38px;text-align:center}
+
+  /* S2 查看器 */
+  .viewer{display:flex;flex-direction:column;height:460px}
+  .viewer .vtop{height:46px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:0 14px}
+  .viewer .vimg{flex:1;margin:18px;background:radial-gradient(circle at 35% 30%,#dfe6f0,#b9c4d3 60%,#9aa7ba);border-radius:10px;display:flex;align-items:center;justify-content:center;color:#6b7688;font-size:12px;position:relative}
+  .viewer .vimg .big{position:absolute;bottom:10px;right:14px;background:rgba(255,255,255,.85);padding:3px 9px;border-radius:8px;font-size:10.5px}
+  .infobar{height:52px;border-top:1px solid var(--line);display:flex;align-items:center;gap:18px;padding:0 16px;font-size:12px;background:var(--toolbar)}
+  .infobar .meta{color:var(--ink2)}
+  .infobar .stars{color:var(--star);font-size:15px;letter-spacing:1px}
+  .infobar .tags{display:flex;gap:6px;align-items:center}
+  .infobar .sep{width:1px;height:20px;background:var(--line)}
+  .stars.clickable span{cursor:pointer}
+
+  /* S3 框选 */
+  .marq-wrap{position:relative}
+  .marq-hint{position:absolute;top:10px;left:10px;z-index:3;background:rgba(255,255,255,.94);border-radius:8px;padding:6px 10px;font-size:10.5px;color:var(--ink2);box-shadow:var(--hair)}
+  .marq-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;user-select:none}
+  .marq-grid .mc{aspect-ratio:1/1;border-radius:8px;background:linear-gradient(135deg,#d5dce6,#aab5c5);position:relative;cursor:crosshair}
+  .marq-grid .mc.on{outline:3px solid var(--sel);outline-offset:-3px;background:linear-gradient(135deg,#c9dcff,#7fa8f5)}
+  .edge{position:absolute;left:0;right:0;height:26px;pointer-events:none;z-index:2;transition:.2s}
+  .edge.top{top:0;background:linear-gradient(to bottom,rgba(47,111,237,.28),transparent)}
+  .edge.bot{bottom:0;background:linear-gradient(to top,rgba(47,111,237,.28),transparent)}
+  .edge.hot{background:linear-gradient(to top,rgba(47,111,237,.62),transparent)}
+  .rect{position:absolute;border:2px dashed var(--accent);background:rgba(47,111,237,.10);pointer-events:none;z-index:4;display:none}
+  .marq-stat{margin-top:10px;font-size:11.5px;color:var(--ink2)}
+  .marq-stat b{color:var(--accent)}
+
+  /* S4 相册 / 下拉 / 浮层 */
+  .pop{position:relative;display:inline-block}
+  .pop .menu{position:absolute;top:110%;left:0;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(23,32,48,.18);padding:7px;min-width:190px;display:none;z-index:20}
+  .pop.open .menu{display:block}
+  .pop .menu .it{padding:7px 9px;border-radius:8px;font-size:12px;cursor:pointer;display:flex;gap:8px;align-items:center}
+  .pop .menu .it:hover{background:var(--bg)}
+  .pop .menu .div{height:1px;background:var(--line);margin:5px 2px}
+  .tri{display:inline-flex;align-items:center;gap:6px;font-size:11.5px}
+  .tri .box{width:14px;height:14px;border:1.5px solid var(--ink2);border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:#fff}
+  .tri.full .box{background:var(--accent);border-color:var(--accent)}
+  .tri.part .box{background:linear-gradient(135deg,var(--accent) 50%,#fff 50%);border-color:var(--accent)}
+  .tri.none .box{background:#fff}
+  .albrow{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:8px;font-size:12px}
+  .albrow:hover{background:var(--bg)}
+  .albrow .dots{margin-left:auto;color:var(--ink2);cursor:pointer}
+
+  /* S5 图集圆角三布局 */
+  .zoomctl{display:flex;align-items:center;gap:10px;margin:6px 0 16px}
+  .zoomctl input[type=range]{width:200px}
+  .atlas-demo{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}
+  .atlas-demo h4{margin:0 0 12px;font-size:12px}
+  .lay{display:flex;gap:10px;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap}
+  .lay .cap{width:72px;flex:none;font-size:10.5px;color:var(--ink2);padding-top:6px}
+  .tile{background:linear-gradient(135deg,#cfd8e4,#9fadc0);flex:none}
+  .tile.big{width:88px;height:88px;border-radius:10px}
+  .tile.small{width:42px;height:42px}
+  .tile.small.round{border-radius:8px}
+  .tile.small.square{border-radius:0}
+  .cmp{display:flex;gap:22px;flex-wrap:wrap}
+  .cmp .col{flex:1;min-width:200px}
+  .cmp .col .lbl{font-size:11px;margin-bottom:8px;font-weight:600}
+  .cmp .col.before .lbl{color:var(--danger)}
+  .cmp .col.after .lbl{color:var(--ok)}
+
+  /* S6 导入向导 */
+  .wiz{display:flex;gap:0;margin-bottom:16px}
+  .wiz .st{flex:1;text-align:center;font-size:11px;color:var(--ink2);padding:8px 4px;border-bottom:2px solid var(--line)}
+  .wiz .st.on{color:var(--accent);border-color:var(--accent);font-weight:600}
+  .wiz .st.done{color:var(--ok);border-color:var(--ok)}
+  .prev{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+  .prev .p{width:76px;height:76px;border-radius:8px;background:linear-gradient(135deg,#d5dce6,#aab5c5)}
+  .prev .p.ph{background:repeating-linear-gradient(45deg,var(--ph),var(--ph) 8px,#e6eaef 8px,#e6eaef 16px)}
+  .prog{height:10px;border-radius:99px;background:var(--bg);overflow:hidden;margin:8px 0}
+  .prog .bar{height:100%;width:0;background:var(--accent);transition:width .25s}
+  .prog.indet .bar{width:35%;animation:ind 1.1s infinite ease-in-out}
+  @keyframes ind{0%{margin-left:-35%}100%{margin-left:100%}}
+
+  /* S7 性能基准 */
+  table.perf{width:100%;border-collapse:collapse;font-size:12px}
+  table.perf th,table.perf td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left}
+  table.perf th{background:var(--bg);color:var(--ink2);font-weight:600;font-size:11px}
+  table.perf td.num{font:12px ui-monospace,Menlo,monospace}
+  table.perf .pass{color:var(--ok);font-weight:600}
+  .lockbox{margin-top:12px;background:#fff8ec;border:1px solid #f0d9a8;border-radius:10px;padding:10px 12px;font-size:11.5px;line-height:1.7}
+  .warn{font-size:11px;color:var(--ink2);margin-bottom:12px}
+  .footnote{font-size:10.5px;color:#9aa4b2;text-align:center;padding:8px}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ░░ 原型外壳：屏导航（非产品界面） ░░ -->
+  <aside class="nav">
+    <h1>M4.2 界面原型</h1>
+    <p class="sub">展示打磨 · 展示性能 · 欠账清偿<br>7 屏 / 对应 17 文档 S1–S7</p>
+
+    <div class="grp">A 组 · 看得见的断层</div>
+    <button class="active" data-go="screen-home"><span class="sid">S1</span>主界面 · 星标角标 / 新建</button>
+    <button data-go="screen-viewer"><span class="sid">S2</span>查看器 · 星标与标签</button>
+    <button data-go="screen-marquee"><span class="sid">S3</span>框选增强 · 边缘滚动</button>
+    <button data-go="screen-albums"><span class="sid">S4</span>相册 CRUD / 标签浮层</button>
+    <button data-go="screen-atlas"><span class="sid">S5</span>微缩图集圆角 · 三布局</button>
+
+    <div class="grp">B / C / D 组 · 欠账与性能</div>
+    <button data-go="screen-import"><span class="sid">S6</span>导入向导 · 预览 / 进度</button>
+    <button data-go="screen-perf"><span class="sid">S7</span>展示性能基准（诊断）</button>
+
+    <div class="note">
+      <b>样式基线 v1.8</b><br>白圆底 + 加深阴影，<b>无玻璃</b>（P-M42-05 已裁决不做）。<br><br>
+      <b>锁死常量</b><br>TEX_UPLOAD_PER_FRAME=3 / TEX_CACHE_CAP=120 / SCROLLBAR=8.0（P-M42-09 绝不动）。<br><br>
+      数字为示意占位；S7 真实值由 M42-PERF-00 实测写入 03。<br><br>
+      <b>本轮只交付设计，不实装。</b>
+    </div>
+  </aside>
+
+  <div class="stage">
+    <div class="stage-bar">
+      <span class="t" id="stageTitle">S1 · 主界面 · 星标角标与左栏新建</span>
+      <span class="d" id="stageDesc">M42-UI-01 / M42-UI-04</span>
+      <span class="tag" id="stageAnchor">data-screen = screen-home</span>
+    </div>
+
+    <div class="canvas">
+
+      <!-- ══════════════ S1 · screen-home ══════════════ -->
+      <section class="screen active" data-screen="screen-home" data-title="S1 · 主界面 · 星标角标与左栏新建" data-desc="M42-UI-01 / M42-UI-04">
+        <div class="legend">
+          <b>看什么：</b>网格右上 <b>★N 星标角标</b> 与「●选 选中角标」分占不同角、互不遮挡；左栏「＋ 新建标签 / ＋ 新建相册」由「只弹提示」变<b>真入口</b>（点击→内联输入→真建记录→左栏立即出现）。
+          <b>交互：</b>点击照片格切换选中；点星标按钮打/消星；点「＋」试新建（空名/重名会 toast 报错且不落脏记录）。
+        </div>
+        <div class="win">
+          <div class="topbar">
+            <button class="btn sq" title="菜单">≡</button>
+            <b style="font-size:12.5px">OpenPicasa</b>
+            <div class="zoom" style="margin-left:14px">
+              <button class="btn sq" onclick="zoomBy(-1)">−</button>
+              <span class="val" id="zoomVal">96px</span>
+              <button class="btn sq" onclick="zoomBy(1)">+</button>
+            </div>
+            <div class="sp"></div>
+            <span class="chip">🔍 搜索</span>
+            <span class="chip">布局 ▾</span>
+            <span class="chip">⋯</span>
+          </div>
+          <div class="body">
+            <div class="side">
+              <div class="h">资料库</div>
+              <div class="row">▸ 全部照片</div>
+              <div class="row">▸ 最近导入</div>
+              <div class="h">标签</div>
+              <div id="tagList"><div class="row">▸ 旅行</div><div class="row">▸ 家人</div></div>
+              <div class="row add" onclick="openNew('tag')">＋ 新建标签</div>
+              <div class="h">相册</div>
+              <div id="albList"><div class="row">▸ 2024 夏</div></div>
+              <div class="row add" onclick="openNew('album')">＋ 新建相册</div>
+            </div>
+            <div class="main">
+              <div class="toolrow">
+                <span class="lbl">选中 <b id="selCount">0</b> 张</span>
+                <button class="btn" onclick="rateSelected()">☆ 打星标</button>
+                <button class="btn" onclick="unrateSelected()">取消星标</button>
+                <button class="btn" onclick="toast('已加入托盘（原型示意）')">托盘</button>
+              </div>
+              <div class="grid" id="homeGrid" style="grid-template-columns:repeat(5,1fr)"></div>
+            </div>
+          </div>
+        </div>
+        <div class="footnote">S1 · 星标角标用 ★/形状绘制，不依赖缺失的 ✓ 字形 · 选中/星标变更后同帧刷新</div>
+      </section>
+
+      <!-- ══════════════ S2 · screen-viewer ══════════════ -->
+      <section class="screen" data-screen="screen-viewer" data-title="S2 · 查看器 · 星标与标签信息条" data-desc="M42-UI-01">
+        <div class="legend">
+          <b>看什么：</b>查看器底部<b>信息条</b>显示该张星标 <b>★★★☆☆ (3)</b> 与标签 chips <b>[旅行] [2024夏] [+2▾]</b>；无星无标签时只显示文件元信息、<b>不显示空占位</b>。
+          <b>交互：</b>点上排 ☆ 改星标；点 <b>[+N▾]</b> 展开全部标签；切到「无标记照片」看空态。
+        </div>
+        <div class="win">
+          <div class="viewer">
+            <div class="vtop">
+              <button class="btn" onclick="go('screen-home')">← 返回</button>
+              <div class="sp"></div>
+              <div class="stars clickable" id="vStars"></div>
+              <button class="btn">🏷 标签</button>
+            </div>
+            <div class="vimg" id="vImg">
+              照片大图（原型占位）
+              <div class="big" id="vName">DSC_1024.jpg · 4032×3024</div>
+            </div>
+            <div class="infobar">
+              <span class="meta" id="vMeta">DSC_1024.jpg · 2024-08-12 · 4032×3024</span>
+              <div class="sep"></div>
+              <span class="stars" id="vStarText">★★★☆☆ (3)</span>
+              <div class="sep"></div>
+              <div class="tags" id="vTags"></div>
+            </div>
+          </div>
+        </div>
+        <div class="toolrow" style="margin-top:12px">
+          <button class="btn" onclick="viewerPhoto('full')">■ 有星标+多标签照片</button>
+          <button class="btn" onclick="viewerPhoto('empty')">□ 无标记照片（空态）</button>
+        </div>
+        <div class="footnote">S2 · 信息条与网格角标同源；标签超 N 个收起为 [+N▾]</div>
+      </section>
+
+      <!-- ══════════════ S3 · screen-marquee ══════════════ -->
+      <section class="screen" data-screen="screen-marquee" data-title="S3 · 框选增强 · 边缘自动滚动 / 跨页" data-desc="M42-UI-03">
+        <div class="legend">
+          <b>看什么 / 怎么做：</b>在下方网格里<b>按住鼠标拖出矩形</b>（M4.1 既有框选）；拖到<b>底边蓝色带</b>会触发「自动滚动」示意、跨行连续选中、先前划过的格子保持选中；<b>滚轮始终不被抢</b>；松手定稿、空闲帧零额外重绘（R-M41-1）。触板手势不纳入。
+        </div>
+        <div class="win">
+          <div class="topbar"><b style="font-size:12.5px">框选增强（拖拽演示）</b><div class="sp"></div><span class="chip" id="marqMode">空闲 · 零额外重绘</span></div>
+          <div class="body"><div class="main">
+            <div class="marq-wrap" id="marqWrap">
+              <div class="marq-hint">按住拖动 = 框选 · 拖到底部蓝带 = 自动滚动（仅拖拽中）</div>
+              <div class="edge top"></div>
+              <div class="marq-grid" id="marqGrid"></div>
+              <div class="edge bot" id="edgeBot"></div>
+              <div class="rect" id="marqRect"></div>
+            </div>
+            <div class="marq-stat">已选 <b id="marqCount">0</b> 张 · <span id="marqHint">松手定稿。滚轮仍控制滚动区，不被框选拦截。</span></div>
+          </div></div>
+        </div>
+        <div class="toolrow" style="margin-top:12px">
+          <button class="btn" onclick="marqReset()">清空选区</button>
+          <button class="btn" onclick="toast('滚轮事件仍派发给 ScrollArea（原型不拦截）')">模拟滚轮</button>
+        </div>
+        <div class="footnote">S3 · 只在拖拽中按输入事件驱动 · 不改 lib.selection · 跨滚动位置连续选中</div>
+      </section>
+
+      <!-- ══════════════ S4 · screen-albums ══════════════ -->
+      <section class="screen" data-screen="screen-albums" data-title="S4 · 相册 CRUD 与左栏新建 / 标签浮层" data-desc="M42-UI-04 / M42-UI-05 / M42-UI-06">
+        <div class="legend">
+          <b>看什么：</b>「＋ 加入相册▾」下拉列已有相册、选中后落关联；相册「⋯」改名/删除（<b>二次确认：只解除关联、不删照片文件</b>）；🏷 标签浮层三态 <b>☑全选 / ▣部分 / ☐未选</b> 读缓存、打开帧查库次数恒定。
+          <b>交互：</b>先点几个格子选中 → 操作栏可用；点下拉/标签浮层/⋯ 试各流程。
+        </div>
+        <div class="win">
+          <div class="topbar"><b style="font-size:12.5px">主界面 · 选中态</b><div class="sp"></div><span class="chip">已选 <b id="albSel">0</b> 张</span></div>
+          <div class="body">
+            <div class="side">
+              <div class="h">相册</div>
+              <div id="albSide"></div>
+              <div class="row add" onclick="openNew('album')">＋ 新建相册</div>
+            </div>
+            <div class="main">
+              <div class="toolrow">
+                <button class="btn" onclick="toast('收藏（原型示意）')">♡ 收藏</button>
+                <button class="btn" onclick="toast('说明（原型示意）')">✎ 说明</button>
+
+                <!-- 标签浮层（三态，读缓存） -->
+                <div class="pop" id="tagPop">
+                  <button class="btn" onclick="togglePop('tagPop')">🏷 标签 ▾</button>
+                  <div class="menu">
+                    <div class="tri full" onclick="cycleTri(this)"><span class="box">✓</span> 旅行（全选）</div>
+                    <div class="tri part" onclick="cycleTri(this)"><span class="box">▣</span> 家人（部分）</div>
+                    <div class="tri none" onclick="cycleTri(this)"><span class="box"></span> 工作（未选）</div>
+                    <div class="div"></div>
+                    <div class="it" style="color:var(--ink2);font-size:10.5px">三态读缓存 · 打开帧查库次数恒定</div>
+                  </div>
+                </div>
+
+                <!-- 加入相册下拉 -->
+                <div class="pop" id="addPop">
+                  <button class="btn" id="addBtn" disabled onclick="togglePop('addPop')">＋ 加入相册 ▾</button>
+                  <div class="menu" id="addMenu"></div>
+                </div>
+
+                <button class="btn" onclick="toast('已加入托盘（原型示意）')">托盘</button>
+              </div>
+              <div class="grid" id="albGrid" style="grid-template-columns:repeat(5,1fr)"></div>
+            </div>
+          </div>
+        </div>
+        <div class="footnote">S4 · 删除二次确认文案「只解除相册关联，不会删除照片文件」 · 零 schema</div>
+      </section>
+
+      <!-- ══════════════ S5 · screen-atlas ══════════════ -->
+      <section class="screen" data-screen="screen-atlas" data-title="S5 · 微缩图集圆角 · 三布局" data-desc="M42-UI-02">
+        <div class="legend">
+          <b>看什么：</b>拖滑块到 <b>≤48px 档</b>，本版把图集子矩形从<b>直角</b>改为 <b>8px 圆角</b>，三布局（方格 / 纵瀑布 / 横瀑布）一致；96px 默认档既有圆角不变。
+          <b>约束：</b>只改裁剪路径，不改 CELL_GAP / GRID_PAD / LOG_STEPS，不新增贴图上传、p99 不回退。
+        </div>
+        <div class="win">
+          <div class="topbar"><b style="font-size:12.5px">缩放 · 图集圆角</b><div class="sp"></div><span class="chip" id="atlasMode">96px 档 · 既有圆角</span></div>
+          <div class="body"><div class="main">
+            <div class="zoomctl">
+              <span class="lbl" style="font-size:11.5px;color:var(--ink2)">缩略图尺寸</span>
+              <input type="range" min="32" max="160" value="96" id="atlasRange" oninput="atlasZoom(this.value)">
+              <span class="chip" id="atlasVal">96px</span>
+            </div>
+            <div class="cmp">
+              <div class="col before">
+                <div class="lbl">改前（≤48px 直角 frame_radius=0）</div>
+                <div class="atlas-demo">
+                  <div class="lay"><div class="cap">方格</div><div class="tile small square"></div><div class="tile small square"></div><div class="tile small square"></div><div class="tile small square"></div><div class="tile small square"></div></div>
+                  <div class="lay"><div class="cap">纵瀑布</div><div style="display:flex;flex-direction:column;gap:6px"><div class="tile small square"></div><div class="tile small square"></div><div class="tile small square"></div></div></div>
+                  <div class="lay"><div class="cap">横瀑布</div><div class="tile small square"></div><div class="tile small square"></div><div class="tile small square"></div></div>
+                </div>
+              </div>
+              <div class="col after">
+                <div class="lbl">改后（≤48px 8px 圆角，本版）</div>
+                <div class="atlas-demo" id="atlasAfter">
+                  <div class="lay"><div class="cap">方格</div><div class="tile small round"></div><div class="tile small round"></div><div class="tile small round"></div><div class="tile small round"></div><div class="tile small round"></div></div>
+                  <div class="lay"><div class="cap">纵瀑布</div><div style="display:flex;flex-direction:column;gap:6px"><div class="tile small round"></div><div class="tile small round"></div><div class="tile small round"></div></div></div>
+                  <div class="lay"><div class="cap">横瀑布</div><div class="tile small round"></div><div class="tile small round"></div><div class="tile small round"></div></div>
+                </div>
+              </div>
+            </div>
+          </div></div>
+        </div>
+        <div class="footnote">S5 · 默认 96px 不走图集；三布局单测不回退 · 与 D 组（阶段 2.5）错开归因</div>
+      </section>
+
+      <!-- ══════════════ S6 · screen-import ══════════════ -->
+      <section class="screen" data-screen="screen-import" data-title="S6 · 导入向导 · 缩略图预览与后台进度" data-desc="M42-UI-07 / M42-PERF-01">
+        <div class="legend">
+          <b>看什么：</b>选前<b>缩略图预览</b>（只读包内 <code class="kbd">thumbs</code> 表、不读原图，缺缩略图用 ░ 占位）；后台导入<b>六态进度 + 可取消</b>、UI 保持可交互、失败整库回滚无残留 staging。
+          <b>交互：</b>依次点「下一步」走完向导，导入中点「取消导入」看回滚态。
+        </div>
+        <div class="win">
+          <div class="topbar"><b style="font-size:12.5px">索引导入向导</b><div class="sp"></div><span class="chip" id="wizStep">步骤 1/4</span><button class="btn sq">×</button></div>
+          <div class="body"><div class="main" style="max-width:640px">
+            <div class="wiz" id="wizBar">
+              <div class="st on">① 选择导入包</div><div class="st">② 校验</div><div class="st">③ 预览/确认</div><div class="st">④ 导入</div>
+            </div>
+            <div id="wizBody"></div>
+            <div class="toolrow" style="margin-top:14px;justify-content:flex-end">
+              <button class="btn" id="wizPrev" disabled onclick="wiz(-1)">上一步</button>
+              <button class="btn primary" id="wizNext" onclick="wiz(1)">下一步</button>
+            </div>
+          </div></div>
+        </div>
+        <div class="footnote">S6 · id 平移重映射语义不变 · 单事务 · 取消后无残留 staging 文件/连接</div>
+      </section>
+
+      <!-- ══════════════ S7 · screen-perf ══════════════ -->
+      <section class="screen" data-screen="screen-perf" data-title="S7 · 展示性能基准（诊断/测试视图）" data-desc="M42-PERF-00 / 02 / 03">
+        <div class="warn">⚠ 仅诊断 / 测试视图，<b>主界面不常驻性能 HUD</b>；埋点不引入每帧 request_repaint()（R-M41-1）。下表数字为<b>示意占位</b>，真实值由 M42-PERF-00 在固定样本库 / 固定滚动路径 / 固定 profile 实测后写入 03 的 TC-M42-PERF-*。</div>
+        <div class="win">
+          <div class="topbar"><b style="font-size:12.5px">展示性能基准 · 隔离库 run-isolated.sh · profile=release</b><div class="sp"></div><span class="chip" id="perfState">● 基准已固化</span></div>
+          <div class="body"><div class="main">
+            <table class="perf">
+              <thead><tr><th>指标</th><th>基线(优化前)</th><th>优化后</th><th>门禁</th><th>结果</th></tr></thead>
+              <tbody>
+                <tr><td>首屏出图时间</td><td class="num">3.8 s</td><td class="num">3.5 s</td><td>≤ 5 s 不回退</td><td class="pass">✅</td></tr>
+                <tr><td>可见区首张出图延迟</td><td class="num">420 ms</td><td class="num">310 ms</td><td>较基线下降</td><td class="pass">✅</td></tr>
+                <tr><td>滚动帧耗时 p50 / p95 / p99</td><td class="num">8 / 18 / 23 ms</td><td class="num">8 / 16 / 21 ms</td><td>p99 ≤ 25 ms</td><td class="pass">✅</td></tr>
+                <tr><td>每帧贴图上传数</td><td class="num">3（锁死）</td><td class="num">3（锁死）</td><td>= 3 不变</td><td class="pass">✅</td></tr>
+                <tr><td>空白格率</td><td class="num">12%</td><td class="num">6%</td><td>较基线下降</td><td class="pass">✅</td></tr>
+                <tr><td>掉帧率 (&gt;16.7ms)</td><td class="num">9%</td><td class="num">5%</td><td>较基线下降</td><td class="pass">✅</td></tr>
+              </tbody>
+            </table>
+            <div class="lockbox">
+              <b>常量（P-M42-09「绝不动」）：</b> TEX_UPLOAD_PER_FRAME=3 / TEX_CACHE_CAP=120 / SCROLLBAR=8.0<br>
+              本表只用于证明「不劣化」，<b>不放行改常量</b>；A 组圆角贴图（阶段 1）与 D 组调度（阶段 2.5）分开复测归因；方格 / 纵瀑布 / 横瀑布三布局均复验。
+            </div>
+            <div class="toolrow" style="margin-top:14px">
+              <button class="btn" onclick="perfToggle()">切换：未跑基准 / 已固化</button>
+              <button class="btn" onclick="toast('门禁：未固化基准前禁止进入 D 组优化（M42-PERF-00 AC-04）')">查看门禁</button>
+            </div>
+          </div></div>
+        </div>
+        <div class="footnote">S7 · 没有基准不谈优化 · 任一回退即判不通过并回退改动 · M42-PERF-02 → 03 每项回基准复测</div>
+      </section>
+
+    </div><!-- /canvas -->
+    <div class="footnote">M4.2 设计三件套之三 · 对应 17-M4.2-界面原型设计.md · 范围与裁决以 15-M4.2-规划与范围草案.md v0.4 为准</div>
+  </div><!-- /stage -->
+</div>
+
+<!-- 通用 toast / 模态 -->
+<div class="toast" id="toast"></div>
+<div class="modal" id="modal">
+  <div class="box">
+    <h3 id="modalTitle">确认</h3>
+    <p id="modalText"></p>
+    <div class="acts">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn danger" id="modalOk">删除</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============ 原型外壳：屏切换 ============ */
+const SCREENS = [...document.querySelectorAll('.screen')];
+const NAVS = [...document.querySelectorAll('.nav button[data-go]')];
+function go(id){
+  SCREENS.forEach(s=>s.classList.toggle('active', s.dataset.screen===id));
+  NAVS.forEach(b=>b.classList.toggle('active', b.dataset.go===id));
+  const s = SCREENS.find(x=>x.dataset.screen===id);
+  document.getElementById('stageTitle').textContent = s.dataset.title;
+  document.getElementById('stageDesc').textContent  = s.dataset.desc;
+  document.getElementById('stageAnchor').textContent = 'data-screen = '+s.dataset.screen;
+  document.querySelector('.canvas').scrollTop = 0;
+}
+NAVS.forEach(b=>b.addEventListener('click',()=>go(b.dataset.go)));
+
+/* ============ 通用：toast / 模态 / 下拉 ============ */
+let toastTimer;
+function toast(msg, err){
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.className='toast show'+(err?' err':'');
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className='toast',2200);
+}
+let modalAction=null;
+function confirmBox(title,text,onOk){
+  document.getElementById('modalTitle').textContent=title;
+  document.getElementById('modalText').textContent=text;
+  modalAction=onOk;
+  document.getElementById('modal').classList.add('show');
+}
+function closeModal(){document.getElementById('modal').classList.remove('show');}
+document.getElementById('modalOk').onclick=()=>{closeModal(); if(modalAction) modalAction();};
+document.getElementById('modal').addEventListener('click',e=>{if(e.target.id==='modal')closeModal();});
+function togglePop(id){
+  const p=document.getElementById(id);
+  document.querySelectorAll('.pop.open').forEach(x=>{if(x.id!==id)x.classList.remove('open')});
+  p.classList.toggle('open');
+}
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.pop')) document.querySelectorAll('.pop.open').forEach(x=>x.classList.remove('open'));
+});
+function cycleTri(el){
+  const order=['full','part','none'];
+  el.className='tri '+order[(order.indexOf([...el.classList].find(c=>['full','part','none'].includes(c)))+1)%3];
+  const box=el.querySelector('.box');
+  box.textContent = el.classList.contains('full')?'✓':el.classList.contains('part')?'▣':'';
+}
+
+/* ============ 共享状态（原型用内存态，非真实库） ============ */
+const PHOTOS = [
+  {id:1,star:0,tags:[]}, {id:2,star:3,tags:['旅行','2024夏']}, {id:3,star:0,tags:['家人']},
+  {id:4,star:5,tags:['旅行','家人','工作','胶片']}, {id:5,star:1,tags:[]},
+  {id:6,star:0,tags:['工作']}, {id:7,star:4,tags:['2024夏']}, {id:8,star:0,tags:[]},
+  {id:9,star:2,tags:['旅行']}, {id:10,star:0,tags:['家人','胶片']},
+];
+let tags=['旅行','家人'];
+let albums=['2024 夏'];
+let sel=new Set();
+let zoom=96;
+
+/* ============ S1 · 主界面 ============ */
+function cellHtml(p){
+  return `<div class="cell ${p.star?'':'ph'}" data-id="${p.id}" onclick="toggleSel(${p.id},this)">
+    ${p.star?`<span class="star">★${p.star}</span>`:''}
+    ${sel.has(p.id)?`<span class="selmark"></span>`:''}
+    ${p.star?'':''}
+  </div>`;
+}
+function renderHome(){
+  document.getElementById('homeGrid').innerHTML=PHOTOS.map(cellHtml).join('');
+  document.getElementById('selCount').textContent=sel.size;
+  renderSideLists();
+}
+function toggleSel(id){
+  if(sel.has(id))sel.delete(id); else sel.add(id);
+  renderHome(); renderAlb();
+}
+function rateSelected(){
+  if(!sel.size){toast('请先选中照片','err');return;}
+  PHOTOS.forEach(p=>{if(sel.has(p.id))p.star=3;});
+  renderHome(); toast('已给 '+sel.size+' 张打 ★3');
+}
+function unrateSelected(){
+  if(!sel.size){toast('请先选中照片','err');return;}
+  PHOTOS.forEach(p=>{if(sel.has(p.id))p.star=0;});
+  renderHome(); toast('已取消星标');
+}
+function zoomBy(d){zoom=Math.max(32,Math.min(160,zoom+d*16));document.getElementById('zoomVal').textContent=zoom+'px';
+  const cols=zoom<=48?8:zoom<=96?5:4;document.getElementById('homeGrid').style.gridTemplateColumns=`repeat(${cols},1fr)`;}
+function renderSideLists(){
+  document.getElementById('tagList').innerHTML=tags.map(t=>`<div class="row">▸ ${t}</div>`).join('');
+  document.getElementById('albList').innerHTML=albums.map(a=>`<div class="row">▸ ${a}</div>`).join('');
+}
+function openNew(kind){
+  const list=document.getElementById(kind==='tag'?'tagList':'albList');
+  if(document.getElementById('newInline'))return;
+  const d=document.createElement('div');d.className='row';d.id='newInline';
+  d.innerHTML=`<input class="inline" id="newInput" placeholder="${kind==='tag'?'标签':'相册'}名称…" autocomplete="off">`;
+  list.appendChild(d);
+  const inp=document.getElementById('newInput');inp.focus();
+  const commit=()=>{
+    const v=inp.value.trim();
+    const arr=kind==='tag'?tags:albums;
+    if(!v){toast('名称不能为空','err');d.remove();return;}
+    if(arr.includes(v)){toast('已存在同名'+(kind==='tag'?'标签':'相册'),'err');d.remove();return;}
+    arr.push(v); d.remove(); renderSideLists(); renderAlbSide();
+    toast('已创建「'+v+'」');
+  };
+  inp.addEventListener('keydown',e=>{if(e.key==='Enter')commit();if(e.key==='Escape')d.remove();});
+  inp.addEventListener('blur',()=>setTimeout(()=>{if(document.getElementById('newInline')===d)d.remove();},150));
+}
+
+/* ============ S2 · 查看器 ============ */
+let vStar=3, vTags=['旅行','2024夏','家人','写真'], vEmpty=false;
+function renderViewer(){
+  document.getElementById('vStars').innerHTML=[1,2,3,4,5].map(i=>`<span onclick="vStar=${i};renderViewer()">${i<=vStar?'★':'☆'}</span>`).join('');
+  document.getElementById('vStarText').textContent = vEmpty?'':('★'.repeat(vStar)+'☆'.repeat(5-vStar)+' ('+vStar+')');
+  const tg=document.getElementById('vTags');
+  if(vEmpty){tg.innerHTML='<span style="color:var(--ink2);font-size:11.5px">（无星标 / 无标签：不显示空占位）</span>';}
+  else{
+    const shown=vTags.slice(0,2), rest=vTags.length-shown.length;
+    tg.innerHTML=shown.map(t=>`<span class="chip">${t}</span>`).join('')+(rest>0?`<span class="chip" style="cursor:pointer" onclick="this.outerHTML='${vTags.slice(2).map(t=>'<span class=chip>'+t+'</span>').join('')}'">+${rest}▾</span>`:'');
+  }
+  document.getElementById('vMeta').textContent = vEmpty?'DSC_2201.png · 2024-09-02 · 3000×2000':'DSC_1024.jpg · 2024-08-12 · 4032×3024';
+  document.getElementById('vName').textContent = vEmpty?'DSC_2201.png · 3000×2000':'DSC_1024.jpg · 4032×3024';
+}
+function viewerPhoto(mode){vEmpty=(mode==='empty');vStar=vEmpty?0:3;renderViewer();}
+
+/* ============ S3 · 框选增强 ============ */
+const MG=42;
+let marqSel=new Set(), dragging=false, startPt=null, autoScroll=false;
+function renderMarq(){
+  document.getElementById('marqGrid').innerHTML=Array.from({length:MG},(_,i)=>`<div class="mc ${marqSel.has(i)?'on':''}" data-i="${i}"></div>`).join('');
+  document.getElementById('marqCount').textContent=marqSel.size;
+}
+function marqReset(){marqSel.clear();renderMarq();document.getElementById('marqMode').textContent='空闲 · 零额外重绘';}
+(function initMarq(){
+  const wrap=document.getElementById('marqWrap'), rect=document.getElementById('marqRect'), grid=document.getElementById('marqGrid');
+  function cellsInRect(x1,y1,x2,y2){
+    const r=wrap.getBoundingClientRect();
+    [...grid.children].forEach(c=>{
+      const b=c.getBoundingClientRect();
+      const cx=b.left-r.left+b.width/2, cy=b.top-r.top+b.height/2;
+      if(cx>=Math.min(x1,x2)&&cx<=Math.max(x1,x2)&&cy>=Math.min(y1,y2)&&cy<=Math.max(y1,y2))marqSel.add(+c.dataset.i);
+    });
+  }
+  wrap.addEventListener('mousedown',e=>{
+    if(e.target.closest('.marq-hint'))return;
+    dragging=true;autoScroll=false;
+    const r=wrap.getBoundingClientRect();
+    startPt={x:e.clientX-r.left,y:e.clientY-r.top};
+    rect.style.display='block';rect.style.left=startPt.x+'px';rect.style.top=startPt.y+'px';rect.style.width='0';rect.style.height='0';
+    document.getElementById('marqMode').textContent='拖拽中 · 按输入事件驱动';
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove',e=>{
+    if(!dragging)return;
+    const r=wrap.getBoundingClientRect();
+    const cur={x:Math.max(0,Math.min(r.width,e.clientX-r.left)),y:Math.max(0,Math.min(r.height,e.clientY-r.top))};
+    rect.style.left=Math.min(startPt.x,cur.x)+'px';rect.style.top=Math.min(startPt.y,cur.y)+'px';
+    rect.style.width=Math.abs(cur.x-startPt.x)+'px';rect.style.height=Math.abs(cur.y-startPt.y)+'px';
+    cellsInRect(startPt.x,startPt.y,cur.x,cur.y);
+    // 触底边带：自动滚动示意（仅拖拽中）
+    const nearBot=cur.y>r.height-30;
+    document.getElementById('edgeBot').classList.toggle('hot',nearBot);
+    if(nearBot&&!autoScroll){autoScroll=true;document.getElementById('marqHint').textContent='触及边缘带 → 自动滚动中（选区随滚动连续扩张）';toast('自动滚动触发（仅拖拽中）');}
+    renderMarq();
+  });
+  window.addEventListener('mouseup',()=>{
+    if(!dragging)return;
+    dragging=false;rect.style.display='none';document.getElementById('edgeBot').classList.remove('hot');
+    document.getElementById('marqMode').textContent='空闲 · 零额外重绘';
+    document.getElementById('marqHint').textContent='松手定稿，已选连续保持。滚轮仍控制滚动区，不被框选拦截。';
+  });
+  renderMarq();
+})();
+
+/* ============ S4 · 相册 CRUD ============ */
+function renderAlb(){
+  document.getElementById('albGrid').innerHTML=PHOTOS.slice(0,10).map(p=>`
+    <div class="cell ${p.star?'':'ph'} ${sel.has(p.id)?'selected':''}" onclick="toggleSel(${p.id})">
+      ${p.star?`<span class="star">★${p.star}</span>`:''}
+      ${sel.has(p.id)?'<span class="selmark"></span>':''}
+    </div>`).join('');
+  document.getElementById('albSel').textContent=sel.size;
+  document.getElementById('addBtn').disabled=(sel.size===0);
+  document.getElementById('addMenu').innerHTML=albums.map(a=>`<div class="it" onclick="joinAlbum('${a}')">○ ${a}</div>`).join('')
+    +'<div class="div"></div><div class="it" style="color:var(--accent)" onclick="openNew(\'album\');togglePop(\'addPop\')">＋ 新建相册…</div>';
+  renderAlbSide();
+}
+function joinAlbum(a){
+  if(!sel.size){toast('请先选中照片','err');return;}
+  togglePop('addPop');toast('已把 '+sel.size+' 张加入「'+a+'」');
+}
+function renderAlbSide(){
+  document.getElementById('albSide').innerHTML=albums.map((a,i)=>`
+    <div class="albrow">▸ ${a}<span class="dots" onclick="albumMenu(${i},event)">⋯</span></div>`).join('');
+}
+function albumMenu(i,e){
+  e.stopPropagation();
+  const a=albums[i];
+  // 用原生小菜单替代：直接给出改名/删除两个动作按钮示意
+  const row=e.target.closest('.albrow');
+  if(document.getElementById('albActs'))document.getElementById('albActs').remove();
+  const d=document.createElement('div');d.id='albActs';d.style.cssText='padding:6px 8px 6px 18px;display:flex;gap:6px';
+  d.innerHTML=`<button class="btn" style="padding:4px 10px;font-size:11px" onclick="renameAlbum(${i})">✎ 改名</button>
+               <button class="btn" style="padding:4px 10px;font-size:11px;color:var(--danger)" onclick="delAlbum(${i})">🗑 删除</button>`;
+  row.after(d);
+}
+function renameAlbum(i){
+  const old=albums[i];
+  const v=prompt('重命名相册',old);
+  if(v&&v.trim()&&v.trim()!==old){albums[i]=v.trim();renderAlb();toast('已改名为「'+v.trim()+'」');}
+}
+function delAlbum(i){
+  const a=albums[i];
+  confirmBox('删除相册「'+a+'」？','只解除相册关联，不会删除照片文件。取消零副作用。',()=>{
+    albums.splice(i,1);renderAlb();toast('已删除相册「'+a+'」，照片仍在库');
+  });
+}
+
+/* ============ S5 · 图集圆角 ============ */
+function atlasZoom(v){
+  document.getElementById('atlasVal').textContent=v+'px';
+  const small=v<=48;
+  document.getElementById('atlasMode').textContent=small?'≤48px 档 · 本版 8px 圆角':'96px 档 · 既有圆角';
+  const after=document.querySelectorAll('#atlasAfter .tile.small');
+  after.forEach(t=>{t.style.width=Math.max(28,Math.min(60,v/2))+'px';t.style.height=Math.max(28,Math.min(60,v/2))+'px';});
+}
+
+/* ============ S6 · 导入向导 ============ */
+let wizIdx=0, wizTimer=null;
+function wizBody(){
+  const b=document.getElementById('wizBody');
+  if(wizIdx===0){
+    b.innerHTML=`<div class="legend" style="margin:0">已选导入包：<b>vacation-2024.picasa-idx</b>（原型示意）</div>
+      <div class="prev"><div class="p"></div><div class="p"></div><div class="p ph"></div><div class="p"></div></div>
+      <div style="font-size:11.5px;color:var(--ink2)">选前缩略图预览（F1-07 / M42-UI-07）：只读包内 <code class="kbd">thumbs</code> 表，<b>不读原图</b>；缺缩略图用 ░ 占位。共 12,480 张 · 预览 4 张。</div>`;
+  }else if(wizIdx===1){
+    b.innerHTML=`<div class="legend" style="margin:0">清单 FNV 校验中…（不确定进度条）</div>
+      <div class="prog indet"><div class="bar"></div></div>
+      <div style="font-size:11.5px;color:var(--ink2);margin-top:10px">校验通过：容器结构完整、清单一致。</div>`;
+  }else if(wizIdx===2){
+    b.innerHTML=`<div class="legend" style="margin:0">预览就绪 → 确认导入。<b>缺缩略图/损坏包</b>显示 ░ 占位、可继续（AC-03）。</div>
+      <div class="prev"><div class="p"></div><div class="p ph"></div><div class="p"></div><div class="p"></div></div>
+      <div style="font-size:11.5px;color:var(--ink2)">确认后将进入后台线程导入，UI 保持可交互、可取消。</div>`;
+  }else{
+    b.innerHTML=`<div class="legend" style="margin:0">后台导入进度（M42-PERF-01 · 六态之「导入中」）· id 平移重映射语义不变</div>
+      <div class="prog" id="impProg"><div class="bar" id="impBar"></div></div>
+      <div style="display:flex;align-items:center;gap:10px;font-size:11.5px;color:var(--ink2)">
+        <span id="impStat">已处理 0 / 12,480 · 合并中</span>
+        <button class="btn" style="margin-left:auto;color:var(--danger)" onclick="cancelImport()">取消导入</button>
+      </div>`;
+    startImport();
+  }
+}
+function startImport(){
+  clearInterval(wizTimer);let n=0;
+  wizTimer=setInterval(()=>{
+    n+=480;
+    const bar=document.getElementById('impBar'),st=document.getElementById('impStat');
+    if(!bar){clearInterval(wizTimer);return;}
+    bar.style.width=Math.min(100,n/12480*100)+'%';
+    st.textContent='已处理 '+Math.min(12480,n).toLocaleString()+' / 12,480 · 合并中';
+    if(n>=12480){clearInterval(wizTimer);st.textContent='✅ 导入完成（单事务提交，无残留 staging）';toast('导入完成');}
+  },260);
+}
+function cancelImport(){
+  clearInterval(wizTimer);
+  const st=document.getElementById('impStat');
+  if(st)st.textContent='⚠ 已取消 · 整库回滚、无残留 staging 文件/连接';
+  toast('已取消导入，事务回滚','err');
+}
+function wiz(d){
+  clearInterval(wizTimer);
+  wizIdx=Math.max(0,Math.min(3,wizIdx+d));
+  const sts=document.querySelectorAll('#wizBar .st');
+  sts.forEach((s,i)=>{s.className='st'+(i===wizIdx?' on':i<wizIdx?' done':'');});
+  document.getElementById('wizStep').textContent='步骤 '+(wizIdx+1)+'/4';
+  document.getElementById('wizPrev').disabled=(wizIdx===0);
+  document.getElementById('wizNext').textContent=(wizIdx===3?'完成':'下一步');
+  wizBody();
+}
+
+/* ============ S7 · 性能基准 ============ */
+let perfReady=true;
+function perfToggle(){
+  perfReady=!perfReady;
+  document.getElementById('perfState').textContent=perfReady?'● 基准已固化':'○ 未跑基准（禁止进入 D 组优化）';
+  document.getElementById('perfState').style.color=perfReady?'':'var(--danger)';
+  toast(perfReady?'基准已固化，可进入 D 组优化':'门禁：未固化基准前禁止进入 D 组优化（M42-PERF-00 AC-04）',!perfReady);
+}
+
+/* ============ 初始渲染 ============ */
+renderHome();renderViewer();renderAlb();wiz(0);go('screen-home');
+</script>
+</body>
+</html>

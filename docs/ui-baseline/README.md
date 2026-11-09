@@ -155,3 +155,13 @@ OPENPICASA_DATA_DIR=$DATA OPENPICASA_SCREENSHOT=$PWD/docs/ui-baseline/m2-indexin
 | 运行日志 | 索引队列、目录落库、栅格列数、失联探测 |
 | 代码结构 | 四处同源（`IndexBoard` 是唯一快照来源），「差 1」在结构上无法发生 |
 
+---
+
+## M4.2 基线说明
+
+M4.2 沿用 **M4.1 v1.8 定稿的 M4 白圆底 + 加深阴影**样式基线（`control_shadow` offset[0,2]/blur6/alpha64 + `control_contact_shadow` + `control_hairline`）；v1.7 已整体删除的**玻璃态**与 **9 个玻璃 token**（`glass.rs` 整文件）**一律不恢复**（P-M42-05 = 不做，R-M42-3）。
+
+本版新增的**星标角标**（网格右上自绘 Mesh 金色五角星）、**查看器标签 chips**（查看器信息条）、**微缩图集 ≤48px 档 8px 圆角**均属**增量视觉**，沿用 `draw_control_chrome` 白圆底体系，**不改上表「已实测对齐的硬数值」里的任何常量**（`CELL_SIZES` / `CELL_GAP` / `GRID_PAD` / `SCROLLBAR` 等锁死值保持），三布局复验即可。
+
+**不新增 PNG 基线图**：`.gitignore` 对 `docs/ui-baseline/*.png` 有忽略规则，新增截图默认不入库；现有 `m1-library` / `m1-viewer` / `m1-empty` 三张是当初用 `git add -f` 强制入库的存量图。M4.2 的视觉增量以 `16` §3 AC、`17` 原型与 `03` 的 `TC-M42-*` 用例为判据，不靠新增截图，避免二进制 diff。本说明只改 `README.md`，不动存量 PNG 与 `.toml` 配置。
+

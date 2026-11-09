@@ -5,6 +5,7 @@
 //! 排序/选择/扫描/解码都在 `picasa-core`；布局/绘制在 `grid`/`sidebar`/`viewer`。
 //! 这里负责：**面板嵌套顺序**、**事件泵**、**动作分发**、**偏好落盘**。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
@@ -41,6 +42,47 @@ const MGMT_REFRESH_MS: u64 = 1000;
 
 /// 缩略图占用统计的有效期（秒）。这段时间内重开管理页直接复用缓存，不重算。
 const THUMB_STATS_TTL_SECS: u64 = 30;
+
+/// M4.2 `M42-UI-06`：批量标签浮层三态结果缓存。
+///
+/// `key` = 选中集 id（排序后）的指纹；命中则**零查库**直接复用 `all_tags`/`counts`。
+/// 任何标签写操作（`changed`）后由调用方清空，下一帧按新库状态重算一次
+/// （`all_tags()` + `tags_for_ids()`，恰好 2 次查库、与标签数量无关），
+/// 满足 AC-01「打开帧查库次数恒定/0」、AC-02「变更后重开三态正确」、
+/// AC-03「不引入每帧重绘、失效判定不持 Mutex<Db> 做 I/O」。
+struct TagTriCache {
+    key: Vec<i64>,
+    all_tags: Vec<(String, i64)>,
+    counts: HashMap<String, usize>,
+}
+
+/// M4.2 `M42-UI-06`：由选中集算缓存指纹（排序后比较，与 `HashSet` 迭代顺序无关）。
+fn tag_tri_key(ids: &[i64]) -> Vec<i64> {
+    let mut key = ids.to_vec();
+    key.sort_unstable();
+    key
+}
+
+/// M4.2 `M42-UI-04`：左栏「＋」新建会话的种类。
+///
+/// 标签与相册的语义不同（见 `docs/16` §3 实装口径）：相册有独立定义行，
+/// `create_album` 可直接建；标签只是 `(photo_id,label)` 关联表，没有独立定义，
+/// 「新建标签」= 对当前选中集建首条关联。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NewItemKind {
+    Tag,
+    Album,
+}
+
+/// M4.2 `M42-UI-04`：新建名称合法性（去空白后非空）。纯函数便于单测。
+fn new_item_name_valid(raw: &str) -> bool {
+    !raw.trim().is_empty()
+}
+
+/// M4.2 `M42-UI-05`：按相册名反查 id（`refresh_sidebar_groups` 里另存了 name→id）。
+fn album_id_by_name(ids: &[(String, i64)], name: &str) -> Option<i64> {
+    ids.iter().find(|(n, _)| n == name).map(|(_, id)| *id)
+}
 
 pub struct OpenPicasaApp {
     lib: Library,
@@ -125,11 +167,26 @@ pub struct OpenPicasaApp {
     caption_editor: Option<i64>,
     /// M4.1：批量标签浮层（`Some(-1)` = 选中集模式）
     tag_editor: Option<i64>,
+    /// M4.2 `M42-UI-06`：批量标签浮层三态缓存（打开帧命中即零查库）。
+    tag_tri_cache: Option<TagTriCache>,
     /// 编辑框草稿
     caption_buf: String,
     tag_buf: String,
     /// 文件夹右键菜单在哪一帧打开（打开帧豁免，避免「刚画出来就被自己关掉」）。
     folder_ctx_frame: u64,
+    /// M4.2 `M42-UI-05`：相册右键菜单（相册名、屏幕位置）与打开帧。
+    album_ctx: Option<(String, Pos2)>,
+    album_ctx_frame: u64,
+    /// M4.2 `M42-UI-04`：「＋」新建会话（种类 + 草稿）。
+    new_item: Option<NewItemKind>,
+    new_item_buf: String,
+    /// M4.2 `M42-UI-05`：相册改名 / 删除二次确认会话。
+    rename_album: Option<String>,
+    rename_album_buf: String,
+    confirm_delete_album: Option<String>,
+    /// M4.2 `M42-UI-05`：相册 name→id 映射（`refresh_sidebar_groups` 维护）。
+    /// `sidebar_albums` 只留 `(name,count)` 给左栏绘制，id 单独存这里供 CRUD。
+    sidebar_album_ids: Vec<(String, i64)>,
     /// 「底层数据变了，界面该重载」的脏标记。
     ///
     /// 不直接重载的原因：扫描落库是**每个目录一条事件**。一个装照片的移动硬盘
@@ -144,6 +201,15 @@ pub struct OpenPicasaApp {
     diag_data: crate::diagnostics::DiagData,
     /// 数据需要重取
     diag_dirty: bool,
+    /// M4.2 `M42-PERF-00`：展示性能探针（被动累计，零副作用、不触发重绘）。
+    /// 每帧在 `ui()` 顺手 `note_frame`，诊断页打开时取快照渲染。
+    perf: crate::diagnostics::PerfProbe,
+    /// 首屏 / 可见区首张出图的计时起点（进程启动时刻）。
+    perf_start: std::time::Instant,
+    /// 首屏出图只记一次（第一帧画出照片网格时）。
+    perf_first_screen_done: bool,
+    /// 可见区首张出图只记一次（第一帧有真实缩略图、非全部占位时）。
+    perf_first_visible_done: bool,
     /// 「全量重建」是否已进入二次确认
     confirm_rebuild: bool,
     /// 「删除索引」是否已进入二次确认
@@ -161,6 +227,9 @@ pub struct OpenPicasaApp {
     // 索引操作的唯一入口是状态栏那个按钮 → [`crate::index_mgr`] 的四标签页。
     /// 索引管理页（M2.2 §4.1）
     index_mgr: crate::index_mgr::IndexMgrUi,
+    /// M4.2 `M42-PERF-01`：当前跑着的后台导入 / 导出任务（`None` = 空闲）。
+    /// `ImportTask` 含 `Receiver`/`JoinHandle`，不可 Clone/Debug，故用 `Option` 持有。
+    import_task: Option<crate::import_task::ImportTask>,
     /// 管理页的唯一数据源（由 core 以 ≤ 4 次/秒发布，UI 只读）
     mgmt: picasa_core::MgmtSnapshot,
     /// 离线判定探针（注入到快照构建里，测试可替换；生产用真文件系统）
@@ -303,19 +372,33 @@ impl OpenPicasaApp {
             folder_ctx: None,
             caption_editor: None,
             tag_editor: None,
+            tag_tri_cache: None,
             caption_buf: String::new(),
             tag_buf: String::new(),
             folder_ctx_frame: u64::MAX,
+            album_ctx: None,
+            album_ctx_frame: u64::MAX,
+            new_item: None,
+            new_item_buf: String::new(),
+            rename_album: None,
+            rename_album_buf: String::new(),
+            confirm_delete_album: None,
+            sidebar_album_ids: Vec::new(),
             reload_dirty: false,
             last_reload: Instant::now(),
             confirm_trash: None,
             diagnostics_open: false,
             diag_data: crate::diagnostics::DiagData::default(),
             diag_dirty: false,
+            perf: crate::diagnostics::PerfProbe::default(),
+            perf_start: std::time::Instant::now(),
+            perf_first_screen_done: false,
+            perf_first_visible_done: false,
             confirm_rebuild: false,
             confirm_delete_index: false,
             confirm_rebuild_failed: None,
             index_mgr: crate::index_mgr::IndexMgrUi::new(),
+            import_task: None,
             mgmt: picasa_core::MgmtSnapshot::default(),
             offline_probe: picasa_core::default_offline_probe(),
             mgmt_next_refresh: std::time::Instant::now(),
@@ -903,36 +986,14 @@ impl OpenPicasaApp {
         io.state = crate::index_mgr::IoState::Running;
         io.progress = "正在导出…".into();
         io.fraction = None;
-        let now = chrono::Utc::now().timestamp();
-        let result = match self.lib.db() {
-            Ok(db) => picasa_db::export_index(
-                &db,
-                &target,
-                with_thumbs,
-                env!("CARGO_PKG_VERSION"),
-                now,
-            ),
-            Err(e) => Err(picasa_db::DbError::Other(e.to_string())),
-        };
-        match result {
-            Ok(rep) => {
-                io.state = crate::index_mgr::IoState::Success;
-                io.export_path = target.to_string_lossy().to_string();
-                io.message = format!(
-                    "导出成功 · {} · 照片 {} · 标签 {} · 相册 {}",
-                    crate::index_mgr::human_bytes(rep.bytes),
-                    rep.counts.photos,
-                    rep.counts.tags,
-                    rep.counts.albums
-                );
-                io.last_result = io.message.clone();
-                self.lib.toast = Some(("✓ 导出成功".into(), 3.0));
-            }
-            Err(e) => {
-                io.state = crate::index_mgr::IoState::Failed;
-                io.message = format!("导出失败：{}（现有索引未改动）", e);
-            }
-        }
+        // M4.2 `M42-PERF-01`：导出改后台线程，UI 帧不再被 `export_index` 阻塞。
+        // `ImportTask` 自己 `Db::open(paths.db_file())` 独立连接（`Db` 非 Send），
+        // 跑完即 drop；进度 / 六态 / toast 都由 `ui()` tick 里的 `apply_io_msg` 驱动。
+        self.import_task = Some(crate::import_task::ImportTask::start_export(
+            self.paths.db_file(),
+            target,
+            with_thumbs,
+        ));
     }
 
     /// M4 导入 Step1：选文件 → 校验 + 预览。
@@ -961,6 +1022,9 @@ impl OpenPicasaApp {
                     .iter()
                     .map(|r| (r.path.clone(), std::path::Path::new(&r.path).exists()))
                     .collect();
+                // M4.2 `M42-UI-07`：把包内缩略图字节交给 IoUi 预览格渲染
+                // （只读索引包内 thumbs，绝不读原图）。
+                io.preview_thumbs = p.thumbs.clone();
                 io.preview = Some(p);
                 io.import_step = crate::index_mgr::ImportStep::Validate;
                 io.understood = false;
@@ -970,6 +1034,8 @@ impl OpenPicasaApp {
                 io.state = crate::index_mgr::IoState::Failed;
                 io.message = format!("无法导入：{}（现有索引未改动）", e);
                 io.preview = None;
+                io.preview_thumbs.clear();
+                io.cancel = None;
             }
         }
     }
@@ -982,43 +1048,20 @@ impl OpenPicasaApp {
         let strategy = io.strategy;
         let work = self.paths.support.clone();
         io.state = crate::index_mgr::IoState::Running;
-        io.progress = "正在导入…".into();
-        io.fraction = Some(0.3);
-        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        // 同步执行（导入是单事务，实测 10 万行以内 < 1s；后台化留作后续优化）
-        let result = match self.lib.db() {
-            Ok(mut db) => picasa_db::execute_import(&mut db, &src, &work, strategy, &cancel),
-            Err(e) => Err(picasa_db::DbError::Other(e.to_string())),
-        };
-        match result {
-            Ok(rep) => {
-                io.state = crate::index_mgr::IoState::Success;
-                io.message = format!(
-                    "导入完成 · 成功 {} · 跳过 {} · 失败 {} · 冲突 {}",
-                    rep.imported, rep.skipped, rep.failed, rep.conflicts
-                );
-                io.last_result = io.message.clone();
-                io.report = Some(rep);
-                io.import_step = crate::index_mgr::ImportStep::Result;
-                if let Err(e) = self.lib.reload_tree() {
-                    tracing::warn!(error = %e, "导入后刷新目录树失败");
-                } else if let Err(e) = self.lib.reload_photos() {
-                    tracing::warn!(error = %e, "导入后刷新照片失败");
-                }
-                self.lib.toast = Some(("✓ 导入完成".into(), 3.0));
-                self.sidebar_groups_dirty = true; // 导入可能带来新标签/相册
-                self.m4_exif_pending = true; // 导入的照片也要回填 EXIF
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                io.state = if msg.contains("取消") {
-                    crate::index_mgr::IoState::Cancelled
-                } else {
-                    crate::index_mgr::IoState::Failed
-                };
-                io.message = format!("{}（现有索引未改动）", msg);
-            }
-        }
+        io.progress = "正在校验索引包…（后台执行，界面可继续操作）".into();
+        // M4.2 `M42-PERF-01`：不再用不可达的局部 Arc + 假 0.3 进度 + 同步
+        // `execute_import`（会阻塞 UI 帧）。改后台线程 + 真取消标志；成功后
+        // `reload_tree/reload_photos/侧栏脏/EXIF/toast` 以 `TaskEffects` 纯数据
+        // 返回，由 `ui()` 的 tick 消费（碰不到 app 私有字段的兄弟模块）。
+        let task = crate::import_task::ImportTask::start_import(
+            self.paths.db_file(),
+            src,
+            work,
+            strategy,
+        );
+        io.cancel = Some(task.cancel_flag()); // 与「取消导入」按钮同一个 Arc
+        io.fraction = None;
+        self.import_task = Some(task);
     }
 
     /// M4：刷新左栏标签 / 相册缓存。只在脏标记置位时查库（不是每帧）。
@@ -1031,9 +1074,14 @@ impl OpenPicasaApp {
         }
         if let Ok(db) = self.lib.db() {
             self.sidebar_tags = db.all_tags().unwrap_or_default();
-            self.sidebar_albums = db
-                .all_albums()
-                .unwrap_or_default()
+            let albums = db.all_albums().unwrap_or_default();
+            // M4.2 `M42-UI-05`：同时留一份 name→id，供改名/删除/加入照片调用
+            // Core 的 `*_album(id, ..)`；`sidebar_albums` 仍只画 (name,count)。
+            self.sidebar_album_ids = albums
+                .iter()
+                .map(|a| (a.name.clone(), a.id))
+                .collect();
+            self.sidebar_albums = albums
                 .into_iter()
                 .map(|a| (a.name, a.photo_count))
                 .collect();
@@ -1154,6 +1202,12 @@ impl OpenPicasaApp {
     }
 
     fn m4_cancel_import(&mut self) {
+        // M4.2 `M42-PERF-01`：真取消——把后台线程共享的 AtomicBool 置位，
+        // `execute_import` / `export_index` 在阶段间检查后整库回滚。
+        // 与 index_mgr 的「取消导入」按钮同一个 Arc（幂等）。
+        if let Some(t) = &self.import_task {
+            t.cancel();
+        }
         let io = &mut self.index_mgr.io;
         io.state = crate::index_mgr::IoState::Cancelled;
         io.message = "已取消 · 现有索引未改动".into();
@@ -1839,6 +1893,8 @@ impl OpenPicasaApp {
             return;
         }
         self.tag_buf.clear();
+        // M4.2 `M42-UI-06`：打开浮层即作废旧缓存，按当前库状态重算一次。
+        self.tag_tri_cache = None;
         self.tag_editor = Some(-1);
     }
 
@@ -2335,6 +2391,30 @@ impl OpenPicasaApp {
                 //
                 // 两步都在栅格绘制**之后**，顺序不能换：先 drop 再画等于把格子擦干净。
                 self.note_texture_viewport(&out);
+                // M4.2 `M42-PERF-00`：被动累计展示性能（零副作用、不触发重绘）。
+                // `stable_dt` 是秒；钳到 100ms 避免挂起后一帧污染分位数。
+                let frame_ms = ctx.input(|i| i.stable_dt.min(0.1)) * 1000.0;
+                self.perf.note_frame(
+                    frame_ms,
+                    out.visible,
+                    out.blank_cells,
+                    out.uploads_this_frame,
+                );
+                // 首屏出图：第一帧画出照片网格（有可见格）时记一次进程启动以来的耗时。
+                if !self.perf_first_screen_done && out.visible > 0 {
+                    self.perf
+                        .note_first_screen(self.perf_start.elapsed().as_secs_f32() * 1000.0);
+                    self.perf_first_screen_done = true;
+                }
+                // 可见区首张出图：第一帧出现真实缩略图（不是全部占位）时记一次。
+                if !self.perf_first_visible_done
+                    && out.visible > 0
+                    && out.blank_cells < out.visible
+                {
+                    self.perf
+                        .note_first_visible(self.perf_start.elapsed().as_secs_f32() * 1000.0);
+                    self.perf_first_visible_done = true;
+                }
                 let freed = self.cache.flush_evictions();
                 if freed > 0 {
                     tracing::debug!(freed, used_mb = self.cache.budget.used_mb(), "纹理预算释放");
@@ -2458,13 +2538,21 @@ impl OpenPicasaApp {
                 }
                 self.restore_scroll = Some(0.0);
             }
-            SidebarAction::NewTag | SidebarAction::NewAlbum => {
-                // 新建走一个简单的行内输入（复用标签编辑器）；此处先给可见反馈，
-                // 完整 CRUD 在右键菜单 / 信息面板里（M4-ORG-01/07）。
-                self.lib.toast = Some((
-                    "在照片右键菜单或查看器信息面板中可新建标签 / 相册".into(),
-                    3.0,
-                ));
+            // M4.2 `M42-UI-04`：「＋」新建改为真接线——弹行内输入窗口，
+            // 由 draw_overlays 调 Core 的 create_album / batch_add_tag 落库。
+            SidebarAction::NewTag => {
+                self.new_item = Some(NewItemKind::Tag);
+                self.new_item_buf.clear();
+            }
+            SidebarAction::NewAlbum => {
+                self.new_item = Some(NewItemKind::Album);
+                self.new_item_buf.clear();
+            }
+            // M4.2 `M42-UI-05`：相册行右键 → 改名 / 删除 / 加入照片。
+            // 与文件夹右键同范式，记下打开帧供「点别处就关」豁免。
+            SidebarAction::AlbumContext(name, pos) => {
+                self.album_ctx = Some((name, pos));
+                self.album_ctx_frame = ctx.cumulative_frame_nr();
             }
             SidebarAction::TrayToggle => self.tray_expanded = !self.tray_expanded,
             SidebarAction::TrayClear => {
@@ -2515,6 +2603,8 @@ impl OpenPicasaApp {
         }
         data.exclusions = self.lib.all_exclusions();
         data.closed_roots = self.lib.closed_roots();
+        // M4.2 `M42-PERF-00`：诊断页打开时把被动累计的性能快照一并交付。
+        data.perf = self.perf.snapshot();
         self.diag_data = data;
         self.diag_dirty = false;
     }
@@ -2613,6 +2703,19 @@ impl OpenPicasaApp {
                         v.preview = Some((t, s));
                     }
                     drop(db);
+                }
+                // M42-UI-01：只在打开 / 翻页后查一次当前照片标签，短锁读完立即放。
+                // 绝不在 viewer::show 里再拿一次 lib.db()（std Mutex 不可重入，
+                // sidebar.rs:302-308 记录过启动首帧 hang 127s 的教训）。
+                // tags_for 做幂等标记，避免每帧查库（R-M42-1 展示速度不劣化）。
+                if v.tags_for != Some(row.id) {
+                    let db_arc = self.lib.db.clone();
+                    let tags = {
+                        let db = db_arc.lock().expect("db 锁");
+                        db.tags_of(row.id).unwrap_or_default()
+                    };
+                    v.tags = tags;
+                    v.tags_for = Some(row.id);
                 }
             }
             let action = viewer::show(
@@ -2780,27 +2883,32 @@ impl OpenPicasaApp {
         }
 
         // M4.1 `M41-UI-01/08`：批量标签浮层（多选集）。`tag_editor = Some(-1)`。
-        // 列表来自 `lib.all_tags()`；勾选状态按「选中集里有多少张带此标签」分三态。
+        // M4.2 `M42-UI-06`：三态结果走内存缓存，命中零查库、未命中恰好 2 次查库
+        //（`all_tags()` + `tags_for_ids()`），与标签数量无关；不再对每个标签各查一次
+        // `ids_with_tag`（旧实现是 O(标签数) 次查库、且每帧重查）。
         if let Some(_target) = self.tag_editor {
             let ids: Vec<i64> = self.lib.selection.iter().copied().collect();
             let n = ids.len();
-            let all_tags = self.lib.all_tags().unwrap_or_default();
-            // M4.1：每个标签只查一次库（ids_with_tag），与选中集求交集得三态，
-            // 避免 O(标签数 × 选中集大小) 次 tags_of 查询（R-M41-1）。
-            let ids_set: std::collections::HashSet<i64> = ids.iter().copied().collect();
-            // M4.1：每个标签只查一次库（ids_with_tag），与选中集求交集得三态，
-            // 避免 O(标签数 × 选中集大小) 次 tags_of 查询（R-M41-1）。
-            let tag_counts: std::collections::HashMap<String, usize> = all_tags
-                .iter()
-                .map(|(label, _)| {
-                    let with = self
-                        .lib
-                        .ids_with_tag(label)
-                        .map(|tagged| tagged.iter().filter(|id| ids_set.contains(id)).count())
-                        .unwrap_or(0);
-                    (label.clone(), with)
-                })
-                .collect();
+            let key = tag_tri_key(&ids);
+            let all_tags: Vec<(String, i64)>;
+            let tag_counts: HashMap<String, usize>;
+            if self.tag_tri_cache.as_ref().is_some_and(|c| c.key == key) {
+                // 命中缓存：零查库直接复用（AC-01 / AC-03）。
+                let cache = self.tag_tri_cache.as_ref().expect("just checked");
+                all_tags = cache.all_tags.clone();
+                tag_counts = cache.counts.clone();
+            } else {
+                // 未命中：一次批量查（`tags_for_ids` = 1 次 IN 查）+ 一次标签清单，
+                // 纯函数算三态；查库次数恒定、与标签数量无关。
+                all_tags = self.lib.all_tags().unwrap_or_default();
+                let by_photo = self.lib.tags_for_ids(&ids).unwrap_or_default();
+                tag_counts = Library::tri_state_counts(&ids, &by_photo, &all_tags);
+                self.tag_tri_cache = Some(TagTriCache {
+                    key,
+                    all_tags: all_tags.clone(),
+                    counts: tag_counts.clone(),
+                });
+            }
             let mut open = true;
             let mut changed = false;
             let mut toast_msg: Option<String> = None;
@@ -2852,6 +2960,9 @@ impl OpenPicasaApp {
                     );
                 });
             if changed {
+                // M4.2 `M42-UI-06`：标签写操作后失效缓存，下一帧浮层重算一次，
+                // 保证重开时三态正确（AC-02）；左栏分组也一并失效重取。
+                self.tag_tri_cache = None;
                 self.sidebar_groups_dirty = true;
             }
             if let Some(m) = toast_msg {
@@ -2859,6 +2970,7 @@ impl OpenPicasaApp {
             }
             if !open {
                 self.tag_editor = None;
+                self.tag_tri_cache = None;
             }
         }
 
@@ -3036,6 +3148,278 @@ impl OpenPicasaApp {
                 if close || clicked_outside {
                     self.folder_ctx = None;
                 }
+            }
+        }
+
+        // M4.2 `M42-UI-04`：左栏「＋」新建标签 / 相册（真接线，不再只弹 toast）。
+        //
+        // 两种语义不同（docs/16 §3 实装口径）：相册有独立定义行，create_album 直接建；
+        // 标签只是 `(photo_id,label)` 关联表、没有独立定义，新建 = 对当前选中集建首条
+        // 关联（batch_add_tag），无选中集时不落库。写操作全部失败即 toast、不脏库。
+        if let Some(kind) = self.new_item {
+            let (title, hint): (String, String) = match kind {
+                NewItemKind::Tag => (
+                    "新建标签".into(),
+                    "标签依附照片：将为当前选中集打上该标签".into(),
+                ),
+                NewItemKind::Album => (
+                    "新建相册".into(),
+                    "相册是独立集合，创建后可右键加入照片".into(),
+                ),
+            };
+            let mut open = true;
+            let mut pending: Option<String> = None;
+            let mut cancel = false;
+            egui::Window::new(&title)
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .order(egui::Order::Foreground)
+                .show(&ctx, |ui| {
+                    ui.text_edit_singleline(&mut self.new_item_buf);
+                    ui.label(
+                        egui::RichText::new(&hint)
+                            .size(11.0)
+                            .color(egui::Color32::GRAY),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("创建").clicked() {
+                            pending = Some(self.new_item_buf.trim().to_string());
+                        }
+                        if ui.button("取消").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if let Some(name) = pending {
+                if !new_item_name_valid(&name) {
+                    self.lib.toast = Some(("名称不能为空".into(), 2.0));
+                } else {
+                    match kind {
+                        NewItemKind::Album => {
+                            let now = chrono::Utc::now().timestamp();
+                            match self.lib.create_album(&name, now) {
+                                Ok(_) => {
+                                    self.lib.toast =
+                                        Some((format!("已创建相册「{name}」"), 2.0));
+                                    self.sidebar_groups_dirty = true;
+                                    self.new_item = None;
+                                }
+                                Err(e) => {
+                                    self.lib.toast = Some((format!("创建失败：{e}"), 3.0));
+                                }
+                            }
+                        }
+                        NewItemKind::Tag => {
+                            if self.lib.selection.is_empty() {
+                                self.lib.toast =
+                                    Some(("先选中照片再新建标签".into(), 3.0));
+                            } else {
+                                match self.lib.batch_add_tag(&name) {
+                                    Ok(k) => {
+                                        self.lib.toast = Some((
+                                            format!("已为 {k} 张打上「{name}」"),
+                                            2.0,
+                                        ));
+                                        self.sidebar_groups_dirty = true;
+                                        self.new_item = None;
+                                    }
+                                    Err(e) => {
+                                        self.lib.toast =
+                                            Some((format!("新建失败：{e}"), 3.0));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if cancel || !open {
+                self.new_item = None;
+            }
+        }
+
+        // M4.2 `M42-UI-05`：相册行右键菜单（改名 / 删除 / 加入当前选中集）。
+        // 与文件夹右键同范式：记打开帧豁免「刚画出来就被自己关掉」。
+        if let Some((name, pos)) = self.album_ctx.clone() {
+            let mut close = false;
+            let mut do_rename = false;
+            let mut do_delete = false;
+            let mut do_add = false;
+            let n_sel = self.lib.selection.len();
+            let area = egui::Area::new(egui::Id::unique("picasa.album-ctx"))
+                .fixed_pos(pos)
+                .order(egui::Order::Foreground)
+                .show(&ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(Color32::WHITE)
+                        .stroke(egui::Stroke::new(1.0, Color32::from_gray(0xC0)))
+                        .corner_radius(3.0)
+                        .inner_margin(egui::Margin::same(4))
+                        .show(ui, |ui| {
+                            ui.set_min_width(210.0);
+                            if ui
+                                .add(egui::Button::new("改名").frame(false))
+                                .clicked()
+                            {
+                                do_rename = true;
+                                close = true;
+                            }
+                            // 无选中集时禁用（AC-04 空相册 / 无选中禁用态）
+                            if ui
+                                .add_enabled(
+                                    n_sel > 0,
+                                    egui::Button::new(format!(
+                                        "加入当前选中的 {n_sel} 张照片"
+                                    ))
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                do_add = true;
+                                close = true;
+                            }
+                            ui.separator();
+                            if ui
+                                .add(egui::Button::new("删除…").frame(false))
+                                .clicked()
+                            {
+                                do_delete = true;
+                                close = true;
+                            }
+                        });
+                });
+            let opened_this_frame = context_menu_open_frame_exempt(
+                self.album_ctx_frame,
+                ctx.cumulative_frame_nr(),
+            );
+            if !opened_this_frame {
+                let menu_rect = area.response.rect;
+                let clicked_outside = ctx.input(|i| i.pointer.any_click())
+                    && ctx
+                        .input(|i| i.pointer.interact_pos())
+                        .is_some_and(|p| !menu_rect.contains(p));
+                if close || clicked_outside {
+                    self.album_ctx = None;
+                }
+            }
+            if do_rename {
+                self.rename_album = Some(name.clone());
+                self.rename_album_buf = name.clone();
+            }
+            if do_delete {
+                self.confirm_delete_album = Some(name.clone());
+            }
+            if do_add {
+                if let Some(id) = album_id_by_name(&self.sidebar_album_ids, &name) {
+                    let ids: Vec<i64> = self.lib.selection.iter().copied().collect();
+                    let now = chrono::Utc::now().timestamp();
+                    match self.lib.add_to_album(id, &ids, now) {
+                        Ok(k) => {
+                            self.lib.toast =
+                                Some((format!("已加入 {k} 张到「{name}」"), 2.0));
+                            self.sidebar_groups_dirty = true;
+                        }
+                        Err(e) => {
+                            self.lib.toast = Some((format!("加入失败：{e}"), 3.0));
+                        }
+                    }
+                } else {
+                    self.lib.toast = Some(("找不到该相册，请刷新后重试".into(), 3.0));
+                }
+            }
+        }
+
+        // M4.2 `M42-UI-05`：相册改名（行内输入窗口）。
+        if let Some(old_name) = self.rename_album.clone() {
+            let mut open = true;
+            let mut pending: Option<String> = None;
+            let mut cancel = false;
+            egui::Window::new("相册改名")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .order(egui::Order::Foreground)
+                .show(&ctx, |ui| {
+                    ui.text_edit_singleline(&mut self.rename_album_buf);
+                    ui.horizontal(|ui| {
+                        if ui.button("保存").clicked() {
+                            pending = Some(self.rename_album_buf.trim().to_string());
+                        }
+                        if ui.button("取消").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if let Some(new_name) = pending {
+                if !new_item_name_valid(&new_name) {
+                    self.lib.toast = Some(("名称不能为空".into(), 2.0));
+                } else if let Some(id) =
+                    album_id_by_name(&self.sidebar_album_ids, &old_name)
+                {
+                    match self.lib.rename_album(id, &new_name) {
+                        Ok(()) => {
+                            self.lib.toast =
+                                Some((format!("已改名为「{new_name}」"), 2.0));
+                            self.sidebar_groups_dirty = true;
+                            self.rename_album = None;
+                        }
+                        Err(e) => {
+                            self.lib.toast = Some((format!("改名失败：{e}"), 3.0));
+                        }
+                    }
+                } else {
+                    self.lib.toast = Some(("找不到该相册，请刷新后重试".into(), 3.0));
+                }
+            }
+            if cancel || !open {
+                self.rename_album = None;
+            }
+        }
+
+        // M4.2 `M42-UI-05`：删除相册二次确认（只解除关联，不删照片文件）。
+        if let Some(name) = self.confirm_delete_album.clone() {
+            let mut open = true;
+            let mut confirm = false;
+            let mut cancel = false;
+            egui::Window::new("删除相册？")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                .open(&mut open)
+                .show(&ctx, |ui| {
+                    ui.label(format!(
+                        "删除相册「{name}」？\n\n只解除相册关联，不会删除照片文件。取消零副作用。"
+                    ));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("取消").clicked() {
+                            cancel = true;
+                        }
+                        if ui.button("删除").clicked() {
+                            confirm = true;
+                        }
+                    });
+                });
+            if confirm {
+                if let Some(id) = album_id_by_name(&self.sidebar_album_ids, &name) {
+                    match self.lib.delete_album(id) {
+                        Ok(()) => {
+                            self.lib.toast =
+                                Some((format!("已删除相册「{name}」，照片仍在库"), 2.0));
+                            self.sidebar_groups_dirty = true;
+                        }
+                        Err(e) => {
+                            self.lib.toast = Some((format!("删除失败：{e}"), 3.0));
+                        }
+                    }
+                } else {
+                    self.lib.toast = Some(("找不到该相册，请刷新后重试".into(), 3.0));
+                }
+                self.confirm_delete_album = None;
+            }
+            if cancel || !open {
+                self.confirm_delete_album = None;
             }
         }
 
@@ -3589,6 +3973,34 @@ impl eframe::App for OpenPicasaApp {
         self.tick_atlas(&ctx);
         // M4：EXIF 回填（后台线程，UI 帧只收结果，不读盘）
         self.tick_m4_exif(&ctx);
+        // M4.2 `M42-PERF-01`：轮询后台导入 / 导出任务（try_recv，零阻塞）。
+        // 进度 / 六态 / 取消由 `apply_io_msg` 写回 IoUi；成功副作用以纯数据
+        // `TaskEffects` 返回，在这里（唯一能碰 app 私有字段的地方）消费。
+        while let Some(msg) = self.import_task.as_mut().and_then(|t| t.tick()) {
+            if let Some(eff) = crate::import_task::apply_io_msg(&mut self.index_mgr.io, msg) {
+                if eff.reload_library {
+                    if let Err(e) = self.lib.reload_tree() {
+                        tracing::warn!(error = %e, "导入后刷新目录树失败");
+                    } else if let Err(e) = self.lib.reload_photos() {
+                        tracing::warn!(error = %e, "导入后刷新照片失败");
+                    }
+                }
+                if eff.sidebar_groups_dirty {
+                    self.sidebar_groups_dirty = true;
+                }
+                if eff.exif_pending {
+                    self.m4_exif_pending = true;
+                }
+                if let Some((text, secs)) = eff.toast {
+                    self.lib.toast = Some((text, f64::from(secs)));
+                }
+            }
+        }
+        // 仅任务未收到终态时请求下一帧；Done/Cancelled 后 finished=true 自动停
+        // ⇒ 无常驻动画定时器（R-M41-1 / R-M42-1）。
+        if self.import_task.as_ref().is_some_and(|t| t.is_active()) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        }
         // M4：左栏标签/相册缓存（脏时才查库，不每帧查）
         self.refresh_sidebar_groups();
         self.flush_reload(&ctx);
@@ -3666,7 +4078,11 @@ fn context_menu_open_frame_exempt(opened_frame: u64, current_frame: u64) -> bool
 
 #[cfg(test)]
 mod m4_tests {
+    use super::album_id_by_name;
     use super::context_menu_open_frame_exempt;
+    use super::new_item_name_valid;
+    use super::tag_tri_key;
+    use std::collections::HashMap;
 
     #[test]
     fn context_menu_open_frame_exempt_is_precise() {
@@ -3677,5 +4093,60 @@ mod m4_tests {
         assert!(!context_menu_open_frame_exempt(42, 1000));
         // 初始值 u64::MAX（还没打开过）不应误豁免
         assert!(!context_menu_open_frame_exempt(u64::MAX, 0));
+    }
+
+    /// M4.2 `M42-UI-06` TC-M42-B-06-02：缓存指纹与迭代顺序无关、选中集变化即失效。
+    #[test]
+    fn tag_tri_key_is_order_independent() {
+        let a = tag_tri_key(&[7, 3, 5]);
+        let b = tag_tri_key(&[5, 7, 3]);
+        let c = tag_tri_key(&[7, 3, 5, 9]);
+        assert_eq!(a, vec![3, 5, 7]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert!(tag_tri_key(&[]).is_empty());
+    }
+
+    /// M4.2 `M42-UI-06` TC-M42-B-06-03：三态计数 ☑/▣/☐ 与空集 / 空标签表边界。
+    #[test]
+    fn tri_state_counts_covers_all_three_states() {
+        let ids = [1_i64, 2, 3];
+        let mut by_photo: HashMap<i64, Vec<String>> = HashMap::new();
+        by_photo.insert(1, vec!["旅行".into(), "人物".into()]);
+        by_photo.insert(2, vec!["旅行".into()]);
+        // 3 号没有任何标签
+        let all_labels = vec![("旅行".to_string(), 2), ("人物".to_string(), 1), ("风景".to_string(), 0)];
+        let counts = picasa_core::Library::tri_state_counts(&ids, &by_photo, &all_labels);
+        // 旅行：2/3 → ▣（部分）；人物：1/3 → ▣；风景：0 → ☐
+        assert_eq!(counts.get("旅行"), Some(&2));
+        assert_eq!(counts.get("人物"), Some(&1));
+        assert_eq!(counts.get("风景"), Some(&0));
+        // 全部命中 → ☑
+        let full = picasa_core::Library::tri_state_counts(&[1, 2], &by_photo, &all_labels);
+        assert_eq!(full.get("旅行"), Some(&2));
+        // 空选中集：所有标签计数都是 0（☐），不 panic、不查库
+        let empty_sel = picasa_core::Library::tri_state_counts(&[], &by_photo, &all_labels);
+        assert!(empty_sel.values().all(|&v| v == 0));
+        // 空标签表：返回空 map
+        assert!(picasa_core::Library::tri_state_counts(&ids, &by_photo, &[]).is_empty());
+    }
+
+    /// M4.2 `M42-UI-04` TC-M42-B-04-03：空名 / 纯空白名非法，去空白后非空才合法。
+    #[test]
+    fn new_item_name_rejects_blank() {
+        assert!(!new_item_name_valid(""));
+        assert!(!new_item_name_valid("   "));
+        assert!(new_item_name_valid("  旅行  "));
+        assert!(new_item_name_valid("A"));
+    }
+
+    /// M4.2 `M42-UI-05` TC-M42-B-05-02：按相册名反查 id，找不到返回 None。
+    #[test]
+    fn album_id_lookup_by_name() {
+        let ids = vec![("2024 夏".to_string(), 3), ("人物".to_string(), 7)];
+        assert_eq!(album_id_by_name(&ids, "2024 夏"), Some(3));
+        assert_eq!(album_id_by_name(&ids, "人物"), Some(7));
+        assert_eq!(album_id_by_name(&ids, "不存在"), None);
+        assert_eq!(album_id_by_name(&[], "任何"), None);
     }
 }

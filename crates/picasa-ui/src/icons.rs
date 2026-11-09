@@ -11,7 +11,7 @@
 //! `resvg`/`usvg` 是 MPL-2.0，且 M1 的图标数量只有十来个、形状都极其简单。
 //! 用 `Painter` 直接画线省掉一个依赖，也省掉一次启动时的光栅化。
 
-use eframe::egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2};
+use eframe::egui::{Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -575,5 +575,83 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
             painter.line_segment([ip(0.24, 0.36), ip(0.76, 0.36)], s);
             painter.line_segment([ip(0.24, 0.52), ip(0.64, 0.52)], s);
         }
+    }
+}
+
+/// M4.2 M42-UI-01：五角星的 10 个顶点（5 个外尖 + 5 个内凹，交替）。
+///
+/// 从正上方起、每 36° 一个点，外半径 `outer`、内半径 `inner`。
+/// 这是**纯几何**：不依赖字体里是否有「★」字形（历史隔离空库唯一 INFO
+/// `No font has "✓"` 已证明符号 glyph 不可靠），所以网格/查看器的星标角标
+/// 一律自绘，而不是 `painter.text` 画字符。
+pub fn star_points(center: Pos2, outer: f32, inner: f32) -> [Pos2; 10] {
+    let mut pts = [center; 10];
+    for (i, p) in pts.iter_mut().enumerate() {
+        let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+        let (sin, cos) = angle.sin_cos();
+        let r = if i % 2 == 0 { outer } else { inner };
+        *p = pos2(center.x + r * cos, center.y + r * sin);
+    }
+    pts
+}
+
+/// M4.2 M42-UI-01：在 `center` 画一颗实心五角星（半径 `outer`）。
+///
+/// 凹多边形不能用 `Shape::convex_polygon`（它只保证凸），所以走 `Mesh`：
+/// 一个中心顶点 + 10 个轮廓顶点 + 10 个扇形三角形，用 `colored_vertex`
+/// （不带纹理），`painter.add(mesh)` 一次成型。**不调用 `Mesh::append`**，
+/// 规避 epaint `debug_assert!(other.is_valid(), "Other mesh is invalid")` 那条
+/// 历史崩溃（M42-ROB-01 三层防御的根因）。
+pub fn draw_star(painter: &Painter, center: Pos2, outer: f32, color: Color32) {
+    let inner = outer * 0.45;
+    let pts = star_points(center, outer, inner);
+    let mut mesh = Mesh::default();
+    mesh.colored_vertex(center, color); // #0 = 中心
+    for &p in &pts {
+        mesh.colored_vertex(p, color); // #1..#10 = 轮廓
+    }
+    for i in 0..10 {
+        mesh.add_triangle(0, 1 + i as u32, 1 + ((i + 1) % 10) as u32);
+    }
+    painter.add(mesh);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn star_points_alternate_outer_and_inner_radius() {
+        let c = pos2(100.0, 100.0);
+        let pts = star_points(c, 10.0, 4.5);
+        for (i, p) in pts.iter().enumerate() {
+            let r = ((p.x - c.x).powi(2) + (p.y - c.y).powi(2)).sqrt();
+            let expect = if i % 2 == 0 { 10.0 } else { 4.5 };
+            assert!((r - expect).abs() < 0.001, "point {i} radius {r} != {expect}");
+        }
+        // 第一个点在正上方
+        assert!((pts[0].x - c.x).abs() < 0.001);
+        assert!(pts[0].y < c.y);
+        assert_eq!(pts.len(), 10);
+    }
+
+    #[test]
+    fn draw_star_mesh_is_valid_and_single_tone() {
+        // 用离屏 Painter 不方便，这里验证几何生成的 mesh 结构：10 顶点扇形
+        // 由纯函数保证；直接构造同样的 mesh 检查索引都在范围内（is_valid 语义）。
+        let c = pos2(0.0, 0.0);
+        let pts = star_points(c, 7.0, 3.15);
+        let mut mesh = Mesh::default();
+        mesh.colored_vertex(c, Color32::GOLD);
+        for &p in &pts {
+            mesh.colored_vertex(p, Color32::GOLD);
+        }
+        for i in 0..10 {
+            mesh.add_triangle(0, 1 + i as u32, 1 + ((i + 1) % 10) as u32);
+        }
+        assert!(mesh.is_valid());
+        assert_eq!(mesh.vertices.len(), 11);
+        assert_eq!(mesh.indices.len(), 30);
+        assert!(mesh.vertices.iter().all(|v| v.color == Color32::GOLD));
     }
 }

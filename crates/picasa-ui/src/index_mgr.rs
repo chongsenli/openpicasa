@@ -172,6 +172,15 @@ pub struct IoUi {
     pub roots_to_remap: Vec<(String, bool)>,
     /// 我已了解影响范围（替换策略勾选框）
     pub understood: bool,
+    /// M4.2 `M42-UI-07`：导入前预览用的包内缩略图 `(photo_id, 字节)`。
+    /// 只存原始字节（不存 `TextureHandle` —— 它没有 `Debug`，会破坏本结构派生），
+    /// 渲染时由 `import_step_validate` 用 `ctx.load_texture_cached` 按需建纹理。
+    /// 来自 `ImportPreview.thumbs`（只读包内 thumbs 表、绝不读原图）。
+    pub preview_thumbs: Vec<(i64, Vec<u8>)>,
+    /// M4.2 `M42-PERF-01`：与后台 `ImportTask` **同一个**取消标志（单一真相源）。
+    /// `Option` 是因为任务未启动/已结束时为 `None`；`Arc<AtomicBool>` 满足
+    /// Clone/Debug/Default(=None)，不会破坏 `#[derive(Clone, Debug, Default)]`。
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// 索引管理页的界面状态（**不进偏好**：它是临时窗口状态，不该跨会话复活）。
@@ -869,6 +878,9 @@ fn import_step_validate(ui: &mut Ui, theme: &Theme, io: &IoUi) {
             c.photos, c.roots, c.folders, c.tags, c.albums
         ),
     );
+    // M4.2 `M42-UI-07`：选前缩略图预览格。只读索引包内 thumbs 的字节、绝不读原图；
+    // 无缩略图包（with_thumbs=false）优雅降级为「░ 无预览」占位。
+    preview_thumbs_row(ui, theme, io);
     ui.separator();
     section(ui, theme, "冲突与路径匹配");
     row(ui, theme, "重复记录", &format!("{} 条（按身份键处理）", p.duplicates));
@@ -877,6 +889,81 @@ fn import_step_validate(ui: &mut Ui, theme: &Theme, io: &IoUi) {
         RichText::new("ℹ 未匹配的照片导入后可重新匹配根目录，将标记为离线，不复制或移动照片")
             .color(theme.text_secondary)
             .size(11.0),
+    );
+}
+
+/// M4.2 `M42-UI-07`：选前缩略图预览格。
+///
+/// - 数据来源只有 `IoUi.preview_thumbs`（=包内 `thumbs.data` 字节），**绝不读取原始照片**；
+/// - 用 `image::load_from_memory` 解码 → `ColorImage` → `ctx.load_texture_cached`
+///   按需建纹理（按 `Id` 缓存，≤12 张、仅 Validate 步、仅在向导打开时画）；
+///   解码失败或无缩略图包显示「░ 无预览」字符块占位；
+/// - `TextureHandle` 没有 `Debug`，所以**不进 `IoUi`**，只在渲染时临时创建。
+const PREVIEW_THUMB_SIZE: f32 = 56.0;
+const PREVIEW_THUMB_MAX: usize = 12;
+
+/// 解码预览字节；失败返回 `None`（不阻断导入流程）。
+fn decode_preview_thumb(bytes: &[u8]) -> Option<egui::ColorImage> {
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [img.width() as usize, img.height() as usize],
+        img.as_raw(),
+    ))
+}
+
+fn preview_thumbs_row(ui: &mut Ui, theme: &Theme, io: &IoUi) {
+    section(ui, theme, "内容预览（选前）");
+    ui.horizontal_wrapped(|ui| {
+        // 单一真相源：优先用 app 侧填进 IoUi 的 preview_thumbs；没填时回退到
+        // preview.thumbs（同一份数据），避免两处不一致。
+        let thumbs: &[(i64, Vec<u8>)] = if io.preview_thumbs.is_empty() {
+            io.preview.as_ref().map_or(&[], |p| p.thumbs.as_slice())
+        } else {
+            io.preview_thumbs.as_slice()
+        };
+        if thumbs.is_empty() {
+            ui.label(
+                RichText::new("░ 无预览").color(theme.text_secondary).size(11.0),
+            );
+        } else {
+            for (photo_id, bytes) in thumbs.iter().take(PREVIEW_THUMB_MAX) {
+                let cell = egui::Frame::new()
+                    .fill(ui.visuals().extreme_bg_color)
+                    .corner_radius(6.0)
+                    .inner_margin(3.0)
+                    .show(ui, |ui| {
+                        if let Some(img) = decode_preview_thumb(bytes) {
+                            // Id 由 photo_id + 字节长度哈希：同一张照片稳定命中缓存。
+                            let id = egui::Id::unique(("m42_preview_thumb", *photo_id, bytes.len()));
+                            let tex = ui.ctx().load_texture_cached(
+                                format!("m42-preview-{photo_id}"),
+                                id,
+                                img,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            ui.add(
+                                egui::Image::from_texture(&tex)
+                                    .fit_to_exact_size(egui::vec2(PREVIEW_THUMB_SIZE, PREVIEW_THUMB_SIZE))
+                                    .corner_radius(4.0),
+                            );
+                        } else {
+                            // 占位：░ 字符块，不依赖外部文件、不读原图。
+                            ui.add_sized(
+                                [PREVIEW_THUMB_SIZE, PREVIEW_THUMB_SIZE],
+                                egui::Label::new(
+                                    RichText::new("░\n无预览").color(theme.text_secondary).size(10.0),
+                                ),
+                            );
+                        }
+                    });
+                let _ = cell.response;
+            }
+        }
+    });
+    ui.label(
+        RichText::new("仅来自索引包内缩略图，不读取原图 · 最多 12 张")
+            .color(theme.text_secondary)
+            .size(10.5),
     );
 }
 
@@ -925,6 +1012,9 @@ fn import_step_strategy(ui: &mut Ui, theme: &Theme, io: &mut IoUi, actions: &mut
 fn import_step_execute(ui: &mut Ui, theme: &Theme, io: &mut IoUi, actions: &mut Vec<MgrAction>) {
     section(ui, theme, "执行导入");
     if io.state == IoState::Running || io.state == IoState::Preparing {
+        // M42-PERF-01：阶段文案 / 进度全部来自后台 `ImportTask` 发来的
+        // `Msg::Progress`（经 `apply_io_msg` 写进 io.progress / io.fraction），
+        // 不再有固定假阶段文案（R-M42-5 单一真相源）。
         ui.label(RichText::new(&io.progress).color(theme.text_primary));
         if let Some(f) = io.fraction {
             ui.add(egui::ProgressBar::new(f).show_percentage());
@@ -933,15 +1023,29 @@ fn import_step_execute(ui: &mut Ui, theme: &Theme, io: &mut IoUi, actions: &mut 
             ui.add(bar);
         }
         ui.label(
-            RichText::new("当前阶段：写入整理关系（后台执行，界面可继续操作）· 无 ETA")
+            RichText::new("导入在后台线程执行，界面可继续操作 · 无 ETA")
                 .color(theme.text_secondary)
                 .size(11.0),
         );
         if ui.button("取消导入").clicked() {
+            // 真取消：直接置位共享 `Arc<AtomicBool>`（与后台 ImportTask 同一个标志，
+            // 单一真相源 R-M42-5）。后台线程在 execute_import 阶段间检查到即
+            // 单事务回滚退出，随后 `Msg::Cancelled` 把六态收敛到 Cancelled。
+            if let Some(flag) = &io.cancel {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            // 同时通知 app 侧（lead 的 m4_cancel_import 也会调 ImportTask::cancel，
+            // 同一个 Arc，幂等；即便 IoUi.cancel 为空也仍可取消）。
             actions.push(MgrAction::CancelImport);
         }
     } else if io.state == IoState::Cancelled {
-        ui.label(RichText::new("⏹ 已取消 · 现有索引未改动").color(theme.warn));
+        // 展示后台返回的完整回滚说明（整库回滚、无残留 staging 文件/连接）。
+        let text = if io.message.is_empty() {
+            "⏹ 已取消 · 整库回滚、无残留 staging 文件/连接 · 现有索引未改动".to_string()
+        } else {
+            io.message.clone()
+        };
+        ui.label(RichText::new(text).color(theme.warn));
     } else if io.state == IoState::Failed {
         ui.label(RichText::new(&io.message).color(theme.danger));
     } else {
@@ -1233,6 +1337,31 @@ mod tests {
         assert_eq!(io.strategy, picasa_db::ImportStrategy::Merge);
         assert!(io.preview.is_none());
         assert!(io.report.is_none());
+        // M42-UI-07 / M42-PERF-01 新增字段必须仍是 Default，不能破坏会话初态。
+        assert!(io.preview_thumbs.is_empty());
+        assert!(io.cancel.is_none());
+    }
+
+    #[test]
+    fn cancel_flag_in_io_ui_is_shared_and_observable() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // 验证 IoUi.cancel 指向的 Arc 与「后台任务持有的 Arc」可共享置位（单一真相源）。
+        let flag = Arc::new(AtomicBool::new(false));
+        let io = IoUi {
+            cancel: Some(Arc::clone(&flag)),
+            ..Default::default()
+        };
+        io.cancel.as_ref().unwrap().store(true, Ordering::SeqCst);
+        assert!(flag.load(Ordering::SeqCst), "同一个 Arc 必须看到置位");
+    }
+
+    #[test]
+    fn preview_thumbs_defaults_to_empty_without_breaking_preview() {
+        // 无缩略图包（with_thumbs=false）→ preview_thumbs 为空 → 预览格走「░ 无预览」占位。
+        let io = IoUi::default();
+        assert!(io.preview_thumbs.is_empty());
+        assert!(io.preview.is_none(), "空预览数据不构造假 preview");
     }
 
     #[test]

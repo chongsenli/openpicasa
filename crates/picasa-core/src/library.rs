@@ -817,6 +817,37 @@ impl Library {
         self.db()?.ids_with_tag(label).map_err(CoreError::from)
     }
 
+    /// M4.2 `M42-UI-06`：一次查库拿到「选中集里每张照片各自的标签」。
+    /// 查库次数与标签数量无关（选中集为空时 0 次），供批量标签浮层算三态。
+    pub fn tags_for_ids(&self, photo_ids: &[i64]) -> Result<HashMap<i64, Vec<String>>> {
+        self.db()?.tags_for_ids(photo_ids).map_err(CoreError::from)
+    }
+
+    /// M4.2 `M42-UI-06`：由「每张照片的标签」+「全库标签清单」算三态计数。
+    ///
+    /// 纯函数（不碰 DB、不持锁），返回值是 `标签名 -> 选中集里带此标签的照片数`，
+    /// 浮层据此显示 ☑(with==n) / ▣(with>0) / ☐(with==0)。抽成纯函数是为了能
+    /// 无 DB 单测（TC-M42-B-06-02），也让 UI 侧只在缓存失效时算一次。
+    pub fn tri_state_counts(
+        photo_ids: &[i64],
+        tags_by_photo: &HashMap<i64, Vec<String>>,
+        all_labels: &[(String, i64)],
+    ) -> HashMap<String, usize> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for (label, _) in all_labels {
+            let with = photo_ids
+                .iter()
+                .filter(|id| {
+                    tags_by_photo
+                        .get(*id)
+                        .is_some_and(|tags| tags.iter().any(|t| t == label))
+                })
+                .count();
+            counts.insert(label.clone(), with);
+        }
+        counts
+    }
+
     /// 时间轴：按拍摄年份的计数（左栏时间轴分组用）。
     pub fn timeline_years(&self) -> Result<Vec<(i32, i64)>> {
         self.db()?.timeline_years().map_err(CoreError::from)

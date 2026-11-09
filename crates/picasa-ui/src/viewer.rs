@@ -8,8 +8,16 @@
 //!
 //! ## M1 的明确取舍
 //!
-//! 查看器里**没有旋转、没有星标、没有编辑**（R-2）。顶部只保留「返回」与「在 Finder 显示」
+//! 查看器里**没有旋转、没有编辑**（R-2）。顶部只保留「返回」与「在 Finder 显示」
 //! ——这是 01 U-42 登记过的**有意差异**。
+//!
+//! ## M4.2 M42-UI-01：补上星标 / 标签的**只读显示**
+//!
+//! M4.2 起底部信息条会显示收藏星标与照片标签（chips）。数据层只有
+//! `starred: bool`（0/1 收藏态，无 1~5 评分列，R-M42-2 不新增字段），
+//! 所以 `true` → 一颗金色五角星 + 「★ 收藏」，`false` → 不显示；标签经
+//! `db.tags_of(photo_id)` 只读查询。这里**仍然不提供编辑**（不在查看器里
+//! 改星标 / 改标签），编辑入口在网格工具栏，保持 R-2 的原意。
 
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Rect, Sense, Stroke, TextureHandle, Ui, Vec2, pos2,
@@ -78,6 +86,13 @@ pub struct Viewer {
     /// 已排队等待的比较图 photo_id（防重复排队）。
     pub compare_requested: Option<i64>,
     pub dims: Option<(u32, u32)>,
+    /// M4.2 M42-UI-01：当前照片的标签（只读显示），由 `app::draw_viewer` 在
+    /// 打开 / 翻页时短锁查 `db.tags_of` 后填入，查看器内不二次拿 Db 锁
+    /// （std Mutex 不可重入，见 `sidebar.rs` 启动 hang 127s 的教训）。
+    pub tags: Vec<String>,
+    /// 已为哪张照片查过标签；`None` 或 != 当前 id 时触发重查（翻页后由
+    /// `jump_to` 清空）。
+    pub tags_for: Option<i64>,
 }
 
 impl Viewer {
@@ -103,6 +118,8 @@ impl Viewer {
             compare_tex: None,
             compare_requested: None,
             dims: None,
+            tags: Vec::new(),
+            tags_for: None,
         }
     }
 
@@ -120,6 +137,9 @@ impl Viewer {
         self.exif = Default::default();
         self.histogram = None;
         self.compare_tex = None;
+        // 换页后当前标签作废，下一帧 app::draw_viewer 重查（M42-UI-01）。
+        self.tags.clear();
+        self.tags_for = None;
     }
 
     pub fn zoom_in(&mut self) {
@@ -430,6 +450,7 @@ pub fn show(
                 row.height.unwrap_or(0)
             ))
         });
+        let left_font = FontId::new(11.5, egui::FontFamily::Proportional);
         let left_text = format!(
             "{}   {}   第 {} / {} 张   {}%",
             row.name,
@@ -438,12 +459,30 @@ pub fn show(
             photos.len(),
             (viewer.zoom * 100.0).round() as i32
         );
+        // 量真实字形宽度，让星标/标签精确接在左侧文本之后（中文/ASCII 混排
+        // 用固定字符数估会溢出，沿用 grid.rs 文件名 ellipsize 的同一教训）。
+        let left_w = painter
+            .layout_no_wrap(left_text.clone(), left_font.clone(), Color32::WHITE)
+            .size()
+            .x;
         painter.text(
             pos2(bar.left() + 10.0, bar.center().y),
             Align2::LEFT_CENTER,
             left_text,
-            FontId::new(11.5, egui::FontFamily::Proportional),
+            left_font,
             Color32::from_white_alpha(215),
+        );
+        // M42-UI-01：星标 + 标签 chips 接在左侧文本之后（只读显示，不编辑）。
+        let right_limit = bar.right() - 10.0;
+        let hint_w = if viewer.info_open { 330.0 } else { 0.0 };
+        draw_star_and_tags(
+            &painter,
+            bar,
+            row.starred,
+            &viewer.tags,
+            bar.left() + 10.0 + left_w + 12.0,
+            right_limit - hint_w,
+            theme,
         );
         if viewer.info_open {
             painter.text(
@@ -561,6 +600,76 @@ fn button(
         Color32::from_white_alpha(220),
     );
     resp
+}
+
+/// M4.2 M42-UI-01：底部信息条里的「星标 + 标签 chips」只读显示。
+///
+/// `starred` 直接来自 `PhotoRow`（数据层只有 0/1 收藏态，无 1~5 评分列，
+/// R-M42-2 不新增字段）：`true` → 一颗金色五角星 + 「★ 收藏」文字，
+/// `false` → 不画星。标签用 `painter.layout_no_wrap` 量真实字形宽度画圆角
+/// chips；`max_x` 之后放不下的收成「+N」，避免与右侧快捷键提示/文件名重叠。
+/// 全程不查库（标签已由调用方短锁预填到 `viewer.tags`）、不引入重绘。
+fn draw_star_and_tags(
+    painter: &egui::Painter,
+    bar: Rect,
+    starred: bool,
+    tags: &[String],
+    start_x: f32,
+    max_x: f32,
+    theme: &Theme,
+) {
+    let font = FontId::new(11.0, egui::FontFamily::Proportional);
+    let mut x = start_x;
+    let cy = bar.center().y;
+    if x > max_x {
+        return;
+    }
+
+    if starred {
+        let r = 6.0;
+        let c = pos2(x + r, cy);
+        icons::draw_star(painter, c, r, Color32::GOLD);
+        x += r * 2.0 + 3.0;
+        let galley = painter.layout_no_wrap(
+            "收藏".to_owned(),
+            font.clone(),
+            Color32::from_white_alpha(215),
+        );
+        painter.galley(pos2(x, cy - galley.size().y / 2.0), galley, Color32::WHITE);
+        x += 26.0 + 8.0;
+    }
+
+    let chip_color = Color32::from_white_alpha(40);
+    let text_color = Color32::from_white_alpha(225);
+    let mut shown = 0usize;
+    for label in tags {
+        let galley = painter.layout_no_wrap(label.clone(), font.clone(), text_color);
+        let w = galley.size().x + 12.0;
+        if x + w > max_x {
+            break;
+        }
+        let chip = Rect::from_min_size(pos2(x, cy - 9.0), vec2(w, 18.0));
+        painter.rect_filled(chip, 8.0, chip_color);
+        painter.galley(
+            pos2(x + 6.0, cy - galley.size().y / 2.0),
+            galley,
+            Color32::WHITE,
+        );
+        x += w + 4.0;
+        shown += 1;
+    }
+    if shown < tags.len() {
+        let more = format!("+{}", tags.len() - shown);
+        let galley = painter.layout_no_wrap(more, font, text_color);
+        painter.galley(
+            pos2(x, cy - galley.size().y / 2.0),
+            galley,
+            Color32::WHITE,
+        );
+    }
+    // theme 参与签名是为了让样式基线（v1.8）可在后续统一收口；当前 chips
+    // 用半透明白而非新增 token，避免破坏已锁死的 M4.1 v1.8 视觉基线。
+    let _ = theme;
 }
 
 fn draw_info_panel(painter: &egui::Painter, rect: Rect, viewer: &Viewer, theme: &Theme) {

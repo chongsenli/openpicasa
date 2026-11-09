@@ -55,6 +55,8 @@ pub enum SidebarAction {
     /// M4：新建标签 / 相册
     NewTag,
     NewAlbum,
+    /// M4.2 `M42-UI-05`：相册行右键（相册名、屏幕位置），供改名/删除/加入照片。
+    AlbumContext(String, Pos2),
 }
 
 pub struct SidebarCtx<'a> {
@@ -262,6 +264,14 @@ fn m4_group(
             } else {
                 SidebarAction::FilterByAlbum(name.clone())
             });
+        }
+        // M4.2 `M42-UI-05`：相册行右键 → 改名 / 删除 / 加入当前选中集。
+        // 与 folder_tree 同范式：`Sense::click()` 仍会报告 secondary_clicked。
+        if !is_tag && row_resp.secondary_clicked() {
+            actions.push(SidebarAction::AlbumContext(
+                name.clone(),
+                row_resp.interact_pointer_pos().unwrap_or(r.center()),
+            ));
         }
     }
 }

@@ -45,6 +45,7 @@ pub use export::{
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// 索引库错误。
@@ -2706,6 +2707,38 @@ impl Db {
         let rows = st.query_map([label], |r| r.get(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
+
+    /// M4.2 `M42-UI-06`：一次查库拿到「选中集里每张照片各自的标签」。
+    ///
+    /// 批量标签浮层算三态时，M4.1 的写法是**对每个标签各查一次**
+    /// `ids_with_tag`（O(标签数) 次查库、且每帧重复）。这里改成一条
+    /// `IN (...)` 把整个选中集的 `tags` 行一次取回，在内存里按 photo_id 聚合，
+    /// 查库次数与标签数量无关（始终 1 次；选中集为空时 0 次）。
+    ///
+    /// 约束：只查 `tags` 关联表、不读原图、不新增表、不改 schema（R-M42-2）。
+    pub fn tags_for_ids(&self, photo_ids: &[i64]) -> Result<HashMap<i64, Vec<String>>> {
+        let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+        // 选中集为空必须短路：否则会拼出 `IN ()` 触发 SQL 语法错误
+        // （与 build_scope :1568 的 `folder_ids == Some(&[])` 同类边界）。
+        if photo_ids.is_empty() {
+            return Ok(out);
+        }
+        let holes = std::iter::repeat_n("?", photo_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT photo_id, label FROM tags WHERE photo_id IN ({holes}) ORDER BY photo_id, label"
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map(rusqlite::params_from_iter(photo_ids.iter().copied()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, label) = row?;
+            out.entry(id).or_default().push(label);
+        }
+        Ok(out)
+    }
 }
 
 /// `LIKE` 转义，避免用户输入的 `%` / `_` 变成通配符。
@@ -3031,5 +3064,44 @@ mod tests {
         assert_eq!((s.ready, s.failed, s.pending), (1, 0, 1), "已完成不回退");
         // 已就绪的缩略图内容仍在（没有因为重试被删）
         assert!(db.get_thumb(ok_id, 0).unwrap().is_some());
+    }
+
+    /// M42-UI-06 TC-M42-B-06-01：`tags_for_ids` 一次取回选中集全部关联，
+    /// 空选中集短路返回空 map（不会拼出 `IN ()`），未命中的 id 不出现在结果里。
+    #[test]
+    fn tags_for_ids_batches_and_short_circuits_empty() {
+        let (db, fid) = db_with_folder();
+        db.apply_scan(
+            fid,
+            "/tmp/a",
+            &[
+                mk("a.jpg", 1, 1, None),
+                mk("b.jpg", 2, 2, None),
+                mk("c.jpg", 3, 3, None),
+            ],
+            0,
+        )
+        .unwrap();
+        let all = db.photos(Some(&[fid]), SortSpec::default(), 10).unwrap();
+        let id = |n: &str| all.iter().find(|p| p.name == n).unwrap().id;
+        let (a, b, c) = (id("a.jpg"), id("b.jpg"), id("c.jpg"));
+
+        // 空选中集：0 次查库、返回空 map
+        assert!(db.tags_for_ids(&[]).unwrap().is_empty());
+
+        db.add_tag(&[a, b], "旅行").unwrap();
+        db.add_tag(&[b], "人物").unwrap();
+
+        let got = db.tags_for_ids(&[a, b, c]).unwrap();
+        assert_eq!(got.get(&a).unwrap(), &vec!["旅行".to_string()]);
+        // 同一张照片的两个标签按 label 排好序
+        assert_eq!(got.get(&b).unwrap(), &vec!["人物".to_string(), "旅行".to_string()]);
+        // 没有任何标签的 c 不出现在 map 里（用 .get().unwrap_or(&0) 显示 ☐）
+        assert!(!got.contains_key(&c));
+        assert_eq!(got.len(), 2);
+
+        // 只查子集时也只返回子集
+        let sub = db.tags_for_ids(&[c]).unwrap();
+        assert!(sub.is_empty());
     }
 }

@@ -25,6 +25,7 @@ pub mod capture;
 pub mod diagnostics;
 pub mod grid;
 pub mod icons;
+pub mod import_task;
 pub mod index_mgr;
 pub mod index_progress;
 pub mod macos;

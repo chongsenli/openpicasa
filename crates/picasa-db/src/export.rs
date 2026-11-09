@@ -62,11 +62,48 @@ pub struct ImportPreview {
     pub unmatched_roots: i64,
     /// 将被覆盖（替换策略）或保留（合并策略）的现有独有数据量。
     pub existing_only_user_data: i64,
+    /// M4.2 `M42-UI-07`：导入向导「选前缩略图预览」用的包内缩略图。
+    ///
+    /// 每项 = `(photo_id, 缩略图字节)`。**只读索引包 `thumbs` 表的 `data` BLOB，
+    /// 绝不读取原始照片**；`with_thumbs=false` 的包（导出时 `DELETE FROM thumbs`）
+    /// 或读取失败时为空 Vec，优雅降级、不阻断导入流程。
+    pub thumbs: Vec<(i64, Vec<u8>)>,
 }
 
 /// 可理解的错误原因（`M4-IDX-14/51`）。全部是能直接展示给用户的人话。
 fn reject(msg: impl Into<String>) -> DbError {
     DbError::Other(msg.into())
+}
+
+/// M4.2 `M42-UI-07`：导入向导「选前缩略图预览」最多读取的张数（docs/16 §3，N 取 6~12）。
+const PREVIEW_THUMB_LIMIT: i64 = 12;
+
+/// M4.2 `M42-UI-07`：从索引包（staging 副本）里读出最多 `limit` 张缩略图。
+///
+/// - **只读 `thumbs` 表的 `data` BLOB，绝不读取原始照片**（R-M42-2：数据层零改动、
+///   不写照片目录）。`inspect_index` 传进来的是 `stage_and_validate` 复制出的副本连接。
+/// - `thumbs` 以 `(photo_id, tier)` 为主键，一张照片可能有多级（T0/T1）；用相关子查询
+///   取每张照片最小 tier 的那一行，保证 `photo_id` 不重复、预览格不出现同一张两次。
+/// - **优雅降级**：旧版包缺 `thumbs` 表 / `with_thumbs=false` 导出时已 `DELETE FROM thumbs`
+///   导致空表 / 查询失败 / 单行 BLOB 损坏，一律返回空 Vec，`不报错、不阻断导入`。
+///   这里刻意不用 `Result`：预览是锦上添花，任何读取问题都不该让整个预览失败。
+fn read_package_thumbs(conn: &Connection, limit: i64) -> Vec<(i64, Vec<u8>)> {
+    let mut out = Vec::new();
+    let Ok(mut st) = conn.prepare(
+        "SELECT t.photo_id, t.data FROM thumbs t
+         WHERE t.tier = (SELECT MIN(t2.tier) FROM thumbs t2 WHERE t2.photo_id = t.photo_id)
+         ORDER BY t.photo_id
+         LIMIT ?1",
+    ) else {
+        return out;
+    };
+    let Ok(rows) = st.query_map([limit], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+    }) else {
+        return out;
+    };
+    out.extend(rows.flatten());
+    out
 }
 
 // ---------------------------------------------------------------- 校验和
@@ -383,6 +420,11 @@ fn stage_and_validate(src: &Path, work_dir: &Path) -> Result<(PathBuf, IndexMani
 /// 导入前预览（`M4-IDX-31/32`）：不修改任何数据，返回冲突与路径匹配信息。
 pub fn inspect_index(db: &Db, src: &Path, work_dir: &Path) -> Result<ImportPreview> {
     let (staging, manifest, _) = stage_and_validate(src, work_dir)?;
+    // M4.2 `M42-UI-07`：在 staging 副本上读包内缩略图（只读 thumbs 表、绝不读原图）。
+    // 用独立的短连接读，避免和下面比对用的 ATTACH 连接互相干扰；任何失败都降级为空。
+    let thumbs = Connection::open(&staging)
+        .map(|c| read_package_thumbs(&c, PREVIEW_THUMB_LIMIT))
+        .unwrap_or_default();
     let staging_str = staging.to_string_lossy().to_string();
     // ATTACH 到现有库连接，才能在一条 SQL 里比对「导入文件 vs 现有库」。
     let attach = db.conn.execute_batch(&format!(
@@ -427,6 +469,7 @@ pub fn inspect_index(db: &Db, src: &Path, work_dir: &Path) -> Result<ImportPrevi
         duplicates,
         unmatched_roots,
         existing_only_user_data,
+        thumbs,
     })
 }
 
@@ -686,5 +729,101 @@ fn now_millis() -> u128 {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0)
+    }
+}
+
+// ---------------------------------------------------------------- 测试
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{PhotoInput, SortSpec, ThumbBuf};
+
+    /// 造一个含 2 张照片 + 各自一张 T0 缩略图的临时库（用 tempfile 落盘，
+    /// 避开 in-memory `VACUUM INTO` 的兼容问题）。
+    fn seeded_db(path: &Path) -> (Db, Vec<i64>) {
+        let db = Db::open(path).unwrap();
+        let root = db.upsert_root("/photos", 0, false).unwrap();
+        let fid = db.upsert_folder("/photos", "/photos", None).unwrap();
+        db.set_folder_root(fid, root, None).unwrap();
+        let mk = |name: &str, taken: i64| PhotoInput {
+            name: name.to_string(),
+            name_key: name.to_ascii_lowercase(),
+            size_bytes: 1000,
+            mtime_ns: taken * 1_000_000_000,
+            width: Some(8),
+            height: Some(8),
+            orientation: Some(1),
+            taken_at: Some(taken),
+            taken_at_src: 0,
+            format: 1,
+        };
+        db.apply_scan(fid, "/photos", &[mk("a.jpg", 100), mk("b.jpg", 200)], 0)
+            .unwrap();
+        let rows = db
+            .photos_from_visible(None, SortSpec::default(), 20, 0)
+            .unwrap();
+        let ids: Vec<i64> = rows.iter().map(|p| p.id).collect();
+        for (i, id) in ids.iter().enumerate() {
+            db.put_thumb(
+                *id,
+                0,
+                &ThumbBuf {
+                    w: 8,
+                    h: 8,
+                    format: 0,
+                    data: vec![0xFF, 0xD8, 0xFF, i as u8],
+                },
+            )
+            .unwrap();
+        }
+        (db, ids)
+    }
+
+    /// M42-UI-07 TC：`with_thumbs=true` 导出 → `inspect_index` 读出包内缩略图，
+    /// 且 photo_id 与源库一致、每个 id 只出现一次、不读取原图。
+    #[test]
+    fn inspect_index_reads_package_thumbs_when_export_has_thumbs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (src_db, ids) = seeded_db(&tmp.path().join("src.sqlite"));
+        let out = tmp.path().join("with.opicasaidx");
+        export_index(&src_db, &out, true, "0.4.2-test", 1000).unwrap();
+
+        let dst_db = Db::open_in_memory().unwrap();
+        let prev = inspect_index(&dst_db, &out, tmp.path()).unwrap();
+        assert!(
+            !prev.thumbs.is_empty(),
+            "含缩略图包必须读出预览用的 thumbs"
+        );
+        let mut got: Vec<i64> = prev.thumbs.iter().map(|(id, _)| *id).collect();
+        let mut want = ids.clone();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want, "photo_id 集合必须与源库一致");
+        assert_eq!(
+            got.iter().collect::<std::collections::HashSet<_>>().len(),
+            got.len(),
+            "同一 photo_id 不能因多 tier 重复"
+        );
+        assert!(
+            prev.thumbs.iter().all(|(_, b)| !b.is_empty()),
+            "每张都要带上真实的缩略图字节"
+        );
+    }
+
+    /// M42-UI-07 TC：`with_thumbs=false` 的包（导出时 `DELETE FROM thumbs`）→
+    /// `thumbs` 为空 Vec，且 `inspect_index` 仍 `Ok`（优雅降级、不阻断导入）。
+    #[test]
+    fn inspect_index_degrades_gracefully_when_package_has_no_thumbs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (src_db, _) = seeded_db(&tmp.path().join("src.sqlite"));
+        let out = tmp.path().join("no_thumbs.opicasaidx");
+        export_index(&src_db, &out, false, "0.4.2-test", 1000).unwrap();
+
+        let dst_db = Db::open_in_memory().unwrap();
+        let prev = inspect_index(&dst_db, &out, tmp.path()).unwrap();
+        assert!(prev.thumbs.is_empty(), "无缩略图包必须优雅降级为空 Vec");
+        assert_eq!(prev.manifest.format_version, FORMAT_VERSION);
+        assert_eq!(prev.manifest.counts.photos, 2, "预览本身仍要正常完成");
     }
 }
