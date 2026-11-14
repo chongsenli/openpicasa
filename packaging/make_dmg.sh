@@ -54,6 +54,18 @@ echo "== 1/4 组装镜像内容 =="
 # information, or similar detritus not allowed"）。
 ditto "$app" "$stage/OpenPicasa.app"
 
+# 卷图标：镜像里放一份 .VolumeIcon.icns，再给根目录打上「自定义图标」位。
+# 少了这一步，挂载后 Finder 侧边栏/桌面显示的是系统默认的白磁盘，
+# 看上去跟我们的应用没关系（.app 自己的图标不受影响，那是包内的 icns）。
+iconsrc="$repo/dist/OpenPicasa.icns"
+if [[ -f "$iconsrc" ]]; then
+    cp "$iconsrc" "$stage/.VolumeIcon.icns"
+    # -a C = 目录带自定义图标；-a V = 卷本身带自定义图标（第 3 步挂载后补）。
+    SetFile -a C "$stage"
+else
+    echo "    ⚠️ 缺少 $iconsrc，跳过卷图标（先跑 packaging/bundle.sh）" >&2
+fi
+
 # 「拖进应用程序」的落点：一个指向 /Applications 的符号链接。
 # Finder 会照原样显示成 Applications 文件夹图标，用户把左边的 app 拖到右边即可。
 ln -s /Applications "$stage/Applications"
@@ -73,17 +85,52 @@ rm -f "$dmg"
 #    `codesign --verify --deep --strict` 会报
 #    「resource fork, Finder information, or similar detritus not allowed」，
 #    即签名在解镜像那一刻就废了。宁可不产出 DMG，也不产出一个装上去打不开的。
+#
+# 为什么分两步（UDRW → 挂载打卷图标 → UDZO）：
+#   卷图标有两个条件，缺一不可——目录里要有 .VolumeIcon.icns（第 1 步已放），
+#   以及**卷头**的 kHasCustomIcon 位（`SetFile -a V`）。后者只能写在可写卷上，
+#   而发布镜像必须只读，所以先造可写镜像、挂上、打位，再 `hdiutil convert` 压成 UDZO。
+#   实测 convert 会保留该位（挂回只读镜像 `GetFileInfo -a` 仍是 `aV…`）。
+#   早先直接 `-srcfolder -format UDZO` 出来的镜像没有这个位，Finder 里显示白磁盘。
+rw="$(mktemp -d "$out_dir/.dmg-rw.XXXXXX")/rw.dmg"
+mnt="$(dirname "$rw")/mnt"
+cleanup_img() {
+    [[ -d "$mnt" ]] && hdiutil detach "$mnt" >/dev/null 2>&1 || true
+    rm -rf "$(dirname "$rw")"
+}
+trap 'cleanup_img; rm -rf "$stage"' EXIT
+
 if ! hdiutil create \
         -volname "OpenPicasa" \
         -srcfolder "$stage" \
         -fs HFS+ \
-        -format UDZO \
+        -format UDRW \
         -ov \
-        "$dmg" 2>&1 | sed 's/^/    /'; then
+        "$rw" 2>&1 | sed 's/^/    /'; then
     echo
     echo "❌ DMG 生成失败。若上面出现 newfs_hfs / Operation not permitted，" >&2
     echo "   说明当前环境不允许格式化磁盘镜像——请在正常终端里重跑本脚本。" >&2
     echo "   已产出的 dist/OpenPicasa.app 本身是完整可用的，可以直接拖进应用程序。" >&2
+    exit 1
+fi
+
+# 打卷图标位。SetFile 缺失时只降级为「没有卷图标」，不让打包失败——
+# 图标是门面，能装才是根本。
+if [[ -f "$stage/.VolumeIcon.icns" ]] && command -v SetFile >/dev/null; then
+    mkdir -p "$mnt"
+    if hdiutil attach "$rw" -nobrowse -mountpoint "$mnt" >/dev/null 2>&1; then
+        SetFile -a C "$mnt" 2>/dev/null || true
+        SetFile -a V "$mnt" 2>/dev/null || true
+        sync
+        hdiutil detach "$mnt" >/dev/null 2>&1 || true
+        echo "    卷图标已写入（.VolumeIcon.icns + kHasCustomIcon）"
+    else
+        echo "    ⚠️ 可写镜像挂不上，跳过卷图标" >&2
+    fi
+fi
+
+if ! hdiutil convert "$rw" -format UDZO -o "$dmg" 2>&1 | sed 's/^/    /'; then
+    echo "❌ 压缩成只读镜像失败" >&2
     exit 1
 fi
 [[ -f "$dmg" ]] || { echo "❌ hdiutil 未产出 $dmg" >&2; exit 1; }

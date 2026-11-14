@@ -45,9 +45,14 @@ cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
 chmod +x "$APP/Contents/MacOS/$APP_NAME"
 
 echo "== 4/6 生成图标 =="
-if [[ ! -f "$DIST/$APP_NAME.icns" ]]; then
-  mkdir -p "$DIST"
+mkdir -p "$DIST"
+# 只在图标比源图旧时重新生成。早先这里写的是「icns 不存在才生成」，
+# 结果是换了 packaging/logo.png 之后打包仍沿用旧图标（dist/ 不进 git，
+# 不会随仓库更新，坑得静悄悄）。用 -nt 比较时间戳，换图即自动重出。
+if [[ ! -f "$DIST/$APP_NAME.icns" || packaging/logo.png -nt "$DIST/$APP_NAME.icns" ]]; then
   python3 packaging/make_icon.py "$DIST"
+else
+  echo "    图标已是最新（packaging/logo.png 未变）"
 fi
 cp "$DIST/$APP_NAME.icns" "$APP/Contents/Resources/$APP_NAME.icns"
 
