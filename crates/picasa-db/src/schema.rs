@@ -25,9 +25,9 @@ pub struct Migration {
 ///
 /// ⚠️ **与 `docs/06`（M2.2 规格）的编号偏差**：规格 §5 把它写成「迁移 v3」，
 /// 因为它成文时代码停在 v2；本仓库在 M2.1 收尾时又落了 v3（`eff_taken_at`）与
-/// v4（待补缩略图索引）。**内容按规格做，版本号以代码为准 = 5**，
+/// v4（待补缩略图索引）。**内容按规格做，版本号以下面的 `SCHEMA_VERSION` 为准**，
 /// 已登记进 `docs/06` §12.1 冲突表。
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// v1 · M1 最小集（02 §5.3）。
 ///
@@ -61,7 +61,7 @@ CREATE TABLE photos (
     orientation  INTEGER,                 -- EXIF Orientation 1..8（只读，用于显示摆正）
     taken_at     INTEGER,                 -- 拍摄时间（秒；缺失回退 mtime）
     taken_at_src INTEGER,                 -- 0=EXIF 1=文件名 2=mtime
-    thumb_state  INTEGER NOT NULL DEFAULT 0,  -- 0=未生成 1=OK 2=失败 3=损坏
+    thumb_state  INTEGER NOT NULL DEFAULT 0,  -- 0=未生成 1=OK 2=失败 3=损坏 4=云端未下载（v9 后新增取值，无 CHECK 约束故不需迁移）
     decoder_ver  INTEGER NOT NULL DEFAULT 0,  -- 解码器版本（缓存失效用）
     UNIQUE(folder_id, name_key)
 );
@@ -452,6 +452,76 @@ INSERT OR IGNORE INTO index_manifest(key, value) VALUES ('format_version', '1');
 INSERT OR IGNORE INTO index_manifest(key, value) VALUES ('min_reader_version', '0.4.0');
 "#;
 
+/// v9 · M4.3 索引管理完善（阶段 0 地基）。
+///
+/// 全部是**纯增量 DDL**，不改任何既有列/表，保证 v8→v9 可回滚（`TC-M43-MIG-01`）：
+///
+/// 1. **身份骨架**（R-M43-02「重建/删除不丢用户标记」）：`photo_identities` +
+///    `photo_identity_tags` + `photo_identity_albums`，按 `(folder_path, name_key)`
+///    复合键把星标/说明/标签/相册从「会随 `photos` 行 CASCADE 删掉」的状态里解耦出来。
+///    删索引前快照、重新扫描 INSERT 后按身份恢复（P-M43-01「永久保留/重加可恢复」）。
+/// 2. **任务持久意图/检查点/generation**（§3.1）：`index_tasks` 增列，供阶段 1
+///    「暂停/继续/取消/崩溃恢复」落地，本阶段只建列不改读写。
+/// 3. **导入来源分组地基**（§3.1，3C 用）：`roots` 增 `origin`/`import_source_id`
+///    与三张 `import_*` 表，本阶段为空表。
+/// 4. **取消原因**走 `cancel_reason TEXT` + 既有 `TaskOutcome::Cancelled`，
+///    **不新增 `TaskStatus` 状态**（`IndexState`/`TaskStatus` 七态双射有测试钉子）。
+pub const V9: &str = r#"
+-- ============================================================ v9：M4.3 索引管理完善
+-- ---------------------------------------------------------- 1. 身份骨架（标记守恒）
+-- 刻意只存「能重新挂回新 photo_id 的身份」与用户创作数据，不存任何可重建的索引字段。
+-- WITHOUT ROWID + 复合主键：folder_path 与 name_key 里出现换行/分隔符也不会碰撞。
+CREATE TABLE IF NOT EXISTS photo_identities (
+    folder_path TEXT NOT NULL,             -- = folders.path = apply_scan 的 dir_str
+    name_key    TEXT NOT NULL,             -- = photos.name_key = paths::compare_key(name)
+    starred     INTEGER NOT NULL DEFAULT 0,
+    caption     TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (folder_path, name_key)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS photo_identity_tags (
+    folder_path TEXT NOT NULL,
+    name_key    TEXT NOT NULL,
+    label       TEXT NOT NULL,
+    PRIMARY KEY (folder_path, name_key, label)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS photo_identity_albums (
+    folder_path TEXT NOT NULL,
+    name_key    TEXT NOT NULL,
+    album_name  TEXT NOT NULL,             -- 按名字记（相册 id 可能随重建变化）
+    PRIMARY KEY (folder_path, name_key, album_name)
+) WITHOUT ROWID;
+
+-- ---------------------------------------------------------- 2. 任务持久意图/检查点
+-- 默认值全部可空/零值，老代码 INSERT 不列这些列也能照常工作（tasks.rs 无需改）。
+ALTER TABLE index_tasks ADD COLUMN user_paused   INTEGER NOT NULL DEFAULT 0;  -- 用户显式暂停
+ALTER TABLE index_tasks ADD COLUMN generation    INTEGER NOT NULL DEFAULT 0;  -- 取消/重建代次
+ALTER TABLE index_tasks ADD COLUMN checkpoint    TEXT;                        -- 续跑位置
+ALTER TABLE index_tasks ADD COLUMN scope_kind    INTEGER NOT NULL DEFAULT 0;  -- 范围类型
+ALTER TABLE index_tasks ADD COLUMN cancel_reason TEXT;                        -- 取消码（不改旧码）
+
+-- ---------------------------------------------------------- 3. 导入来源分组地基
+ALTER TABLE roots ADD COLUMN origin            TEXT NOT NULL DEFAULT 'local'; -- local / imported
+ALTER TABLE roots ADD COLUMN import_source_id  INTEGER;                        -- 指向 import_sources
+CREATE TABLE IF NOT EXISTS import_sources (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    source_path TEXT,
+    created_at  INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS import_batches (
+    id         INTEGER PRIMARY KEY,
+    source_id  INTEGER REFERENCES import_sources(id) ON DELETE CASCADE,
+    label      TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT 0,
+    strategy   TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS import_batch_members (
+    batch_id  INTEGER NOT NULL REFERENCES import_batches(id) ON DELETE CASCADE,
+    photo_id  INTEGER NOT NULL,             -- 逻辑外键，故意不 REFERENCES（重建后 id 会变）
+    PRIMARY KEY (batch_id, photo_id)
+) WITHOUT ROWID;
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -492,6 +562,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 8,
         name: "m4_index_portability",
         sql: V8,
+    },
+    Migration {
+        version: 9,
+        name: "m43_index_identity_checkpoint",
+        sql: V9,
     },
 ];
 

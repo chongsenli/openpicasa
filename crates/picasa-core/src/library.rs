@@ -145,6 +145,12 @@ pub struct Library {
     /// 栅格视图模式（默认方格 / 纵向瀑布流 / 横向瀑布流）。
     pub view_mode: ViewMode,
     pub sort: SortSpec,
+    /// 栅格排序时把「已经有缩略图」的照片排在前面（用户要求）。
+    ///
+    /// 只是**显示策略**，所以不进 `SortSpec`（那个是「按什么键排」），
+    /// 单独一个开关存在偏好里，重启保留。分桶用两条查询实现，
+    /// 见 `Db::photos_bucketed`。
+    pub thumbs_first: bool,
     /// 「包含子文件夹」开关（`07-A` §3，P-28 裁决全局一份）。
     ///
     /// 关（默认）= 原版行为，只显示 F 的直接照片；
@@ -163,6 +169,15 @@ pub struct Library {
     /// 保留成缓存是为了 `reload_tree` / `scan_roots` 不必每次查库；
     /// 写入点只有 `refresh_roots()` 一个，避免两处各改一半。
     root_paths: Vec<String>,
+    /// 本机根之下的可见行（IDX-21 ⑦：左栏「文件夹」组用这份）。
+    pub local_visible_folders: Vec<FolderRowView>,
+    /// 导入来源 id → 该来源根之下的可见行（左栏「导入的索引」组用）。
+    pub imported_visible_folders: std::collections::BTreeMap<i64, Vec<FolderRowView>>,
+    /// 根路径 → (roots.id, origin, import_source_id)。
+    ///
+    /// IDX-21 ⑦ 用：本机「文件夹」组只显示 `origin = local` 的根，
+    /// 导入带进来的根归到「导入的索引」分组下，同一棵树不会显示两次。
+    root_origins: std::collections::HashMap<String, (i64, String, Option<i64>)>,
 
     // ---- 状态文案（状态栏/工具栏用）----
     pub total_in_db: u64,
@@ -226,6 +241,7 @@ impl Library {
             tier: prefs.tier,
             view_mode: prefs.view_mode,
             sort: prefs.sort,
+            thumbs_first: prefs.thumbs_first,
             view: prefs
                 .last_view
                 .as_deref()
@@ -244,6 +260,9 @@ impl Library {
             roots: Vec::new(),
             visible_folders: Vec::new(),
             root_paths,
+            local_visible_folders: Vec::new(),
+            imported_visible_folders: std::collections::BTreeMap::new(),
+            root_origins: std::collections::HashMap::new(),
             total_in_db: 0,
             scanning: false,
             scan_progress: None,
@@ -373,6 +392,51 @@ impl Library {
             r.flatten(&mut out);
         }
         self.visible_folders = out;
+        // IDX-21 ⑦：本机「文件夹」组与「导入的索引」组各取一份。
+        // 同一棵树只在一处出现，计数不重复统计。
+        self.local_visible_folders = self
+            .local_roots()
+            .into_iter()
+            .flat_map(|r| {
+                let mut v = Vec::new();
+                r.flatten(&mut v);
+                v
+            })
+            .collect();
+        let mut by_source: std::collections::BTreeMap<i64, Vec<FolderRowView>> =
+            std::collections::BTreeMap::new();
+        for r in &self.roots {
+            if let Some(src) = self.import_source_of_root(&r.path) {
+                let mut v = Vec::new();
+                r.flatten(&mut v);
+                by_source.entry(src).or_default().extend(v);
+            }
+        }
+        self.imported_visible_folders = by_source;
+    }
+
+    /// IDX-21：切换一个**非目录**分组的折叠状态，并标记偏好待存。
+    ///
+    /// 复用 `prefs.collapsed` 列表存一条哨兵键（`\u{0}` 前缀，真实路径不可能
+    /// 以它开头），这样不用为「导入的索引」扩一套偏好字段，重启照样记得。
+    /// 返回切换后的状态（true = 已折叠）。
+    pub fn toggle_section_collapsed(&mut self, section: &str) -> bool {
+        let key = format!("\u{0}{section}");
+        let now_collapsed = if self.prefs.collapsed.iter().any(|p| p == &key) {
+            self.prefs.collapsed.retain(|p| p != &key);
+            false
+        } else {
+            self.prefs.collapsed.push(key);
+            true
+        };
+        self.dirty_prefs = true;
+        now_collapsed
+    }
+
+    /// IDX-21：分组当前是不是折叠的（启动时读回用）。
+    pub fn section_collapsed(&self, section: &str) -> bool {
+        let key = format!("\u{0}{section}");
+        self.prefs.collapsed.iter().any(|p| p == &key)
     }
 
     /// 折叠/展开一个目录节点（U-17：状态重启后保持）。
@@ -545,6 +609,15 @@ impl Library {
                 // 「最近更改」按 `mtime_ns` 排序，有 `idx_photos_mtime`，全库 5 万也只要几毫秒；
                 // 且它本身就是「最近 N 条」的语义，不需要分页补齐。
                 View::Recent => self.db()?.recently_changed(200_000)?,
+                // 分桶（「有缩略图的往前放」）：两桶各自排序，先整桶有图。
+                // 实测 5.6 万张 0.01 s（两条独立查询），见 `Db::photos_bucketed`。
+                _ if self.thumbs_first => self.db()?.photos_bucketed(
+                    folder_ids.as_deref(),
+                    None,
+                    self.sort,
+                    PAGE_FIRST.min(total.max(1)),
+                    0,
+                )?,
                 _ => self.db()?.photos_from_visible(
                     folder_ids.as_deref(),
                     self.sort,
@@ -565,13 +638,24 @@ impl Library {
             // 以前首屏是筛过的，但 `photos_total` 仍是 9 张全库，`photos_complete`
             // 为 false，下一帧 `extend_photos` 按无筛选 OFFSET 把 gif/png 和
             // 已经出现过的格子再拼进来——筛选芯片亮了，栅格却像没筛过。
-            let rows = self.db()?.photos_filtered(
-                folder_ids.as_deref(),
-                &filter,
-                self.sort,
-                200_000,
-                0,
-            )?;
+            // 有筛选时同样分桶（筛选条件与桶条件在 `photos_bucketed` 里按「与」合并）。
+            let rows = if self.thumbs_first {
+                self.db()?.photos_bucketed(
+                    folder_ids.as_deref(),
+                    Some(&filter),
+                    self.sort,
+                    200_000,
+                    0,
+                )?
+            } else {
+                self.db()?.photos_filtered(
+                    folder_ids.as_deref(),
+                    &filter,
+                    self.sort,
+                    200_000,
+                    0,
+                )?
+            };
             let photos = if !searching {
                 rows
             } else {
@@ -630,7 +714,50 @@ impl Library {
         // 有筛选时必须沿同一条 `photos_filtered` 翻页。改走 `photos_from_visible`
         // 会从「已装入的筛后行数」这个 OFFSET 去捞无筛选的尾部：gif/png 回来了，
         // 而且已经在首屏里的 jpeg 会再出现一次。
-        let mut more = if filter.is_active() {
+        // 键集翻页（`docs/18` TC-M43-12）：`OFFSET` 的代价是 O(offset)，
+        // 25 万张深页实测 103 ms；改成「从上一页末行的 (eff_taken_at, name_key)
+        // 之后取」走索引 seek，同一页 2.3 ms。
+        //
+        // 游标取**已装入的最后一行的排序键**（`self.photos.last()`），不是
+        // `photos.len()` 当偏移——这两者在有筛选、有去重时并不等价。
+        //
+        // 只有「按拍摄时间」能走键集：这条排序有 `idx_photos_eff_taken
+        // (eff_taken_at DESC, name_key ASC)`。其余排序键（名称是 TEXT、尺寸是
+        // 表达式、修改时间只有单列索引）硬走键集会让 SQLite 退化成全表 +
+        // 临时 B 树排序，比 OFFSET 更慢——所以那些排序老实按偏移翻页。
+        // 分桶模式下不能走键集：游标只有 (eff_taken_at, name_key)，不带桶号，
+        // 翻页会跨桶重复/漏行。分桶退回 OFFSET（实测 5.6 万张 OFFSET 5 万仍 0.05 s）。
+        let keyed = self.sort.key == picasa_db::SortKey::TakenAt && !self.thumbs_first;
+        let cursor = match self.photos.last() {
+            Some(last) if keyed => Some((last.eff_taken_at, paths::compare_key(&last.name))),
+            _ => None,
+        };
+        let mut more = if keyed {
+            if filter.is_active() {
+                self.db()?.photos_filtered_after(
+                    folder_ids.as_deref(),
+                    &filter,
+                    self.sort,
+                    PAGE_STEP,
+                    cursor,
+                )?
+            } else {
+                self.db()?.photos_from_visible_after(
+                    folder_ids.as_deref(),
+                    self.sort,
+                    PAGE_STEP,
+                    cursor,
+                )?
+            }
+        } else if self.thumbs_first {
+            self.db()?.photos_bucketed(
+                folder_ids.as_deref(),
+                filter.is_active().then_some(&filter),
+                self.sort,
+                PAGE_STEP,
+                self.photos.len(),
+            )?
+        } else if filter.is_active() {
             self.db()?.photos_filtered(
                 folder_ids.as_deref(),
                 &filter,
@@ -804,9 +931,61 @@ impl Library {
         self.db()?.tags_of(photo_id).map_err(CoreError::from)
     }
 
-    /// 全库标签清单（筛选面板）。
+    /// 全库标签清单（筛选面板）。**未排序、未过滤 0 计数**——左栏请走
+    /// [`Library::sidebar_tags`]，那里按用户选择的排序与可见性整理过。
     pub fn all_tags(&self) -> Result<Vec<(String, i64)>> {
         self.db()?.all_tags().map_err(CoreError::from)
+    }
+
+    /// M4.3 `IDX-22` P1「本视图 N」：当前视图范围内的标签计数。
+    ///
+    /// 与 [`Library::all_tags`] 的唯一区别是**范围**：只数落在当前视图（视图
+    /// 文件夹子树 + 「含子文件夹」开关）里、且 root 未关闭的照片——与栅格同一
+    /// 口径。两个数字（全库 / 本视图）必须能对上网格，否则用户会看到三方不一致。
+    pub fn view_tag_counts(&self) -> Result<Vec<(String, i64)>> {
+        let scope = self.view_folder_ids();
+        self.db()?
+            .tag_counts_visible(scope.as_deref())
+            .map_err(CoreError::from)
+    }
+
+    /// M4.3 `IDX-22` ④⑥：左栏「标签」组要画的清单——按偏好里的排序方式排好、
+    /// 默认滤掉 0 计数。计数口径仍是 `Db::all_tags()` 的**全库口径**（含离线根
+    /// 与导入的索引，按 `photo_id` 去重，天然只算一份）。
+    ///
+    /// 纯数据变换（[`crate::tag_counts::sort_tag_counts`]），不额外查库；
+    /// 调用方应在**脏标记触发时**调用，而不是每帧。
+    pub fn sidebar_tags(&self) -> Result<Vec<(String, i64)>> {
+        let raw = self.all_tags()?;
+        Ok(crate::tag_counts::sort_tag_counts(
+            &raw,
+            self.prefs.tags_sort,
+            self.prefs.show_zero_tags,
+        ))
+    }
+
+    /// 切换左栏标签的排序方式（IDX-22 ④，选择持久化）。
+    pub fn set_tags_sort(&mut self, sort: crate::tag_counts::TagsSort) {
+        if self.prefs.tags_sort == sort {
+            return;
+        }
+        self.prefs.tags_sort = sort;
+        self.dirty_prefs = true;
+    }
+
+    /// 切换「显示空标签」（IDX-22 ⑥，默认隐藏）。
+    pub fn toggle_show_zero_tags(&mut self) -> bool {
+        self.prefs.show_zero_tags = !self.prefs.show_zero_tags;
+        self.dirty_prefs = true;
+        self.prefs.show_zero_tags
+    }
+
+    pub fn show_zero_tags(&self) -> bool {
+        self.prefs.show_zero_tags
+    }
+
+    pub fn tags_sort(&self) -> crate::tag_counts::TagsSort {
+        self.prefs.tags_sort
     }
 
     /// M4.1 `M41-UI-08`：一次查库拿到「带某标签的全部照片 id」。
@@ -933,6 +1112,17 @@ impl Library {
             };
         }
         self.prefs.sort = self.sort;
+        self.dirty_prefs = true;
+        self.reload_photos()
+    }
+
+    /// 切换「有缩略图的排在前面」。只影响显示顺序，不改库里任何数据。
+    pub fn set_thumbs_first(&mut self, on: bool) -> Result<()> {
+        if self.thumbs_first == on {
+            return Ok(());
+        }
+        self.thumbs_first = on;
+        self.prefs.thumbs_first = on;
         self.dirty_prefs = true;
         self.reload_photos()
     }
@@ -1094,9 +1284,13 @@ impl Library {
 
     /// 从 DB 刷新「当前关注根目录」缓存。**唯一的写入点**。
     fn refresh_roots(&mut self) {
-        let pairs: Vec<(i64, String)> = match self.db() {
+        // (id, path, origin, import_source_id)
+        let pairs: Vec<(i64, String, String, Option<i64>)> = match self.db() {
             Ok(db) => match db.roots(false) {
-                Ok(rows) => rows.into_iter().map(|r| (r.id, r.path)).collect(),
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|r| (r.id, r.path, r.origin, r.import_source_id))
+                    .collect(),
                 Err(e) => {
                     tracing::warn!(error = %e, "读 roots 失败");
                     Vec::new()
@@ -1104,13 +1298,49 @@ impl Library {
             },
             Err(_) => Vec::new(),
         };
+        // IDX-21 ⑦：本机「文件夹」组不显示导入带进来的根，否则同一棵树会
+        // 在左栏出现两次。这份映射是「哪个根属于哪个导入来源」的唯一真相，
+        // 树重建与侧边栏分组都读它。
+        self.root_origins = pairs
+            .iter()
+            .map(|(id, path, origin, src)| (path.clone(), (*id, origin.clone(), *src)))
+            .collect();
         self.root_paths = if pairs.is_empty() && !self.prefs.roots.is_empty() {
             // 降级兜底：`roots` 表不可用（迁移失败 / 老库）时退回偏好。
             // 这段代码存在的唯一理由就是「别让用户看到一个空图库」。
             self.prefs.roots.clone()
         } else {
-            pairs.into_iter().map(|(_, p)| p).collect()
+            pairs.into_iter().map(|(_, p, _, _)| p).collect()
         };
+    }
+
+    /// 这个根是不是导入带进来的（`origin = imported`）。
+    pub fn is_imported_root(&self, path: &str) -> bool {
+        self.root_origins
+            .get(path)
+            .map(|(_, origin, _)| origin == "imported")
+            .unwrap_or(false)
+    }
+
+    /// 某个根属于哪个导入来源（`import_sources.id`）；本机根返回 `None`。
+    pub fn import_source_of_root(&self, path: &str) -> Option<i64> {
+        self.root_origins.get(path).and_then(|(_, _, src)| *src)
+    }
+
+    /// 只含**本机**关注根的顶层节点（IDX-21 ⑦：导入的树走自己的分组）。
+    pub fn local_roots(&self) -> Vec<&FolderNode> {
+        self.roots
+            .iter()
+            .filter(|r| !self.is_imported_root(&r.path))
+            .collect()
+    }
+
+    /// 某个导入来源的顶层节点（按来源 id 归组，供「导入的索引」分组用）。
+    pub fn imported_roots_of(&self, source_id: i64) -> Vec<&FolderNode> {
+        self.roots
+            .iter()
+            .filter(|r| self.import_source_of_root(&r.path) == Some(source_id))
+            .collect()
     }
 
     /// 当前关注根目录（绝对路径）。UI 的「添加文件夹」从中挑起点。
@@ -1139,25 +1369,59 @@ impl Library {
             self.root_paths.push(canonical);
         }
         self.refresh_roots();
+        // M4.3 补遗：加根**必须**把树标脏。
+        //
+        // 「关闭」走 `close_root`，它末尾自己 `reload_tree()`，所以关闭立刻生效；
+        // 而「重新打开」走这里，旧实现只更新了 `root_paths` 就返回——`flush_reload`
+        // 里的 `take_tree_dirty()` 拿到 false，直接跳过 `reload_tree()`，于是侧栏
+        // 文件夹里根本没有这个根，用户点「重新打开」看不出任何变化（实机复现）。
+        //
+        // 这里只置脏、不直接重建：加根可能紧跟着一整轮扫描，逐事件重建树的老问题
+        // 依旧要靠 UI 侧节流兜住（见 `flush_reload` 的文档）。
+        self.tree_dirty = true;
     }
 
     pub fn remove_root(&mut self, root: &Path) {
         let s = paths::canonical_string(root);
-        // 关闭根目录：**只改状态，不删数据**（P-07 / `docs/05` §1.3.2）。
+        // 关闭根目录：**只改状态，不删数据**（P-07 / `docs/05` §1.3.2），保留
+        // roots 行（含 id / 排除项），便于再次添加时复用。
+        //
+        // 「从图库移除」的既有语义（F2-08）：索引也一起清掉。M4.3 阶段 2 起改走
+        // `clear_index_for_root(row.id)`——旧实现只 `delete_folder(根夹)`，会让整棵
+        // 子树 folders+photos 成孤儿，且只快照根夹的标记、子目录标记静默丢失，
+        // 违反 R-M43-02。作用域版本按路径前缀整棵子树快照 + 删除，并作废该 scope
+        // 的持久任务意图（IDX-11）。
+        // ⚠️ 只删自己的索引，不动磁盘文件；「关闭但保留索引」是 E 导航的独立动作。
         if let Ok(db) = self.db()
             && let Ok(Some(row)) = db.root_by_path(&s)
         {
             let _ = db.set_root_closed(row.id, true);
-        }
-        // 「从图库移除」的既有语义（F2-08）：索引也一起清掉。
-        // ⚠️ 只删自己的索引，不动磁盘文件；「关闭但保留索引」是 E 导航的独立动作。
-        if let Ok(db) = self.db()
-            && let Ok(Some(id)) = db.folder_id(&s)
-        {
-            let _ = db.delete_folder(id);
+            let _ = db.clear_index_for_root(row.id);
         }
         self.root_paths.retain(|p| p != &s);
         self.refresh_roots();
+        // 移除根同样要置脏：`roots(false)` 里已经没有它，但 `self.roots` 还是旧的。
+        self.tree_dirty = true;
+    }
+
+    /// **彻底**移除一个关注根（m10218）：索引、缩略图、`roots` 行一起删掉。
+    ///
+    /// 与 [`remove_root`](Self::remove_root) 的差别：
+    /// - `remove_root` = 「从图库移除」但保留 roots 行（`state=1` + 「索引已移除」标记），
+    ///   索引管理页里那行空壳还在，可以「重新索引（恢复）」；
+    /// - `purge_root` = 用户要的「彻底删除」：DB 侧由
+    ///   [`Db::purge_index_for_root`](picasa_db::Db::purge_index_for_root) 连根行一起删，
+    ///   这里再把内存侧的 `root_paths` / 树一起刷新，界面上该根及其子树立即消失。
+    ///
+    /// 不再调 `close_root`：根行已经没了，没有可关闭的行；再关一次只会白跑
+    /// 一次 `root_by_path` 查询。标记仍按身份骨架保留（R-M43-02）。
+    pub fn purge_root(&mut self, root: &Path) {
+        let s = paths::canonical_string(root);
+        self.root_paths.retain(|p| p != &s);
+        self.refresh_roots();
+        // 置脏而不是直接重建：与 `add_root` / `remove_root` 一致，重建交给
+        // `flush_reload` 的节流（UI 侧随后会 `reload_now`，两者任一都能生效）。
+        self.tree_dirty = true;
     }
 
     /// 关闭根目录（E 导航）：只把 `roots.state` 置 closed，**索引与缩略图全留着**。
@@ -1367,7 +1631,9 @@ impl Library {
                 if let Ok(db) = self.db() {
                     let _ = db.set_folder_online(folder_id, online);
                 }
-                false
+                // IDX-16：离线/在线状态变化要让面板刷新（root 行的离线标记、
+                // 目录树的 is_online 都跟着变），否则发射了事件界面也看不到。
+                true
             }
             CoreEvent::IndexCleared { photos, thumbs } => {
                 // 删索引是**整体重置**，不是增量刷新：照片列表、树、选择集、
@@ -1428,6 +1694,19 @@ impl Library {
 
     /// 左侧：当前视图名 + 张数（U-34 待核对排布）。
     pub fn view_title(&self) -> String {
+        // 标题按「范围由窄到宽」自报家门：一次性范围（IDX-19）> 标签（IDX-22）
+        // > 星标 > 视图名。窄的范围才是用户最近一次动作的依据；把宽的名字写在
+        // 顶上会让用户以为筛选没生效（U-34 / IDX-22 ⑤）。
+        if self.filter.as_ref().is_some_and(|f| f.ids.is_some()) {
+            let n = self.photos_total.max(self.photos.len());
+            return format!("本次导入 · {n} 张");
+        }
+        // IDX-22 ⑤：点左栏标签后网格显示该标签的**全部照片**，标题必须自报家门。
+        // 允许与星标叠加，此时报标签（规格：标题「标签：X · N 张」）。
+        if let Some(tag) = self.filter.as_ref().and_then(|f| f.tag.as_deref()) {
+            let n = self.photos_total.max(self.photos.len());
+            return format!("标签：{tag} · {n} 张");
+        }
         // 侧栏「星标」和筛选面板「只看收藏」是同一个 `starred_only`。
         // 标题跟着它走，否则高亮已经切过去了，顶上仍写着「所有照片 · N 张」。
         if self.filter.as_ref().is_some_and(|f| f.starred_only) {

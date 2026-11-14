@@ -53,7 +53,9 @@ if [[ -e "$data_dir" ]]; then
         echo "  换一个新路径，或显式加 --reuse 复用（调试用）。" >&2
         exit 2
     fi
-    echo "⚠️  复用已有隔离目录：$data_dir（非全新空库）"
+    # ⚠️ 变量必须写成 ${data_dir}：紧跟全角「（」时 `set -u` 下的 bash 会把多字节字符
+    # 并进变量名，直接报 `data_dir?: unbound variable`（实机踩过）。
+    echo "⚠️  复用已有隔离目录：${data_dir}（非全新空库）"
 else
     mkdir -p "$data_dir"
 fi

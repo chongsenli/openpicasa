@@ -2,7 +2,7 @@
 //!
 //! 落盘位置由 [`crate::paths::AppPaths::preferences_file`] 决定，**永远不在照片目录**。
 
-use crate::{Result, Tier, ViewMode, paths::AppPaths};
+use crate::{Result, Tier, ViewMode, paths::AppPaths, tag_counts::TagsSort};
 use picasa_db::SortSpec;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -42,6 +42,16 @@ pub struct Preferences {
     pub window: Option<[f32; 4]>,
     /// 栅格视图模式（默认方格 / 纵向瀑布流 / 横向瀑布流）。
     pub view_mode: ViewMode,
+    /// M4.3 IDX-22 ④：左栏标签列表的排序方式。**默认按名称**（P-M43-11 改变了
+    /// 旧的「按数量降序」默认），组头菜单可切换，重启保留。
+    pub tags_sort: TagsSort,
+    /// M4.3 IDX-22 ⑥：是否在左栏列出 0 计数的标签。默认隐藏。
+    pub show_zero_tags: bool,
+    /// 栅格排序时把「已经有缩略图」的照片排在前面（用户要求）。
+    ///
+    /// 打开时两桶各自按当前排序键排：先整桶有图、再整桶没图。
+    /// 默认**开着**——用户眼里「有一半格子是灰的」比「顺序被分成两段」更难受。
+    pub thumbs_first: bool,
 }
 
 impl Default for Preferences {
@@ -61,6 +71,9 @@ impl Default for Preferences {
             viewer_info_open: true,
             window: None,
             view_mode: ViewMode::default(),
+            tags_sort: TagsSort::default(),
+            show_zero_tags: false,
+            thumbs_first: true,
         }
     }
 }

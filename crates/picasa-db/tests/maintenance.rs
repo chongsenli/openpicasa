@@ -123,6 +123,15 @@ fn clear_index_drops_index_but_keeps_user_config() {
     }
     assert_eq!(db.cache_stats().unwrap().photo_count, 3);
 
+    // ---- M4.3 / R-M43-02：先给用户标记赋值，删索引后必须守恒（重新扫描挂回）
+    let rows = db.photos(None, SortSpec::default(), 10).unwrap();
+    let a_id = rows.iter().find(|r| r.name == "a.jpg").unwrap().id;
+    db.set_starred(&[a_id], true).unwrap();
+    db.add_tag(&[a_id], "旅行").unwrap();
+    db.set_caption(a_id, "2020 年夏天").unwrap();
+    let album_id = db.create_album("精选", 1).unwrap();
+    db.add_to_album(album_id, &[a_id], 1).unwrap();
+
     // ---- 删
     let (photos, thumbs) = db.clear_index().unwrap();
     assert_eq!(photos, 3, "返回的照片数要如实");
@@ -151,6 +160,32 @@ fn clear_index_drops_index_but_keeps_user_config() {
     // ---- 再删一次是幂等的（不会因为"已经空了"报错）
     let (p2, t2) = db.clear_index().unwrap();
     assert_eq!((p2, t2), (0, 0));
+
+    // ---- M4.3 / R-M43-02：重新扫描后用户标记必须按身份挂回新的 photo_id
+    let fid_a2 = db.upsert_folder(&key_a, &key_a, None).unwrap();
+    db.apply_scan(fid_a2, &key_a, &[input("a.jpg"), input("b.jpg")], 0)
+        .unwrap();
+    let rows2 = db.photos(None, SortSpec::default(), 10).unwrap();
+    let a2 = rows2.iter().find(|r| r.name == "a.jpg").expect("a.jpg 已重加");
+    assert!(
+        db.starred_ids().unwrap().contains(&a2.id),
+        "星标必须守恒（新 photo_id 上）"
+    );
+    assert!(
+        db.tags_of(a2.id).unwrap().iter().any(|t| t == "旅行"),
+        "标签必须守恒"
+    );
+    assert_eq!(db.caption_of(a2.id).unwrap(), "2020 年夏天", "说明必须守恒");
+    assert!(
+        db.albums_of(a2.id).unwrap().iter().any(|a| a.name == "精选"),
+        "相册归属必须守恒（按名字重建）"
+    );
+    assert!(
+        db.starred_ids().unwrap().len() == 1
+            && db.tags_of(a2.id).unwrap().iter().all(|t| t == "旅行")
+            && db.albums_of(a2.id).unwrap().iter().all(|a| a.name == "精选"),
+        "标记只挂回原照片，不能串到 b.jpg"
+    );
 }
 
 /// 「重建失败索引」的取数口径：**只动点名的那批失败项**。

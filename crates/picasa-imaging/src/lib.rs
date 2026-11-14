@@ -6,6 +6,7 @@
 //! 这是红线 R-2（编辑室入口不存在）在代码层面的体现：**M1 的依赖图里没有 `picasa-edit`**，
 //! 也没有任何可以「顺手加个滤镜」的地方。
 
+mod cloud;
 mod decode;
 mod dims;
 mod exif;
@@ -19,6 +20,7 @@ mod scaled;
 mod thumb;
 
 pub use decode::{decode, decode_oriented, probe_dimensions};
+pub use cloud::{CLOUD_ONLY_REASON, has_local_content, meta_has_local_content};
 pub use dims::{Dims, DimsError, probe_dims};
 pub use exif::{ExifSummary, probe};
 pub use histogram::{Histogram, histogram};

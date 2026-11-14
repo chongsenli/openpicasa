@@ -176,6 +176,13 @@ impl Inner {
         }
 
         let path = row.abs_path();
+        // 云端占位文件：本机一个字节都没有，`probe_dims` 会卡在 `read()` 上
+        // （实测单张 0.7～27 s 才 ETIMEDOUT）。与「盘不在」同一类处理：
+        // 推迟，不写任何终态——等云客户端把文件拉下来，下一轮自然会读到宽高。
+        if !picasa_imaging::has_local_content(&path) {
+            self.deferred.fetch_add(1, Ordering::Relaxed);
+            return Outcome::Deferred;
+        }
         match picasa_imaging::probe_dims(&path) {
             Ok(d) => {
                 let written = self.lock_db().map(|db| {

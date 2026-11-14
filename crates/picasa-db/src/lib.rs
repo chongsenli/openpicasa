@@ -15,10 +15,13 @@
 
 mod dims;
 mod export;
+mod identity;
+mod import_sources;
 mod m4;
 mod pathutil;
 mod roots;
 mod schema;
+mod task_intent;
 mod tasks;
 mod types;
 mod upgrade;
@@ -33,15 +36,22 @@ pub use types::{
     PhotoFilter, SizeClass,
     FolderFingerprint, FolderRow, FolderTreeRow, PhotoFormat, PhotoInput, PhotoRow, RootRow,
     RootSeed, RootStat, RootWatchRow, ScanApply, TakenFrom, TaskOutcome, TaskRow, ThumbBuf, ThumbState,
-    ThumbStats, UPSERT_UNCHANGED, UpgradeReport, V2DataReport, classify_failure,
+    ThumbStats, UPSERT_UNCHANGED, UpgradeReport, V2DataReport, classify_failure, PageCursor,
 };
+pub use import_sources::{
+    ImportBatchRow, ImportSourceRow, import_batch_photo_ids, prune_orphan_import_sources,
+    record_import, remove_import_source,
+};
+pub use task_intent::{TaskIntent, TaskScopeKind};
 pub use m4::{
-    AlbumRow, ContentFlags, ImportReport, ImportStrategy, IndexManifest, ManifestCounts,
-    ManifestRoot, PhotoExif, RecentSearch,
+    AlbumRow, ContentFlags, FolderTree, FolderTreeNode, FolderTreeRoot, ImportReport,
+    ImportStrategy, IndexManifest, ManifestCounts, ManifestRoot, PhotoExif, RecentSearch,
+    TreeSource,
 };
 pub use export::{
-    FORMAT_VERSION, ExportReport, ImportPreview, check_export_dir, cleanup_staging,
-    execute_import, export_index, inspect_index,
+    FORMAT_VERSION, ExportReport, ImportPreview, check_export_dir, cleanup_export_tmp, cleanup_staging,
+    execute_import, export_index, inspect_index, inspect_index_cancellable,
+    rewrite_manifest_for_test,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -95,6 +105,11 @@ pub struct Db {
     has_eff_col: bool,
     /// photos 是否已有 starred 列（v7+）。降级库 / 回退库为 false，查询走常量 0。
     has_starred_col: bool,
+    /// v9 身份骨架表是否可用（标记守恒，见 `identity.rs`）。
+    ///
+    /// 探测 `photo_identities` 表而不是看 `schema_version()`：迁移失败回滚后版本号
+    /// 可能停在 8 但代码按 9 写，直接探测表才是可靠判据（与 `has_eff_col` 同理）。
+    has_identity: bool,
 }
 
 /// `photos_filtered` 与 `count_photos_filtered` 共用的 WHERE 形态。
@@ -134,6 +149,7 @@ impl Db {
             upgrade: None,
             has_eff_col: false,
             has_starred_col: false,
+            has_identity: false,
         };
         if report.error.is_none() {
             db.migrate()?;
@@ -147,6 +163,7 @@ impl Db {
         // 必须在 migrate 之后探测：新建的库到这一步才把列建出来。
         db.has_eff_col = Self::detect_eff_col(&db.conn);
         db.has_starred_col = Self::detect_starred_col(&db.conn);
+        db.has_identity = db.table_exists("photo_identities")?;
         let mut report = report;
         report.to = db.schema_version()?;
         db.upgrade = Some(report.clone());
@@ -162,10 +179,12 @@ impl Db {
             upgrade: None,
             has_eff_col: false,
             has_starred_col: false,
+            has_identity: false,
         };
         db.migrate()?;
         db.has_eff_col = Self::detect_eff_col(&db.conn);
         db.has_starred_col = Self::detect_starred_col(&db.conn);
+        db.has_identity = db.table_exists("photo_identities")?;
         Ok(db)
     }
 
@@ -1072,9 +1091,32 @@ impl Db {
         Ok(())
     }
 
+    /// 删除一个目录（及其照片，靠 `photos.folder_id` 的 CASCADE）。
+    ///
+    /// M4.3 / R-M43-02：删之前把该目录下每张照片的用户标记快照进身份骨架，
+    /// 这样 `remove_root` / `exclude_folder` 的删除也不会丢星标/标签/说明/相册；
+    /// 重新扫描（`apply_scan`）会按身份把标记挂回新 `photo_id`。
     pub fn delete_folder(&self, folder_id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM folders WHERE id = ?1", params![folder_id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        if self.has_identity {
+            let path: Option<String> = tx
+                .query_row(
+                    "SELECT path FROM folders WHERE id = ?1",
+                    params![folder_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(path) = path {
+                identity::snapshot_for_folder(&tx, &path)?;
+            }
+        }
+        // 自引用 parent_id 先断开，避免删除顺序触发外键问题。
+        let _ = tx.execute(
+            "UPDATE folders SET parent_id = NULL WHERE parent_id = ?1",
+            params![folder_id],
+        );
+        tx.execute("DELETE FROM folders WHERE id = ?1", params![folder_id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1091,7 +1133,7 @@ impl Db {
     ) -> Result<ScanApply> {
         let mut out = ScanApply::default();
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let res = self.apply_scan_inner(folder_id, folder_path, items, decoder_ver, &mut out);
+        let res = self.apply_scan_inner(folder_id, folder_path, items, decoder_ver, false, &mut out);
         match res {
             Ok(()) => {
                 self.conn.execute_batch("COMMIT")?;
@@ -1104,12 +1146,32 @@ impl Db {
         }
     }
 
+    /// 全量重建（M4.3 IDX-14）：与 [`apply_scan`] 相同事务边界，但强制绕过 L1 缓存命中，
+    /// 让每张已存在照片都进 `touched` 重新生成缩略图；且**不删旧缩略图 BLOB、不把
+    /// `thumb_state` 归零**（旧图保留到被 `put_thumb` 原子替换为止）。
+    pub fn apply_scan_force(
+        &self,
+        folder_id: i64,
+        folder_path: &str,
+        items: &[PhotoInput],
+        decoder_ver: i64,
+    ) -> Result<ScanApply> {
+        let mut out = ScanApply::default();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let res = self.apply_scan_inner(folder_id, folder_path, items, decoder_ver, true, &mut out);
+        match res {
+            Ok(()) => { self.conn.execute_batch("COMMIT")?; Ok(out) }
+            Err(e) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(e) }
+        }
+    }
+
     fn apply_scan_inner(
         &self,
         folder_id: i64,
         folder_path: &str,
         items: &[PhotoInput],
         decoder_ver: i64,
+        force: bool,
         out: &mut ScanApply,
     ) -> Result<()> {
         // 1) 一次性把该目录现有记录读进 HashMap（name_key → (id, size, mtime, ver)）
@@ -1133,7 +1195,7 @@ impl Db {
             seen.insert(it.name_key.as_str());
             match existing.get(&it.name_key) {
                 Some((id, size, mtime, ver))
-                    if *size == it.size_bytes && *mtime == it.mtime_ns && *ver == decoder_ver =>
+                    if *size == it.size_bytes && *mtime == it.mtime_ns && *ver == decoder_ver && !force =>
                 {
                     // 缓存键相同：只更新可能变化的 EXIF 摘要字段，不改 thumb_state
                     // dims_status 跟着宽高一起刷新：扫描器给了宽高就算「已完成」，
@@ -1173,7 +1235,8 @@ impl Db {
                     self.conn.execute(
                         "UPDATE photos SET size_bytes = ?2, mtime_ns = ?3, width = ?4,
                                            height = ?5, orientation = ?6, taken_at = ?7,
-                                           taken_at_src = ?8, decoder_ver = ?9, thumb_state = 0,
+                                           taken_at_src = ?8, decoder_ver = ?9,
+                                           thumb_state = CASE WHEN ?11 = 1 THEN thumb_state ELSE 0 END,
                                            format = CASE WHEN ?10 = 0 THEN format ELSE ?10 END,
                                            dims_status = CASE
                                                WHEN ?4 IS NOT NULL AND ?5 IS NOT NULL THEN 1
@@ -1189,11 +1252,14 @@ impl Db {
                             it.taken_at,
                             it.taken_at_src,
                             decoder_ver,
-                            it.format
+                            it.format,
+                            i32::from(force)
                         ],
                     )?;
-                    self.conn
-                        .execute("DELETE FROM thumbs WHERE photo_id = ?1", params![id])?;
+                    if !force {
+                        self.conn
+                            .execute("DELETE FROM thumbs WHERE photo_id = ?1", params![id])?;
+                    }
                     out.updated += 1;
                     out.touched.push(*id);
                 }
@@ -1222,18 +1288,33 @@ impl Db {
                         ],
                     )?;
                     out.added += 1;
-                    out.touched.push(self.conn.last_insert_rowid());
+                    let new_id = self.conn.last_insert_rowid();
+                    out.touched.push(new_id);
+                    // M4.3 / R-M43-02：新建的照片行按身份把先前快照的标记挂回来
+                    // （重建/重加后 photo_id 变了也能恢复），无骨架表时为空操作。
+                    if self.has_identity {
+                        identity::restore_photo(
+                            &self.conn,
+                            folder_path,
+                            &it.name_key,
+                            new_id,
+                        )?;
+                    }
                 }
             }
         }
 
         // 3) 磁盘上已消失的 → 删索引（cascade 会带走 thumbs）
-        let stale: Vec<i64> = existing
+        let stale: Vec<(i64, String)> = existing
             .iter()
             .filter(|(k, _)| !seen.contains(k.as_str()))
-            .map(|(_, v)| v.0)
+            .map(|(k, v)| (v.0, k.clone()))
             .collect();
-        for id in stale {
+        for (id, name_key) in stale {
+            // M4.3 / R-M43-02：删 live 行前先快照用户标记，避免 CASCADE 静默带走。
+            if self.has_identity {
+                identity::snapshot_photo(&self.conn, folder_path, &name_key, id)?;
+            }
             self.conn
                 .execute("DELETE FROM photos WHERE id = ?1", params![id])?;
             out.removed += 1;
@@ -1377,6 +1458,89 @@ impl Db {
         self.photos_from_scoped(folder_ids, sort, limit, offset, true)
     }
 
+    /// 键集（seek）翻页：从 `cursor` 那一行**之后**取 `limit` 行。
+    ///
+    /// ## 为什么必须补这条路径
+    ///
+    /// `OFFSET` 的代价是「先跳过 offset 行」，25 万张实测深页 **103 ms**
+    /// （`docs/18` TC-M43-12 的预算是 p99 ≤ 25 ms）。同一条查询改成
+    /// 「`WHERE (排序键, name_key) > 游标` + `LIMIT`」后走
+    /// `idx_photos_eff_taken` 直接 seek，同一页实测 **2.3 ms**——快 45 倍。
+    ///
+    /// ## 只有「按拍摄时间」能用
+    ///
+    /// 键集要求「排序键有索引且单调」。`TakenAt` 有 `idx_photos_eff_taken
+    /// (eff_taken_at DESC, name_key ASC)`，正是 `SortSpec::order_by` 的一条；
+    /// 其余排序键（名称是 TEXT、尺寸是表达式、修改时间只有单列索引）
+    /// 硬走键集会让 SQLite 退化成全表 + 临时 B 树排序，比 OFFSET 更慢。
+    /// 因此 `cursor` 只对 `SortKey::TakenAt` 生效，其余情况退化为首屏语义
+    /// （调用方本来也只在 `TakenAt` 下传游标）。
+    ///
+    /// ⚠️ **平局决胜必须与 `ORDER BY` 逐字一致**：`order_by(TakenAt)` 是
+    /// `eff DESC, name_key ASC`，同一秒的照片按文件名排，所以比较键是
+    /// `name_key` 而不是 `id`（与 [`Db::range_keyset`] 同一个坑，那里有更长的说明）。
+    pub fn photos_from_visible_after(
+        &self,
+        folder_ids: Option<&[i64]>,
+        sort: SortSpec,
+        limit: usize,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<PhotoRow>> {
+        let conds = self.scope_conds(folder_ids, true);
+        self.page_after(conds, sort, limit, cursor)
+    }
+
+    /// 一行的键集游标（`(eff_taken_at, name_key)`）。查不到返回 `None`。
+    ///
+    /// 单独抽出来是因为 `PhotoRow` 不带 `name_key`（界面用 `name` 就够），
+    /// 而游标必须用**归一化后的**比较键，否则大小写 / NFC 差异会让翻页错行。
+    pub fn page_cursor(&self, photo_id: i64) -> Result<Option<PageCursor>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {}, p.name_key FROM photos p WHERE p.id = ?1", self.eff_col()),
+                params![photo_id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// 拼「`WHERE <scope> AND <keyset>` + ORDER BY + LIMIT」的公用实现。
+    fn page_after(
+        &self,
+        conds: Option<Vec<String>>,
+        sort: SortSpec,
+        limit: usize,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<PhotoRow>> {
+        let mut all: Vec<String> = conds.unwrap_or_default();
+        if let Some((k, name_key)) = cursor
+            && sort.key == SortKey::TakenAt
+        {
+            let eff = self.eff_col();
+            let op = if sort.descending { "<" } else { ">" };
+            let escaped = sql_text_literal(&name_key);
+            all.push(format!(
+                "({eff} {op} {k} OR ({eff} = {k} AND p.name_key > '{escaped}'))"
+            ));
+        }
+        let mut sql = format!(
+            "SELECT {} FROM photos p JOIN folders f ON f.id = p.folder_id",
+            self.photo_cols()
+        );
+        if !all.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&all.join(" AND "));
+        }
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&sort.order_by(self.eff_col()));
+        sql.push_str(&format!(" LIMIT {limit}"));
+
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], map_photo)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     fn photos_from_scoped(
         &self,
         folder_ids: Option<&[i64]>,
@@ -1461,6 +1625,150 @@ impl Db {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// 把栅格分成「有缩略图」「没有缩略图」两桶再排序（用户要求：有图的往前放）。
+    ///
+    /// 桶键**只看 `photos.thumb_state = 1`**，不去查 `thumbs` 表：
+    /// 真实库 5.6 万张实测，`ORDER BY CASE WHEN EXISTS(SELECT 1 FROM thumbs ...)`
+    /// 要 **5.6 s**（每行一次相关子查询），而只看整数列是 **0.04 s**。
+    /// 「库里其实有 BLOB 但 `thumb_state != 1`」这种情况在 `apply_scan` 里不会出现
+    /// （写 BLOB 与置状态是同一批操作），值这个取舍。
+    ///
+    /// 实现是**两条独立查询**（先第一桶、取不满再补第二桶），不是一条带
+    /// `CASE WHEN ... THEN 0 ELSE 1 END` 的排序：两条查询各自走
+    /// `idx_photos_eff_taken` 直接截断，25 万张实测 0.01 s，而带 CASE 的
+    /// 单一排序会退化成临时 B 树（25 万张 0.14 s）。
+    ///
+    /// 代价：偏移量是**两桶合并后的全局偏移**，第二桶内部的深偏移仍是
+    /// O(offset)。栅格分页是 1500 首屏 + 4000 一页，实测可接受（5.6 万张
+    /// `OFFSET 50000` 0.05 s）。
+    pub fn photos_bucketed(
+        &self,
+        folder_ids: Option<&[i64]>,
+        filter: Option<&PhotoFilter>,
+        sort: SortSpec,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<PhotoRow>> {
+        let conds = match filter {
+            Some(f) => match self.filter_where(folder_ids, f) {
+                FilterWhere::Inactive => self.scope_conds(folder_ids, true),
+                FilterWhere::Empty => return Ok(Vec::new()),
+                FilterWhere::Sql(w) => Some(vec![w
+                    .trim_start()
+                    .trim_start_matches("WHERE ")
+                    .to_string()]),
+            },
+            None => self.scope_conds(folder_ids, true),
+        };
+
+        // 全局偏移必须先减掉第一桶的行数，否则 `offset` 越过分桶边界后会整页错位
+        // （第一桶返回空、第二桶又从 0 开始取，用户滑到「没有缩略图」那一段时
+        // 会看到一堆已经看过的图重复出现）。
+        let first_len = self.bucket_count(conds.clone(), true)?;
+        if offset >= first_len {
+            return self.bucket_rows(conds, sort, limit, offset - first_len, false);
+        }
+        // 这一页落在第一桶内。取满 `limit` 就说明第二桶还轮不到。
+        let first = self.bucket_rows(conds.clone(), sort, limit, offset, true)?;
+        if first.len() >= limit {
+            return Ok(first);
+        }
+        // 第一桶到底了，第二桶从 0 开始把这一页补满。
+        let need = limit - first.len();
+        let mut rows = first;
+        rows.extend(self.bucket_rows(conds, sort, need, 0, false)?);
+        Ok(rows)
+    }
+
+    /// 单桶行数。分页要把全局偏移换算成桶内偏移，必须知道第一桶有多大。
+    /// 只数 `photos.thumb_state`，走 `idx_photos_thumb`，5.6 万张约 1 ms。
+    fn bucket_count(&self, conds: Option<Vec<String>>, with_thumbs: bool) -> Result<usize> {
+        let mut sql = String::from("SELECT COUNT(*) FROM photos p JOIN folders f ON f.id = p.folder_id");
+        let mut all = conds.unwrap_or_default();
+        all.push(if with_thumbs {
+            format!("p.thumb_state = {}", ThumbState::Ok as i64)
+        } else {
+            format!("p.thumb_state <> {}", ThumbState::Ok as i64)
+        });
+        sql.push_str(" WHERE ");
+        sql.push_str(&all.join(" AND "));
+        let n: i64 = self.conn.query_row(&sql, [], |r| r.get(0))?;
+        Ok(n.max(0) as usize)
+    }
+
+    /// `photos_bucketed` 的单桶实现：`with_thumbs` 决定取 `thumb_state = 1`
+    /// 还是 `thumb_state <> 1`（含 0=未生成 / 2=失败 / 3=损坏 / 4=云端未下载，
+    /// 这些在界面上都没有图，属于同一个「没有缩略图」桶）。
+    fn bucket_rows(
+        &self,
+        conds: Option<Vec<String>>,
+        sort: SortSpec,
+        limit: usize,
+        offset: usize,
+        with_thumbs: bool,
+    ) -> Result<Vec<PhotoRow>> {
+        let mut sql = format!(
+            "SELECT {} FROM photos p JOIN folders f ON f.id = p.folder_id",
+            self.photo_cols()
+        );
+        let mut all = conds.unwrap_or_default();
+        all.push(if with_thumbs {
+            format!("p.thumb_state = {}", ThumbState::Ok as i64)
+        } else {
+            format!("p.thumb_state <> {}", ThumbState::Ok as i64)
+        });
+        sql.push_str(" WHERE ");
+        sql.push_str(&all.join(" AND "));
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&sort.order_by(self.eff_col()));
+        sql.push_str(&format!(" LIMIT {limit}"));
+        if offset > 0 {
+            sql.push_str(&format!(" OFFSET {offset}"));
+        }
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], map_photo)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 带筛选的键集翻页：语义同 [`Db::photos_from_visible_after`]，
+    /// 只是 WHERE 多了筛选条件（复用 [`Db::filter_where`]，保证与首屏同一套条件）。
+    pub fn photos_filtered_after(
+        &self,
+        folder_ids: Option<&[i64]>,
+        filter: &PhotoFilter,
+        sort: SortSpec,
+        limit: usize,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<PhotoRow>> {
+        let where_sql = match self.filter_where(folder_ids, filter) {
+            FilterWhere::Inactive => return self.photos_from_visible_after(folder_ids, sort, limit, cursor),
+            FilterWhere::Empty => return Ok(Vec::new()),
+            FilterWhere::Sql(sql) => sql,
+        };
+
+        let mut sql = format!(
+            "SELECT {} FROM photos p JOIN folders f ON f.id = p.folder_id{where_sql}",
+            self.photo_cols(),
+        );
+        if let Some((k, name_key)) = cursor
+            && sort.key == SortKey::TakenAt
+        {
+            let eff = self.eff_col();
+            let op = if sort.descending { "<" } else { ">" };
+            let escaped = sql_text_literal(&name_key);
+            sql.push_str(&format!(
+                " AND ({eff} {op} {k} OR ({eff} = {k} AND p.name_key > '{escaped}'))"
+            ));
+        }
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&sort.order_by(self.eff_col()));
+        sql.push_str(&format!(" LIMIT {limit}"));
+
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], map_photo)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// 与 [`Db::photos_filtered`] **同一套 WHERE** 的行数。
     ///
     /// 栅格标题用这个数，不能用「可见全库」的 `count_photos_visible`：
@@ -1524,6 +1832,15 @@ impl Db {
                 sql_text_literal(tag)
             ));
         }
+        if let Some(ids) = &filter.ids {
+            // IDX-19「本次导入 · N 张」：空集是**明确「没有照片」**，
+            // 不能退化成「不过滤」——否则空批次会把整个图库显示出来。
+            if ids.is_empty() {
+                return FilterWhere::Empty;
+            }
+            let list = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+            where_sql.push_str(&format!(" AND p.id IN ({list})"));
+        }
         // ---- M4 组合筛选新增维度（docs/11 §4.1）----
         if let Some((lo, hi)) = filter.size_bytes {
             where_sql.push_str(&format!(" AND p.size_bytes BETWEEN {lo} AND {hi}"));
@@ -1567,11 +1884,20 @@ impl Db {
     /// 而不是拼出 `IN ()`（那是 SQL 语法错误）。这个短路在这里统一做，
     /// 免得每个调用点各写一遍、漏一个就 panic。
     fn build_scope(&self, folder_ids: Option<&[i64]>, visible_only: bool) -> Option<String> {
+        self.scope_conds(folder_ids, visible_only)
+            .map(|conds| format!(" WHERE {}", conds.join(" AND ")))
+    }
+
+    /// 与 [`Db::build_scope`] 同一套条件的**未拼接**形式。
+    ///
+    /// 键集翻页要把 scope 与游标条件用 `AND` 连起来，先拼成一整条 `WHERE`
+    /// 再往里塞字符串很容易拼出 `WHERE a WHERE b`；这里返回条件向量。
+    /// 空文件夹列表返回 `vec!["0"]`（`IN ()` 不合法，`0` 让结果恒空）。
+    fn scope_conds(&self, folder_ids: Option<&[i64]>, visible_only: bool) -> Option<Vec<String>> {
         let mut conds: Vec<String> = Vec::new();
         if let Some(ids) = folder_ids {
             if ids.is_empty() {
-                // 恒假条件：`p.folder_id IN ()` 不合法，用 `0` 代替
-                return Some(" WHERE 0".to_string());
+                return Some(vec!["0".to_string()]);
             }
             let list = ids
                 .iter()
@@ -1586,7 +1912,7 @@ impl Db {
         if conds.is_empty() {
             None
         } else {
-            Some(format!(" WHERE {}", conds.join(" AND ")))
+            Some(conds)
         }
     }
 
@@ -1748,9 +2074,30 @@ impl Db {
     }
 
     /// 从索引里移除一张（「从图库移除」，**不删文件**，F2-08 的独立命令）。
+    ///
+    /// M4.3 / R-M43-02：裸 `DELETE FROM photos` 会借 CASCADE 静默带走星标/标签/
+    /// 说明/相册，和 `clear_index` / `delete_folder` / `apply_scan` 的 stale 清理是
+    /// 同一条红线。删前按 `(folder_path, name_key)` 快照到 v9 身份骨架，重新扫描
+    /// 加回同一路径时由 `apply_scan_inner` 的 restore 分支挂回新 id。
+    /// 与 `delete_folder` 一样用显式事务保证「快照 + 删除」原子。
     pub fn forget_photo(&self, id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM photos WHERE id = ?1", params![id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        if self.has_identity {
+            let info: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT f.path, p.name_key FROM photos p
+                       JOIN folders f ON f.id = p.folder_id
+                      WHERE p.id = ?1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((folder_path, name_key)) = info {
+                identity::snapshot_photo(&tx, &folder_path, &name_key, id)?;
+            }
+        }
+        tx.execute("DELETE FROM photos WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1798,10 +2145,155 @@ impl Db {
         Ok(())
     }
 
+    /// 把一个目录里指定的这批照片标成「云端未下载」（`ThumbState::CloudOnly`）。
+    ///
+    /// 只按 `name_key` 定位（扫描器手里就是这个键，不必再回查 id），一次 `UPDATE`
+    /// 处理整批。返回实际改动的行数。
+    ///
+    /// 为什么单独一个方法而不是复用 [`Db::set_thumb_state`]：那个按 id 逐张写，
+    /// 一个目录几百上千张就是几百上千条语句；而这里是一次性、幂等的批量标记。
+    pub fn mark_photos_cloud_only(&self, folder_id: i64, name_keys: &[String]) -> Result<u64> {
+        if name_keys.is_empty() {
+            return Ok(0);
+        }
+        let mut total = 0u64;
+        for chunk in name_keys.chunks(200) {
+            // `thumb_state <> 1`：已经出过图的**不降级**。占位文件的缩略图可能是
+            // 之前下载期间生成的，那种情况下库里还有合法 BLOB，把它标成「云端未下载」
+            // 等于凭空把一张能看的图变成灰格。
+            let mut sql = String::from(
+                "UPDATE photos SET thumb_state = ?1 \
+                 WHERE folder_id = ?2 AND thumb_state <> ?4 AND name_key IN (",
+            );
+            for i in 0..chunk.len() {
+                if i > 0 {
+                    sql.push(',');
+                }
+                sql.push('?');
+                sql.push_str(&(i + 5).to_string());
+            }
+            sql.push(')');
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 3);
+            let state = ThumbState::CloudOnly as i64;
+            let ok = ThumbState::Ok as i64;
+            params.push(&state);
+            params.push(&folder_id);
+            params.push(&state);
+            params.push(&ok);
+            for k in chunk {
+                params.push(k);
+            }
+            total += self.conn.execute(&sql, params.as_slice())? as u64;
+        }
+        Ok(total)
+    }
+
+    /// 把一个目录里所有「云端未下载」的照片放回「待生成」。
+    ///
+    /// 与 [`Db::mark_photos_cloud_only`] 配对使用：扫描时先复位、再把仍无内容的
+    /// 重新标上。这样「文件终于下载到本地了」这件事不需要额外的 watcher ——
+    /// 下一轮扫描自然会把它放回队列。
+    pub fn clear_cloud_only(&self, folder_id: i64) -> Result<u64> {
+        let n = self.conn.execute(
+            "UPDATE photos SET thumb_state = ?1 WHERE folder_id = ?2 AND thumb_state = ?3",
+            params![
+                ThumbState::Pending as i64,
+                folder_id,
+                ThumbState::CloudOnly as i64
+            ],
+        )?;
+        Ok(n as u64)
+    }
+
     /// 一个「关注文件夹」下的所有子目录 id（含它自己）。
     ///
     /// 用 `substr(path, 1, n) = 'root/'` 而不是 `LIKE`：路径里合法地可以出现 `%` 和 `_`，
     /// 用 `LIKE` 就必须转义，转错一次就会把别的目录算进来。
+    /// 按 `roots.path` 的路径前缀取子树 folder id（含根自己）。
+    ///
+    /// 与 [`Db::subtree_folder_ids`] 同样的 `substr` 前缀算法，但入口是 **root 路径**
+    /// 而不是 folder id——作用域删除拿到的是 `roots.id`（`MgrAction::DeleteIndexRoot`）。
+    fn subtree_folder_ids_for_path(&self, root_path: &str) -> Result<Vec<i64>> {
+        let cut = root_path.chars().count() as i64 + 1;
+        let prefix = format!("{root_path}/");
+        let mut st = self.conn.prepare(
+            "SELECT id FROM folders
+              WHERE path = ?1 OR substr(path, 1, ?2) = ?3
+              ORDER BY path",
+        )?;
+        let rows = st.query_map(params![root_path, cut, prefix], |r| {
+            r.get::<_, i64>(0)
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 一个 root 下已建索引的照片数（作用域删除确认框显示用）。
+    pub fn photo_count_for_root(&self, root_id: i64) -> Result<i64> {
+        let path: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT path FROM roots WHERE id = ?1",
+                params![root_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(path) = path else {
+            return Ok(0);
+        };
+        let ids = self.subtree_folder_ids_for_path(&path)?;
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "SELECT COUNT(*) FROM photos WHERE folder_id IN ({placeholders})"
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let count = st.query_row(
+            rusqlite::params_from_iter(ids.iter()),
+            |r| r.get::<_, i64>(0),
+        )?;
+        Ok(count)
+    }
+
+    /// M4.3 IDX-11：一个 root 下「带用户标记」的照片数（作用域确认框显示用）。
+    ///
+    /// 「有标记」= 星标 / 说明 / 标签 / 相册任一即可，按照片去重（不是按标记条数）。
+    /// 返回 `None` 表示该 root 不存在或统计失败 —— UI 必须显示「待计算」，
+    /// **绝不能当成 0**（§2 M43-IDX-11：未知数量显示待计算，不能填 0）。
+    /// 子树范围沿用 [`Self::subtree_folder_ids_for_path`] 的路径前缀口径。
+    pub fn marker_count_for_root(&self, root_id: i64) -> Result<Option<i64>> {
+        let path: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT path FROM roots WHERE id = ?1",
+                params![root_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        let ids = self.subtree_folder_ids_for_path(&path)?;
+        if ids.is_empty() {
+            return Ok(Some(0));
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "SELECT COUNT(*) FROM photos p WHERE p.folder_id IN ({placeholders}) \
+             AND (p.starred = 1 \
+                  OR EXISTS (SELECT 1 FROM captions c WHERE c.photo_id = p.id) \
+                  OR EXISTS (SELECT 1 FROM tags t WHERE t.photo_id = p.id) \
+                  OR EXISTS (SELECT 1 FROM album_photos ap WHERE ap.photo_id = p.id))"
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let count = st.query_row(
+            rusqlite::params_from_iter(ids.iter()),
+            |r| r.get::<_, i64>(0),
+        )?;
+        Ok(Some(count))
+    }
+
     pub fn subtree_folder_ids(&self, folder_id: i64) -> Result<Vec<i64>> {
         let path: Option<String> = self
             .conn
@@ -1847,7 +2339,8 @@ impl Db {
             "SELECT COUNT(*),
                     COALESCE(SUM(CASE WHEN p.thumb_state = 1 THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN p.thumb_state IN (2, 3) THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN p.thumb_state = 0 THEN 1 ELSE 0 END), 0)
+                    COALESCE(SUM(CASE WHEN p.thumb_state = 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN p.thumb_state = 4 THEN 1 ELSE 0 END), 0)
              FROM photos p JOIN folders f ON f.id = p.folder_id
              WHERE f.path = ?1 OR substr(f.path, 1, ?2) = ?3",
         )?;
@@ -1857,6 +2350,7 @@ impl Db {
                 ready: r.get::<_, i64>(1)? as u64,
                 failed: r.get::<_, i64>(2)? as u64,
                 pending: r.get::<_, i64>(3)? as u64,
+                cloud_only: r.get::<_, i64>(4)? as u64,
             })
         })?;
         Ok(row)
@@ -1887,7 +2381,8 @@ impl Db {
             "SELECT COUNT(*) AS total,
                     COALESCE(SUM(CASE WHEN thumb_state = 1 THEN 1 ELSE 0 END), 0) AS ready,
                     COALESCE(SUM(CASE WHEN thumb_state IN (2, 3) THEN 1 ELSE 0 END), 0) AS failed,
-                    COALESCE(SUM(CASE WHEN thumb_state = 0 THEN 1 ELSE 0 END), 0) AS pending
+                    COALESCE(SUM(CASE WHEN thumb_state = 0 THEN 1 ELSE 0 END), 0) AS pending,
+                    COALESCE(SUM(CASE WHEN thumb_state = 4 THEN 1 ELSE 0 END), 0) AS cloud_only
              FROM photos WHERE folder_id = ?1",
         )?;
         let row = st.query_row(params![folder_id], |r| {
@@ -1896,6 +2391,7 @@ impl Db {
                 ready: r.get::<_, i64>(1)? as u64,
                 failed: r.get::<_, i64>(2)? as u64,
                 pending: r.get::<_, i64>(3)? as u64,
+                cloud_only: r.get::<_, i64>(4)? as u64,
             })
         })?;
         Ok(row)
@@ -1907,7 +2403,8 @@ impl Db {
             "SELECT COUNT(*),
                     COALESCE(SUM(CASE WHEN thumb_state = 1 THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN thumb_state IN (2, 3) THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN thumb_state = 0 THEN 1 ELSE 0 END), 0)
+                    COALESCE(SUM(CASE WHEN thumb_state = 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN thumb_state = 4 THEN 1 ELSE 0 END), 0)
              FROM photos",
         )?;
         let row = st.query_row([], |r| {
@@ -1916,6 +2413,7 @@ impl Db {
                 ready: r.get::<_, i64>(1)? as u64,
                 failed: r.get::<_, i64>(2)? as u64,
                 pending: r.get::<_, i64>(3)? as u64,
+                cloud_only: r.get::<_, i64>(4)? as u64,
             })
         })?;
         Ok(row)
@@ -2035,6 +2533,30 @@ impl Db {
             "SELECT {}
              FROM photos p JOIN folders f ON f.id = p.folder_id
              WHERE p.thumb_state = 0 AND p.id IN ({list})
+             ORDER BY p.taken_at DESC LIMIT {limit}",
+            self.photo_cols()
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map([], map_photo)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 全量重建（IDX-14）用：按 id 取待重建照片行，**不过滤 thumb_state**。
+    /// force 路径故意保留旧 `thumb_state`（通常 1=Ok），所以不能走
+    /// `pending_thumbs_by_ids`（它带 `WHERE p.thumb_state = 0`）。
+    pub fn photos_by_ids_for_force(&self, ids: &[i64], limit: usize) -> Result<Vec<PhotoRow>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let list = ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT {}
+             FROM photos p JOIN folders f ON f.id = p.folder_id
+             WHERE p.id IN ({list})
              ORDER BY p.taken_at DESC LIMIT {limit}",
             self.photo_cols()
         );
@@ -2547,6 +3069,10 @@ impl Db {
     /// ⚠️ 顺序不能反：`thumbs` 有 `REFERENCES photos(id) ON DELETE CASCADE`，
     /// 但**外键级联不一定开着**（用户手工改过库、或连接是别的路径开的）。
     /// 先删子表再删父表，任何情况下都不会留下孤儿行。
+    ///
+    /// M4.3 / R-M43-02：`DELETE FROM photos` 会经 CASCADE 带走 `starred` /
+    /// `captions` / `tags` / `album_photos`。删前整库快照到 v9 身份骨架，
+    /// 重新扫描时按身份恢复（见 `identity.rs`）。
     pub fn clear_index(&self) -> Result<(u64, u64)> {
         let photos: i64 = self
             .conn
@@ -2557,6 +3083,9 @@ impl Db {
             .unwrap_or(0);
 
         let tx = self.conn.unchecked_transaction()?;
+        if self.has_identity {
+            identity::snapshot_all(&tx)?;
+        }
         // 子表先走
         let _ = tx.execute("DELETE FROM index_task_failures", []);
         let _ = tx.execute("DELETE FROM index_tasks", []);
@@ -2568,6 +3097,168 @@ impl Db {
         tx.commit()?;
 
         Ok((photos.max(0) as u64, thumbs.max(0) as u64))
+    }
+
+    /// 作废某个 root 作用域里**所有还活着**的持久任务意图（M4.3 IDX-11 / G11.3）。
+    ///
+    /// 旧实现在作用域删除时直接 `DELETE FROM index_tasks WHERE root_id=?1`：行没了之后
+    /// `read_intent` 查不到会降级 Run，内存队列里还没取出的旧 Job 会把已经移除的范围
+    /// 重新扫回来。改成落 Cancelled 终态 + 抬 generation：既让目录边界的意图检查把旧
+    /// Job 让出去，也保留「结果跨重启可追溯」（IDX-17）。
+    ///
+    /// 收 `&Transaction`（调用方已开事务）——`cancel_index_task` 会另开一层事务，
+    /// SQLite 不允许嵌套，所以这里直接用同一条 UPDATE 作用于调用方的事务。
+    /// `root_id` 可能为 NULL（阶段 1 `root_id_for_path` 返回 Option），故同时按
+    /// `scope_path` 精确/前缀匹配收窄到本 root，既不漏也不误伤其它 root。
+    fn invalidate_scope_intents(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        root_id: i64,
+        root_path: &str,
+    ) -> Result<()> {
+        let cut = root_path.chars().count() as i64 + 1;
+        let prefix = format!("{root_path}/");
+        tx.execute(
+            "UPDATE index_tasks
+              SET cancel_reason = ?2,
+                  outcome       = 3,
+                  status        = 3,
+                  finished_at   = strftime('%s','now'),
+                  error_code    = ?2,
+                  generation    = generation + 1
+              WHERE (root_id = ?1 OR scope_path = ?3
+                     OR substr(scope_path, 1, ?4) = ?5)
+                AND cancel_reason IS NULL
+                AND finished_at IS NULL
+                AND kind IN (0,1,2,3)
+                AND scope_kind = 0",
+            params![root_id, "索引已移除", root_path, cut, prefix],
+        )?;
+        Ok(())
+    }
+
+    /// 删除**某一个关注文件夹**（root）下的索引，其他 root 完全不动。
+    ///
+    /// M4.3 §2 / §7 P-M43-04「单根 + 全部」：作用域删除必须带稳定 `root_id`，
+    /// 不准像旧接线那样丢弃 id 转全库 `delete_index()`。与 `clear_index` 一样
+    /// 保留 roots / exclusions，并在删前按路径前缀快照标记（R-M43-02）。
+    pub fn clear_index_for_root(&self, root_id: i64) -> Result<(u64, u64)> {
+        let path: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT path FROM roots WHERE id = ?1",
+                params![root_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(root_path) = path else {
+            return Ok((0, 0));
+        };
+        let folder_ids = self.subtree_folder_ids_for_path(&root_path)?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        // 0) 作废该 scope 的持久任务意图必须在「有没有已建索引」之前做：
+        //    刚入队、还没写任何 folders 的任务同样要失效，否则重启会把已移除的
+        //    范围重新扫回来（IDX-11 / G11.3）。
+        self.invalidate_scope_intents(&tx, root_id, &root_path)?;
+        if folder_ids.is_empty() {
+            tx.commit()?;
+            // 即便一行索引都没建过，也要落「已移除」标记：用户点了删除，
+            // 界面必须能区分「删过」与「从没索引过」（IDX-10 的「隐藏范围」）。
+            self.mark_root_index_removed(root_id)?;
+            return Ok((0, 0));
+        }
+        let placeholders = vec!["?"; folder_ids.len()].join(",");
+        let in_ids = format!("({placeholders})");
+
+        // 1) 标记快照：整棵子树一把抓（集合式，5 条语句）。
+        //    早先版本逐个 folders.path 调 snapshot_for_folder，而那个函数又逐张照片
+        //    跑 6 条 SQL——9.6 万张照片 ≈ 58 万条语句挤在一个事务里，期间一直持有
+        //    DB 锁，UI 每帧抢锁就冻结五十秒（实机复现，见 v0.7-dev20）。
+        if self.has_identity {
+            identity::snapshot_for_folder_ids(&tx, &folder_ids)?;
+        }
+        // 2) 计数 + 删子表 photos（thumbs / captions / tags / album_photos 靠 CASCADE）
+        let photos: i64 = tx.query_row(
+            &format!("SELECT COUNT(*) FROM photos WHERE folder_id IN {in_ids}"),
+            rusqlite::params_from_iter(folder_ids.iter()),
+            |r| r.get(0),
+        )?;
+        let thumbs: i64 = tx
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM thumbs t JOIN photos p ON p.id = t.photo_id
+                      WHERE p.folder_id IN {in_ids}"
+                ),
+                rusqlite::params_from_iter(folder_ids.iter()),
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        tx.execute(
+            &format!("DELETE FROM photos WHERE folder_id IN {in_ids}"),
+            rusqlite::params_from_iter(folder_ids.iter()),
+        )?;
+        // 3) 断开子树内/外指向这些 folder 的 parent_id，再删 folder 行
+        tx.execute(
+            &format!("UPDATE folders SET parent_id = NULL WHERE parent_id IN {in_ids}"),
+            rusqlite::params_from_iter(folder_ids.iter()),
+        )?;
+        tx.execute(
+            &format!("UPDATE folders SET parent_id = NULL WHERE id IN {in_ids}"),
+            rusqlite::params_from_iter(folder_ids.iter()),
+        )?;
+        tx.execute(
+            &format!("DELETE FROM folders WHERE id IN {in_ids}"),
+            rusqlite::params_from_iter(folder_ids.iter()),
+        )?;
+        // 4) 该 scope 的持久任务意图已在步骤 0（同一事务、且在「有没有已建索引」
+        //    的早退之前）统一作废，这里不必也不能重复开事务再写一遍。
+        // 失败明细属于被移除的范围，一并清掉（其它 root 的任务/失败不受影响）。
+        tx.execute(
+            "DELETE FROM index_task_failures WHERE task_id IN \
+                (SELECT task_id FROM index_tasks WHERE root_id = ?1)",
+            params![root_id],
+        )?;
+        tx.commit()?;
+        // IDX-10：移除索引后该根进入「已移除」态（持久、跨重启），
+        // 界面据此显示「索引已移除」而不是照旧报「正常」。
+        self.mark_root_index_removed(root_id)?;
+
+        Ok((photos.max(0) as u64, thumbs.max(0) as u64))
+    }
+
+    /// **彻底**删掉一个关注根的索引（m10218）：连 `roots` 行一起删。
+    ///
+    /// ## 与 `clear_index_for_root` 的区别（两条路都必须存在）
+    ///
+    /// `clear_index_for_root` 是 IDX-10 的语义：清掉派生数据，但**保留 roots 行**
+    /// 并落「索引已移除」标记，于是索引管理页还留着一行空壳，可以「重新索引（恢复）」。
+    /// 用户点了「删除索引」却发现列表里那行还在，观感就是「没删干净」。
+    ///
+    /// 彻底删除则是：索引数据、缩略图、`roots` 行、`exclusions`、`m43_index_removed_<id>`
+    /// 设置键，全部消失；界面上该根及其子树连同缩略图一起不见。
+    ///
+    /// 两步顺序不能反：
+    /// - 只 `delete_root_row` → 留下孤儿的 folders/photos（`folders.root_id` 是
+    ///   `ON DELETE SET NULL` 之外的外键，没有级联），索引数据永远搜不到删不掉；
+    /// - 只 `clear_index_for_root` → 留下「已移除空壳」行，正是用户抱怨的现象。
+    ///
+    /// 标记不丢：`clear_index_for_root` 内部先按路径前缀做身份快照（R-M43-02），
+    /// 所以删完之后重新添加同一个目录并扫描，收藏/标签/说明/相册会按身份挂回。
+    /// **不碰磁盘**：只动自有 DB，原图一张都不删。
+    pub fn purge_index_for_root(&self, root_id: i64) -> Result<(u64, u64)> {
+        // 1) 先清派生数据：标记快照 + 作废任务意图 + 删 photos/folders/thumbs。
+        let counts = self.clear_index_for_root(root_id)?;
+        // 2) 再删根行。`index_tasks.root_id` 是 ON DELETE CASCADE，
+        //    该根的历史任务与失败明细会随这一行一起消失（正是「彻底」的含义）。
+        self.delete_root_row(root_id)?;
+        // 3) m10756：这个根若是导入带进来的，且它是来源下**最后一个**根，
+        //    来源行必须一起收掉。否则左栏「导入的索引」里会留下一个点开
+        //    什么都没有的空节点——用户报的「删除后导入的索引还在文件夹树上」
+        //    就是它（来源节点是照 `import_sources` 画的，不按根画）。
+        //    来源还有别的根时保持不变：那说明用户只删了其中一组。
+        let _ = prune_orphan_import_sources(self);
+        Ok(counts)
     }
 }
 
@@ -2653,6 +3344,58 @@ impl Db {
         let mut st = self.conn.prepare(
             "SELECT label, COUNT(*) AS n FROM tags GROUP BY label ORDER BY n DESC, label",
         )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 当前视图范围内的标签计数（M4.3 `IDX-22` P1 的「本视图 N」）。
+    ///
+    /// 与 [`Db::all_tags`] 的区别只在**范围**：这里只数落在 `folder_ids` 里、
+    /// 且 root 未被关闭的照片（与栅格同一 `active_root_clause` 口径）——
+    /// 左栏两个数字必须是「同一批照片」的两种切法，否则用户会看到
+    /// 「全库 12、本视图 5、可网格只画出 3 张」这种三方对不上的局面。
+    ///
+    /// `folder_ids` 为 `None` 表示全库（此时结果与 `all_tags` 的集合一致，
+    /// 只是排序不同、且不含 0 计数）。
+    pub fn tag_counts_visible(&self, folder_ids: Option<&[i64]>) -> Result<Vec<(String, i64)>> {
+        // 两条路径，按「要不要触到 folders / roots」分流。
+        //
+        // ⚠️ 这里去掉过 `COUNT(DISTINCT t.photo_id)`：`tags` 的主键是
+        // `(photo_id, label)`，一行 tag 只对应一张照片，`COUNT(*)` 与
+        // 「有几张照片带这个标签」严格等价。旧写法的 DISTINCT 让 SQLite 必须
+        // 建临时去重结构，25 万张 / 35 万行 tag 实测 171 ms，换成 `COUNT(*)` 后
+        // 降到几十毫秒——**这不是「差不多」的差别，是能不能进 25 ms 预算的差别**。
+        //
+        // 全库口径（`folder_ids == None`）且所有根都可见时，可见性条件恒真，
+        // 直接在主键覆盖索引上做一次分组即可；否则才 join photos / folders。
+        let all_roots_visible = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM roots WHERE state <> 0", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| n == 0)
+            .unwrap_or(false);
+        if folder_ids.is_none() && all_roots_visible {
+            let mut st = self
+                .conn
+                .prepare("SELECT label, COUNT(*) AS n FROM tags GROUP BY label ORDER BY label")?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            return Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?);
+        }
+
+        // 通用路径：从 photos 驱动（`idx_photos_folder_taken` 或主键扫描），
+        // 再按 `tags` 主键回查——比「先扫全部 tag 行再逐行判可见」省掉大量回表。
+        let mut sql = String::from(
+            "SELECT t.label, COUNT(*) AS n \
+             FROM photos p \
+             JOIN tags t ON t.photo_id = p.id \
+             JOIN folders f ON f.id = p.folder_id",
+        );
+        if let Some(w) = self.build_scope(folder_ids, true) {
+            sql.push_str(&w);
+        }
+        sql.push_str(" GROUP BY t.label ORDER BY t.label");
+        let mut st = self.conn.prepare(&sql)?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }

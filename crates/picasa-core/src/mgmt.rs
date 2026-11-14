@@ -134,6 +134,15 @@ pub struct TaskView {
     pub elapsed_text: String,
     /// 结局（仅终态有）
     pub outcome: Option<String>,
+    /// 用户逐任务暂停标记（M4.3）：由 `build_snapshot` 用
+    /// `unfinished_index_tasks()` 的持久化意图覆盖；板上活任务先给 false。
+    pub user_paused: bool,
+    /// 结束摘要里的「跳过」条目数（M4.3 IDX-17）：本轮未处理完的目录/文件，
+    /// 取 `discovered - completed - failed`，不会把重试次数算成失败文件数。
+    pub skipped: u64,
+    /// 取消原因（M4.3 IDX-17）：非空即为持久 Cancelled 终态，跨重启可追溯，
+    /// 且不会被后续收尾覆盖成「已完成」。活任务与成功行都是 `None`。
+    pub cancel_reason: Option<String>,
 }
 
 /// 「关注文件夹」标签里的一行（§4.1 第二行 / §6.1 `RootView`）。
@@ -143,6 +152,15 @@ pub struct RootView {
     pub path: String,
     /// 用户在界面上主动关闭（`roots.state = 1`）
     pub closed: bool,
+    /// 该根的索引**已被用户移除**（IDX-10 的「移除索引」）。
+    ///
+    /// 与 `closed` 是两件事：`closed` 是「先不在左栏显示，索引全留着」，
+    /// 随时点「重新打开」就回来；`index_removed` 是「索引真的没了」，
+    /// 只剩用户标记躺在身份骨架里等重新扫描挂回。
+    ///
+    /// 来源是 `settings["m43_index_removed_<id>"]`（**不落 schema 列**，
+    /// 见 `Db::mark_root_index_removed` 的理由）。
+    pub index_removed: bool,
     /// 卷不在（§4.6，**不落库**，每次快照现算）
     pub offline: bool,
     pub photo_count: u64,
@@ -164,6 +182,9 @@ impl RootView {
     pub fn status_text(&self) -> &'static str {
         if self.offline {
             "离线"
+        } else if self.index_removed {
+            // 比「已关闭」更具体：索引真的没了，重新打开不会让照片回来。
+            "索引已移除"
         } else if self.closed {
             "已关闭"
         } else {
@@ -618,9 +639,15 @@ pub fn build_snapshot(d: &db::Db, input: &SnapshotInput<'_>) -> Result<MgmtSnaps
     let all_photos_all = counts.all_photos;
 
     let root_stats = d.root_stats()?;
+    // 一次读全部「索引已移除」的根（不能每行查一次 settings：那是 N 次往返）。
+    let removed: std::collections::HashSet<i64> = d
+        .index_removed_root_ids()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
     let mut roots = Vec::with_capacity(root_stats.len());
     for rs in root_stats {
-        let mut view = root_view(&rs, input.offline);
+        let mut view = root_view(&rs, input.offline, removed.contains(&rs.id));
         // 离线 / 已关闭的根不该显示「实时监视」——那会骗人。
         view.watch = match input.watch.get(&rs.id) {
             _ if view.closed || view.offline => WatchState::Off,
@@ -675,6 +702,20 @@ pub fn build_snapshot(d: &db::Db, input: &SnapshotInput<'_>) -> Result<MgmtSnaps
     // ---- 任务：库里的历史 + 会话内的活任务
     let history = d.finished_tasks(HISTORY_KEEP)?;
     let mut tasks: Vec<TaskView> = input.live.to_vec();
+    // 把会话内活任务与库里持久化的「未完成意图」对齐：补上真实 task_id
+    // 与用户逐任务暂停标记（M4.3）。按 scope_path 精确匹配，重复时取最新
+    // （task_id 最大）的意图；未匹配上的活任务保留 task_id = 0。
+    let live_intents = d.unfinished_index_tasks()?;
+    for t in tasks.iter_mut() {
+        if let Some(intent) = live_intents
+            .iter()
+            .filter(|i| i.scope_path == t.scope)
+            .max_by_key(|i| i.task_id)
+        {
+            t.task_id = intent.task_id;
+            t.user_paused = intent.user_paused;
+        }
+    }
     for t in history {
         tasks.push(task_view(&t, None));
     }
@@ -727,7 +768,7 @@ pub fn build_snapshot(d: &db::Db, input: &SnapshotInput<'_>) -> Result<MgmtSnaps
     Ok(snap)
 }
 
-fn root_view(rs: &RootStat, offline: &OfflineProbe) -> RootView {
+fn root_view(rs: &RootStat, offline: &OfflineProbe, index_removed: bool) -> RootView {
     // 监视状态由 `build_snapshot` 的调用方经 `SnapshotInput.watch` 注入；
     // 这里给 `Off`（= 如实显示「未监视」），**不假装** `Active`。
     let path = PathBuf::from(&rs.path);
@@ -735,6 +776,7 @@ fn root_view(rs: &RootStat, offline: &OfflineProbe) -> RootView {
         id: rs.id,
         path: rs.path.clone(),
         closed: rs.state != 0,
+        index_removed,
         offline: offline(&path),
         photo_count: rs.photo_count,
         // 字节数慢，由 `apply_storage` 异步补；快照本身不带它。
@@ -801,6 +843,10 @@ pub fn live_task_views(board: &crate::index::IndexSnapshot) -> Vec<TaskView> {
             started_at: Some(board.started_at as i64),
             elapsed_text: format_mmss(((now - t.last_update).max(0.0) * 1000.0) as i64),
             outcome: None,
+            // 板上活任务的真实暂停态来自 DB 意图，build_snapshot 里覆盖。
+            user_paused: false,
+            skipped: 0,
+            cancel_reason: None,
         })
         .collect()
 }
@@ -839,6 +885,14 @@ fn task_view(t: &TaskRow, elapsed_override: Option<i64>) -> TaskView {
         started_at: t.started_at,
         elapsed_text: format_mmss(elapsed_ms),
         outcome: t.outcome().map(|o| o.label().to_string()),
+        // 历史终态任务没有逐任务暂停标记。
+        user_paused: false,
+        // 结束摘要（IDX-17）：持久层目前只记 processed/completed/failed 三数，
+        // 没有独立的「跳过」列，故恒为 0。字段存在是为了让 UI 有独立显示位、
+        // 不把重试次数并进 failed；将来若补 skipped 列，改这里一处即可。
+        skipped: 0,
+        // 取消原因随行持久化，重开后仍能与「部分失败/成功」区分（TC-M43-06）。
+        cancel_reason: t.cancel_reason.clone(),
     }
 }
 
@@ -948,17 +1002,14 @@ pub fn anonymize_path(path: &str) -> String {
 
 /// 导出目标目录的合法性检查（§4.9 第三条）。
 ///
-/// ⚠️ 守的是 R-1：用户选的目录若落在某个 active root 之下，**拒绝**。
-/// 听起来是多管闲事——用户自己选的目录凭什么不让写？因为那是**照片目录**，
-/// 而在照片目录里出现任何新文件都算红线违规，`TC-M22-GUARD-003` 会红。
-/// 与其事后解释「那是你自己选的」，不如事前拦下。
+/// ⚠️ 守的是 R-M43-01「照片目录零写入」：**任何**已关注根（含已关闭、离线）
+/// 之下都拒绝——盘被拔掉 / 关注关系关掉都不等于「那不是照片目录」，等盘回来
+/// 或重新关注时，凭空多出来的诊断文件就是红线违规。M4.3 IDX-17 修掉了旧版
+/// 「closed || offline 就放行」的漏洞（TC-M43-GUARD-01）。
 ///
 /// 返回 `Err` 时带的是可直接显示的文案。
 pub fn check_export_dir(dir: &Path, snap: &MgmtSnapshot) -> std::result::Result<(), String> {
     for root in &snap.roots {
-        if root.closed || root.offline {
-            continue;
-        }
         let rp = Path::new(&root.path);
         if dir.starts_with(rp) {
             return Err(format!(
@@ -1194,7 +1245,58 @@ mod tests {
             started_at: None,
             elapsed_text: String::new(),
             outcome: None,
+            user_paused: false,
+            skipped: 0,
+            cancel_reason: None,
         }
+    }
+
+    /// M4.3 阶段 1：会话内活任务行经 `build_snapshot` 与库里
+    /// `unfinished_index_tasks()` 的持久化意图按 `scope_path` 精确对齐，
+    /// 补上真实 task_id 与用户逐任务暂停标记；未匹配的活任务保持 task_id = 0。
+    #[test]
+    fn live_tasks_get_real_task_ids_from_unfinished_intents() {
+        let d = db::Db::open_in_memory().unwrap();
+        // 建一条 Root 范围的未完成意图，并置用户暂停。
+        let id = d
+            .begin_index_task(
+                None,
+                "/photos",
+                db::TaskKind::FirstScan,
+                db::TaskScopeKind::Root,
+            )
+            .unwrap();
+        d.set_task_user_paused(id, true).unwrap();
+
+        let live = vec![
+            TaskView {
+                scope: "/photos".into(),
+                ..task_view_blank()
+            },
+            TaskView {
+                scope: "/other".into(),
+                ..task_view_blank()
+            },
+        ];
+        let probe = default_offline_probe();
+        let watch: HashMap<i64, WatchState> = HashMap::new();
+        let input = SnapshotInput {
+            seq: 1,
+            live: &live,
+            paused_by_system: false,
+            offline: &probe,
+            prev_dataset_version: 0,
+            watch: &watch,
+            prev_photo_count: 0,
+        };
+        let snap = build_snapshot(&d, &input).unwrap();
+        // 活任务排在历史前，find 先命中对齐后的活任务。
+        let matched = snap.tasks.iter().find(|t| t.scope == "/photos").unwrap();
+        assert_eq!(matched.task_id, id, "活任务对齐到库里持久化的意图 id");
+        assert!(matched.user_paused, "持久化意图的用户暂停标记要透传到界面行");
+        let unmatched = snap.tasks.iter().find(|t| t.scope == "/other").unwrap();
+        assert_eq!(unmatched.task_id, 0, "未匹配的活任务保持 task_id = 0");
+        assert!(!unmatched.user_paused);
     }
 
     // ---- FolderState
@@ -1230,7 +1332,7 @@ mod tests {
             failed: 0,
             last_indexed_at: None,
         };
-        let v = root_view(&rs, &offline);
+        let v = root_view(&rs, &offline, false);
         assert!(v.offline);
         assert!(!v.can_index(), "离线根不该能发起任务");
         assert_eq!(v.status_text(), "离线");
@@ -1239,7 +1341,7 @@ mod tests {
             path: "/Users/me/Pictures".into(),
             ..rs
         };
-        let v2 = root_view(&rs2, &offline);
+        let v2 = root_view(&rs2, &offline, false);
         assert!(!v2.offline);
         assert_eq!(v2.status_text(), "正常");
     }
@@ -1306,15 +1408,17 @@ mod tests {
     // ---- §4.9 导出
 
     #[test]
-    fn export_dir_under_an_active_root_is_rejected() {
+    fn export_dir_under_any_registered_root_is_rejected() {
         let s = snap_roots(vec![
-            root(1, "/Photos", false, false),
-            root(2, "/Volumes/Ext", false, true), // 离线：不拦
+            root(1, "/Photos", false, false),   // 活跃
+            root(2, "/Volumes/Ext", false, true), // 离线
+            root(3, "/Old", true, false),        // 已关闭
         ]);
         assert!(check_export_dir(Path::new("/Photos/sub"), &s).is_err());
         assert!(check_export_dir(Path::new("/Photos"), &s).is_err());
-        // 离线根之下放行（盘都不在，写了也不落在照片目录的可观测快照里）
-        assert!(check_export_dir(Path::new("/Volumes/Ext/x"), &s).is_ok());
+        // R-M43-01：离线 / 已关闭根同样是照片目录，一律拒绝（IDX-17 红线修复）。
+        assert!(check_export_dir(Path::new("/Volumes/Ext/x"), &s).is_err());
+        assert!(check_export_dir(Path::new("/Old/x"), &s).is_err());
         assert!(check_export_dir(Path::new("/Downloads"), &s).is_ok());
     }
 

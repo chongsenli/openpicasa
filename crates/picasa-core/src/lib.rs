@@ -25,6 +25,8 @@ pub mod paths;
 pub mod perf;
 pub mod pipeline;
 pub mod prefs;
+pub mod root_intake;
+pub mod tag_counts;
 pub mod scanner;
 pub mod texbudget;
 pub mod thumbs;
@@ -43,7 +45,7 @@ pub use texbudget::{
     texture_cache_budget_mb,
 };
 pub use index::{FailureItem, IndexBoard, IndexSnapshot, IndexState, TaskSnapshot};
-pub use library::{Library, View, year_range_seconds};
+pub use library::{FolderNode, FolderRowView, Library, View, year_range_seconds};
 pub use mgmt::{
     DECODE_TIMEOUT_MS, HISTORY_KEEP, SNAPSHOT_HZ_MAX, STARTUP_VERIFY_DELAY_MS,
     VERIFY_DIR_INTERVAL_MS, ExclusionView, FolderState, IndexEntryState, MgmtSnapshot,
@@ -65,6 +67,8 @@ pub use zoom::{
     snap_to_point, step_log, tier_for, uses_atlas,
 };
 pub use prefs::Preferences;
+pub use root_intake::RootIntake;
+pub use tag_counts::{TagsSort, sort_tag_counts, truncate_label};
 pub use scanner::{CoreEvent, IndexService, ScanHandle, spawn_scan, spawn_scan_with_board};
 pub use thumbs::{THUMB_WORKERS, ThumbJob, ThumbService};
 

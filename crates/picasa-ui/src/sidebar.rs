@@ -23,13 +23,72 @@ use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui,
     pos2, vec2,
 };
-use picasa_core::{IndexSnapshot, Library, ThumbService, View};
+use picasa_core::{FolderRowView, IndexSnapshot, Library, ThumbService, View};
 use picasa_db::{Db, PhotoRow};
 
 use crate::icons::{self, Icon};
 use crate::index_progress;
 use crate::textures::{TexState, TextureCache};
 use crate::theme::{Metrics, Theme};
+
+/// 「导入的索引」分组的视觉标记（IDX-21 ③④）。
+///
+/// 全部来自 App 已缓存的导入来源信息，绘制时不查库。
+#[derive(Clone, Default)]
+pub struct MarkSet<'a> {
+    /// 这组行是不是「导入的索引」里的（决定图标与悬停提示）。
+    pub imported: bool,
+    /// 该来源整体是否离线（原路径不可读）。
+    pub offline: bool,
+    /// 悬停提示里的原路径（离线时尤其重要：**不只靠颜色**表达状态）。
+    pub abs_paths: &'a [String],
+    /// 与「本机已有」同路径的节点：以本机为准，只标一行说明。
+    pub local_dupes: &'a [String],
+}
+
+impl MarkSet<'_> {
+    /// 这组行是否属于「导入的索引」。
+    pub fn is_imported(&self) -> bool {
+        self.imported
+    }
+
+    /// 悬停提示：离线/在线都要说清楚，且离线时给出原路径（IDX-21 ③）。
+    pub fn tip(&self, row: &FolderRowView) -> Option<String> {
+        let mut lines = Vec::new();
+        lines.push(if self.offline {
+            "离线（导出时的原路径当前不可读）".to_string()
+        } else if self.imported {
+            "来自导入的索引".to_string()
+        } else {
+            return None;
+        });
+        if !self.abs_paths.is_empty() {
+            lines.push(format!("原路径：{}", self.abs_paths.join("、")));
+        }
+        lines.push(format!("导出时计数：{}", row.count));
+        if self.local_dupes.iter().any(|p| p == &row.path) {
+            lines.push("本机已有同名路径，以本机为准（计数只算一份）".to_string());
+        }
+        Some(lines.join("\n"))
+    }
+}
+
+/// 「导入的索引」分组里的一个来源（IDX-21 ②）。
+///
+/// 由 App 缓存后传入：名字/时间/照片数来自 `import_sources` 表，
+/// `offline`/`abs_paths` 来自该来源根的实际可读性探测，`local_dupes`
+/// 用于标注「本机已有」（P-M43-10）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImportGroup {
+    pub source_id: i64,
+    pub name: String,
+    /// 导入时间（已格式化，绝不出现 ETA）。
+    pub when: String,
+    pub photos: u64,
+    pub offline: bool,
+    pub abs_paths: Vec<String>,
+    pub local_dupes: Vec<String>,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SidebarAction {
@@ -57,6 +116,12 @@ pub enum SidebarAction {
     NewAlbum,
     /// M4.2 `M42-UI-05`：相册行右键（相册名、屏幕位置），供改名/删除/加入照片。
     AlbumContext(String, Pos2),
+    /// IDX-21 ⑤：导入来源节点右键（来源 id、屏幕位置）→ 移除 / 仅隐藏。
+    ImportSourceContext(i64, Pos2),
+    /// IDX-22 ④：切换标签排序方式（按名称 / 按数量），选择持久化。
+    SetTagsSort(picasa_core::TagsSort),
+    /// IDX-22 ⑥：切换「显示空标签」（默认隐藏 0 计数）。
+    ToggleShowZeroTags,
 }
 
 pub struct SidebarCtx<'a> {
@@ -76,6 +141,23 @@ pub struct SidebarCtx<'a> {
     /// 相关子查询计数，绘制每帧都跑会拖慢缩略图展示（实机反馈的性能回归）。
     pub tags: &'a [(String, i64)],
     pub albums: &'a [(String, i64)],
+    /// IDX-22 ②：当前生效的标签筛选（行高亮选中态）；无则 None。
+    pub tags_active: Option<&'a str>,
+    /// IDX-22 ④：标签排序方式（组头菜单据此打勾）。
+    pub tags_sort: picasa_core::TagsSort,
+    /// IDX-22 ⑥：是否显示 0 计数标签（菜单据此打勾）。
+    pub show_zero_tags: bool,
+    /// IDX-22 P1「本视图 N」：当前视图范围内的标签计数（App 缓存）。
+    ///
+    /// 只有**非全库视图**才画第二个数字；全库视图下它等于全库计数，
+    /// 画两个一样的数字只会增加噪音。
+    pub tags_in_view: &'a [(String, i64)],
+    /// 当前视图是不是「所有照片」（P1 第二数字只在非全库时出现）。
+    pub view_is_all: bool,
+    /// IDX-21：导入来源列表（App 缓存，`import_sources` + 实际可读性）。
+    pub import_groups: &'a [ImportGroup],
+    /// IDX-21：「导入的索引」分组折叠状态。
+    pub imported_collapsed: bool,
     pub has_focus: bool,
     /// 索引进度快照：左栏的**状态点**与计数必须与面板/弹框同源（`04` §3.2）
     pub snapshot: &'a IndexSnapshot,
@@ -130,6 +212,15 @@ pub fn show(
                 folder_tree(ui, lib, &*ctx, &mut actions);
             }
 
+            // ---- IDX-21：导入的索引（位于「文件夹」之后、「标签」之前）----
+            if !ctx.import_groups.is_empty() {
+                ui.add_space(6.0);
+                section_title(ui, "导入的索引", ctx.imported_collapsed, &mut actions);
+                if !ctx.imported_collapsed {
+                    imported_index(ui, lib, &*ctx, &mut actions);
+                }
+            }
+
             // ---- M4：标签 / 相册（应用内虚拟集合，不是磁盘目录）----
             ui.add_space(6.0);
             m4_group(
@@ -139,6 +230,14 @@ pub fn show(
                 ctx.tags.to_vec(),
                 &mut actions,
                 true,
+                ctx.tags_active,
+                ctx.tags_sort,
+                ctx.show_zero_tags,
+                if ctx.view_is_all {
+                    None
+                } else {
+                    Some(ctx.tags_in_view)
+                },
             );
             ui.add_space(6.0);
             m4_group(
@@ -148,6 +247,10 @@ pub fn show(
                 ctx.albums.to_vec(),
                 &mut actions,
                 false,
+                None,
+                picasa_core::TagsSort::Name,
+                false,
+                None,
             );
         });
 
@@ -191,6 +294,15 @@ fn section_title(ui: &mut Ui, title: &str, collapsed: bool, actions: &mut Vec<Si
 ///
 /// 与「文件夹」组刻意区分：这里是**应用内虚拟集合**，数据只存自有 DB，
 /// 不会在磁盘上新建目录。组头带「＋」新建入口，行显示计数。
+///
+/// M4.3 `IDX-22` 增量（仅标签组）：
+/// - ② 行右侧计数右对齐；名称超长按字符截断 + 悬停给全名；
+///   当前生效的标签筛选行画选中底色（`active`）。
+/// - ④⑥ 组头「⋯」菜单切排序方式 / 显示空标签（相册组没有这个菜单）。
+///
+/// 参数确实多（组头 + 列表 + 三个标签专属项），拆成结构体只会让两个调用点更啰嗦；
+/// 收在一个私有函数里，代价只有一个 allow。
+#[allow(clippy::too_many_arguments)]
 fn m4_group(
     ui: &mut Ui,
     title: &str,
@@ -198,6 +310,10 @@ fn m4_group(
     items: Vec<(String, i64)>,
     actions: &mut Vec<SidebarAction>,
     is_tag: bool,
+    active: Option<&str>,
+    tags_sort: picasa_core::TagsSort,
+    show_zero_tags: bool,
+    in_view: Option<&[(String, i64)]>,
 ) {
     let (rect, resp) = ui.allocate_exact_size(
         vec2(ui.available_width().max(1.0), Metrics::SIDEBAR_SECTION_H),
@@ -221,14 +337,46 @@ fn m4_group(
     // 右端「＋」新建
     let plus = Rect::from_center_size(pos2(rect.right() - 14.0, rect.center().y), vec2(11.0, 11.0));
     icons::draw(&painter, Icon::Plus, plus, color, 1.2);
+    // IDX-22 ④⑥：标签组头在「＋」左侧再来一枚「⋯」，点开是排序 / 显示空标签。
+    let menu_btn = Rect::from_center_size(
+        pos2(rect.right() - 32.0, rect.center().y),
+        vec2(11.0, 11.0),
+    );
+    if is_tag {
+        icons::draw(&painter, Icon::Ellipsis, menu_btn, color, 1.2);
+    }
+    // IDX-22 ④⑥：「⋯」是独立的热区（`ui.interact`），否则点它会连带触发展开
+    // 折叠——`resp` 覆盖整行，两个 Sense::click 会同时命中。
+    if is_tag {
+        let menu_resp =
+            ui.interact(menu_btn, ui.scope_id().with("tag-group-menu"), Sense::click());
+        menu_resp.clone().on_hover_text("标签排序 / 显示空标签");
+        egui::Popup::menu(&menu_resp).show(|ui| {
+            ui.set_min_width(120.0);
+            ui.label("标签排序");
+            for s in [picasa_core::TagsSort::Name, picasa_core::TagsSort::Count] {
+                if ui.selectable_label(s == tags_sort, s.label()).clicked() {
+                    actions.push(SidebarAction::SetTagsSort(s));
+                }
+            }
+            ui.separator();
+            if ui
+                .selectable_label(show_zero_tags, "显示空标签")
+                .clicked()
+            {
+                actions.push(SidebarAction::ToggleShowZeroTags);
+            }
+        });
+    }
     if resp.clicked() {
-        if plus.contains(resp.interact_pointer_pos().unwrap_or_default()) {
+        let pos = resp.interact_pointer_pos().unwrap_or_default();
+        if plus.contains(pos) {
             actions.push(if is_tag {
                 SidebarAction::NewTag
             } else {
                 SidebarAction::NewAlbum
             });
-        } else {
+        } else if !(is_tag && menu_btn.contains(pos)) {
             actions.push(SidebarAction::ToggleSectionM4(title.to_string()));
         }
     }
@@ -243,21 +391,62 @@ fn m4_group(
         if r.width() < 2.0 || !r.is_finite() {
             continue; // 退化行不绘制，避免无效 Mesh
         }
+        let selected = is_tag && active == Some(name.as_str());
+        let hovered = row_resp.hovered();
+        if selected {
+            // 选中态用「灰蓝」而不是高亮蓝：侧栏底色是暖灰，高亮蓝会跳。
+            ui.painter_at(r)
+                .rect_filled(r.shrink2(vec2(4.0, 1.0)), 4.0, Theme::picasa().sidebar_selected_inactive);
+        } else if hovered {
+            ui.painter_at(r)
+                .rect_filled(r.shrink2(vec2(4.0, 1.0)), 4.0, Theme::picasa().sidebar_hover);
+        }
         let p = ui.painter_at(r);
+        // 名称最长占「整行宽 - 左侧缩进 - 右侧计数位（约 34px）」，按字符截断，
+        // 截断只影响画出来的那段，悬停仍给全名（IDX-22 ②）。
+        let count_w = 34.0;
+        let avail = (r.width() - 28.0 - count_w).max(24.0);
+        let per_char = 7.4_f32; // 12.5px 比例字体下汉字的近似步进（宁多截不留白）
+        let max_chars = ((avail / per_char).floor() as usize).max(1);
+        let shown = picasa_core::truncate_label(&name, max_chars);
         p.text(
             pos2(r.left() + 28.0, r.center().y),
             Align2::LEFT_CENTER,
-            &name,
+            &shown,
             FontId::new(12.5, egui::FontFamily::Proportional),
             Theme::picasa().tree_text,
         );
+        // P1「本视图 N」：全库计数在右，本视图计数紧挨着它左边、用更淡的颜色。
+        // 只在非全库视图下画；两个数字相同就没有信息量。
+        let in_view_count = in_view
+            .and_then(|rows| rows.iter().find(|(l, _)| l == &name).map(|(_, n)| *n))
+            .filter(|n| *n != count);
+        let count_right = if in_view_count.is_some() {
+            r.right() - 44.0
+        } else {
+            r.right() - 14.0
+        };
         p.text(
-            pos2(r.right() - 14.0, r.center().y),
+            pos2(count_right, r.center().y),
             Align2::RIGHT_CENTER,
             count.to_string(),
             FontId::new(11.0, egui::FontFamily::Proportional),
             Theme::picasa().text_secondary,
         );
+        if let Some(n) = in_view_count {
+            p.text(
+                pos2(r.right() - 14.0, r.center().y),
+                Align2::RIGHT_CENTER,
+                format!("·{n}"),
+                FontId::new(10.5, egui::FontFamily::Proportional),
+                Theme::picasa().text_disabled,
+            );
+        }
+        let row_resp = if shown != name {
+            row_resp.on_hover_text(&name)
+        } else {
+            row_resp
+        };
         if row_resp.clicked() {
             actions.push(if is_tag {
                 SidebarAction::FilterByTag(name.clone())
@@ -431,8 +620,10 @@ fn fav_row(
 }
 
 fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut Vec<SidebarAction>) {
+    // IDX-21 ⑦：本机「文件夹」组只显示 `origin = local` 的根，
+    // 导入带进来的根归到「导入的索引」分组，同一棵树不会显示两次。
+    let rows = &lib.local_visible_folders;
     let t = *ctx.theme;
-    let rows = &lib.visible_folders;
     if rows.is_empty() {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -445,18 +636,145 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
         });
         return;
     }
+    let active = match lib.view {
+        View::Folder(id) => Some(id),
+        _ => None,
+    };
+    render_tree_rows(ui, rows, active, &MarkSet::default(), ctx, actions, "folder-tree");
+}
 
+/// 「导入的索引」分组：每个导入来源一个节点，节点下是其还原的文件夹树。
+///
+/// 与「文件夹」组是两条独立入口：本机根不在此出现（IDX-21 ⑦），
+/// 导入根也不在「文件夹」里出现，同一棵树不会显示两次。
+fn imported_index(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut Vec<SidebarAction>) {
+    let t = *ctx.theme;
+    let row_h = Metrics::SIDEBAR_ROW_H;
+    let active = match lib.view {
+        View::Folder(id) => Some(id),
+        _ => None,
+    };
+    for g in ctx.import_groups {
+        let rows: &[FolderRowView] = lib
+            .imported_visible_folders
+            .get(&g.source_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
+        // 来源节点（一行）：名称 + 导入时间 + 照片数；离线时置灰并说明
+        let (rect, resp) =
+            ui.allocate_exact_size(vec2(ui.available_width().max(1.0), row_h), Sense::click());
+        if rect.width() < 2.0 || !rect.is_finite() {
+            continue;
+        }
+        let painter = ui.painter_at(rect);
+        if resp.hovered() {
+            painter.rect_filled(
+                rect.shrink2(vec2(6.0, 1.0)),
+                6.0,
+                t.sidebar_hover.gamma_multiply(0.6),
+            );
+        }
+        let icon_color = if g.offline {
+            t.toolbar_icon.gamma_multiply(0.45)
+        } else {
+            t.toolbar_icon
+        };
+        let icon_rect = Rect::from_center_size(
+            pos2(rect.left() + 8.0 + 24.0, rect.center().y),
+            vec2(16.0, 14.0),
+        );
+        icons::draw(&painter, Icon::PhotoStack, icon_rect, icon_color, 1.2);
+        painter.text(
+            pos2(icon_rect.right() + 7.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            &g.name,
+            FontId::new(12.5, egui::FontFamily::Proportional),
+            if g.offline {
+                t.text_secondary.gamma_multiply(0.8)
+            } else {
+                t.text_primary
+            },
+        );
+        if g.photos > 0 {
+            painter.text(
+                pos2(rect.right() - 14.0, rect.center().y),
+                Align2::RIGHT_CENTER,
+                g.photos.to_string(),
+                FontId::new(11.5, egui::FontFamily::Proportional),
+                t.sidebar_section_text,
+            );
+        }
+        let mut tip = format!("导入时间：{}", g.when);
+        if g.offline {
+            tip.push_str("\n离线：导出时的原路径当前不可读");
+        }
+        if !g.abs_paths.is_empty() {
+            tip.push_str(&format!("\n原路径：{}", g.abs_paths.join("、")));
+        }
+        tip.push_str("\n右键可从导入的索引中移除（不碰原文件）");
+        resp.clone().on_hover_text(tip);
+        if resp.clicked() {
+            // 展开/收起来源节点与「文件夹」组一致：点组头切换
+            actions.push(SidebarAction::ToggleSectionM4(format!(
+                "导入的索引#{}",
+                g.source_id
+            )));
+        }
+        if resp.secondary_clicked() {
+            actions.push(SidebarAction::ImportSourceContext(
+                g.source_id,
+                resp.interact_pointer_pos().unwrap_or(rect.center()),
+            ));
+        }
+
+        let marks = MarkSet {
+            imported: true,
+            offline: g.offline,
+            abs_paths: &g.abs_paths,
+            local_dupes: &g.local_dupes,
+        };
+        if !rows.is_empty() {
+            render_tree_rows(ui, rows, active, &marks, ctx, actions, "imported-tree");
+        }
+    }
+}
+
+/// 树区最大高度：**必须给上界**，否则 `ScrollArea::auto_shrink([false, false])`
+/// 会吃掉侧栏剩余高度，把它之后的「导入的索引 / 标签 / 相册」整组挤到面板外
+/// （`IDX-22` ① 要求左栏顺序「图库→文件夹→导入的索引→标签→相册」，四组都得看得见）。
+///
+/// 260 px ≈ 10 行目录；再多的目录在框内滚动，其余分组始终留在视野里。
+const TREE_MAX_H: f32 = 260.0;
+
+/// 一组文件夹行（本机树 / 导入来源树共用同一套绘制与交互，IDX-21 ②）。
+///
+/// `marks` 控制「导入的索引」专用的视觉标记（导入角标 / 离线置灰 / 本机已有），
+/// 本机树传默认值，行为与 M2 时期逐像素一致。
+fn render_tree_rows(
+    ui: &mut Ui,
+    rows: &[FolderRowView],
+    active: Option<i64>,
+    marks: &MarkSet<'_>,
+    ctx: &SidebarCtx<'_>,
+    actions: &mut Vec<SidebarAction>,
+    salt: &str,
+) {
+    let t = *ctx.theme;
     let row_h = Metrics::SIDEBAR_ROW_H;
     let total = rows.len();
 
-    // 目录多时虚拟化（1 万目录也不卡）
+    // 目录多时虚拟化（1 万目录也不卡）。
+    // 高度封顶：`auto_shrink([false, false])` 会撑满可用高度，把它之后的
+    // 「导入的索引 / 标签 / 相册」挤出面板（见 `TREE_MAX_H` 注释）。
     egui::ScrollArea::vertical()
-        .id_salt("folder-tree")
+        .id_salt(salt)
+        .max_height(TREE_MAX_H)
         .auto_shrink([false, false])
         .show_rows(ui, row_h, total, |ui, range| {
             for i in range {
                 let Some(row) = rows.get(i) else { continue };
-                let active = matches!(lib.view, View::Folder(id) if Some(id) == row.folder_id);
+                let active = active.is_some() && active == row.folder_id;
                 let (rect, resp) =
                     ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
                 let painter = ui.painter_at(rect);
@@ -528,19 +846,53 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
                 }
 
                 // 线性文件夹图标（A 样式：描边文件夹 + 树线）
+                // IDX-21 ③：导入来的树用「导入文件夹」图标（同线宽同尺寸 +
+                // 右下角小角标）；离线时整行置灰并画断开角标——**不只靠颜色**，
+                // 悬停提示里还会写明原路径与状态。
+                let imported = marks.is_imported();
+                let icon_color = if imported && marks.offline {
+                    t.toolbar_icon.gamma_multiply(0.45)
+                } else {
+                    t.toolbar_icon
+                };
                 let icon_rect =
                     Rect::from_center_size(pos2(icon_x, rect.center().y), vec2(16.0, 14.0));
-                draw_folder_icon_line(&painter, icon_rect, t.toolbar_icon);
+                draw_folder_icon_line(&painter, icon_rect, icon_color);
+                if imported {
+                    let badge = Rect::from_center_size(
+                        pos2(icon_rect.right() - 1.0, icon_rect.bottom() - 1.0),
+                        vec2(8.0, 8.0),
+                    );
+                    icons::draw(
+                        &painter,
+                        if marks.offline { Icon::Close } else { Icon::Import },
+                        badge,
+                        if marks.offline {
+                            t.text_secondary.gamma_multiply(0.7)
+                        } else {
+                            t.toolbar_icon
+                        },
+                        1.0,
+                    );
+                }
 
                 // 文字与图标间距：图标右沿 + 7
                 let text_x = icon_x + 16.0 + 7.0;
+                let text_color = if imported && marks.offline {
+                    t.text_secondary.gamma_multiply(0.8)
+                } else {
+                    t.text_primary
+                };
                 painter.text(
                     pos2(text_x, rect.center().y),
                     Align2::LEFT_CENTER,
                     &row.name,
                     FontId::new(12.5, egui::FontFamily::Proportional),
-                    t.text_primary,
+                    text_color,
                 );
+                if imported && let Some(tip) = marks.tip(row) {
+                    resp.clone().on_hover_text(tip);
+                }
                 // 计数右对齐、灰色；为 0 不显示
                 //
                 // M2：关注文件夹多一个**状态点**（`04` §3.2 第三行）。有任务时把计数
@@ -744,5 +1096,100 @@ fn tray(ui: &mut Ui, lib: &Library, ctx: &mut SidebarCtx<'_>, actions: &mut Vec<
     );
     if cresp.clicked() {
         actions.push(SidebarAction::TrayClear);
+    }
+}
+
+#[cfg(test)]
+mod imported_index_tests {
+    use super::*;
+
+    fn row(path: &str, name: &str, count: u32) -> FolderRowView {
+        FolderRowView {
+            path: path.to_string(),
+            name: name.to_string(),
+            folder_id: Some(7),
+            count,
+            has_children: false,
+            collapsed: false,
+            depth: 1,
+        }
+    }
+
+    #[test]
+    fn local_rows_get_no_import_tip() {
+        let marks = MarkSet::default();
+        assert!(!marks.is_imported());
+        assert_eq!(
+            marks.tip(&row("/Users/me/Photos", "Photos", 12)),
+            None,
+            "本机文件夹不该出现「来自导入的索引」之类的提示"
+        );
+    }
+
+    #[test]
+    fn imported_tip_carries_original_path_and_export_time_count() {
+        let abs = vec!["/Volumes/Archive/2020".to_string()];
+        let marks = MarkSet {
+            imported: true,
+            offline: false,
+            abs_paths: &abs,
+            local_dupes: &[],
+        };
+        let tip = marks.tip(&row("/media/2020", "2020", 340)).unwrap();
+        assert!(tip.contains("来自导入的索引"), "{tip}");
+        assert!(tip.contains("/Volumes/Archive/2020"), "要给原路径：{tip}");
+        // 「导出时计数」而不是「N 张」：导入后本机可能又扫过，口径必须说清。
+        assert!(tip.contains("导出时计数：340"), "{tip}");
+        // 永久禁令：任何提示都不许出现 ETA/预计/剩余。
+        for banned in ["预计", "剩余", "ETA"] {
+            assert!(!tip.contains(banned), "提示里不许出现 {banned}：{tip}");
+        }
+    }
+
+    #[test]
+    fn offline_imported_rows_say_offline_in_words_not_only_by_color() {
+        let abs = vec!["/Volumes/Unplugged".to_string()];
+        let marks = MarkSet {
+            imported: true,
+            offline: true,
+            abs_paths: &abs,
+            local_dupes: &[],
+        };
+        let tip = marks.tip(&row("/media/x", "x", 5)).unwrap();
+        assert!(
+            tip.contains("离线"),
+            "离线必须用文字表达，不能只靠置灰：{tip}"
+        );
+        assert!(tip.contains("/Volumes/Unplugged"), "{tip}");
+    }
+
+    #[test]
+    fn local_duplicate_is_marked_but_count_stays_one() {
+        let abs = vec!["/Users/me/Photos".to_string()];
+        let dupes = vec!["/Users/me/Photos".to_string()];
+        let marks = MarkSet {
+            imported: true,
+            offline: false,
+            abs_paths: &abs,
+            local_dupes: &dupes,
+        };
+        let tip = marks.tip(&row("/Users/me/Photos", "Photos", 88)).unwrap();
+        assert!(tip.contains("本机已有"), "{tip}");
+        assert!(tip.contains("以本机为准"), "{tip}");
+        // 提示只说「以本机为准」，计数依旧是该行自己的数，不翻倍。
+        assert!(tip.contains("导出时计数：88"), "{tip}");
+    }
+
+    #[test]
+    fn import_group_default_is_renderable() {
+        // Default 必须能直接喂给绘制代码（`refresh_sidebar_groups` 早期就构造过空表）。
+        let g = ImportGroup::default();
+        assert_eq!(g.photos, 0);
+        assert!(!g.offline);
+        assert!(g.abs_paths.is_empty());
+        assert!(g.local_dupes.is_empty());
+        // 名字与时间都要能参与 `format!` 渲染，不能是占位 None。
+        assert_eq!(g.name, "");
+        assert_eq!(g.when, "");
     }
 }

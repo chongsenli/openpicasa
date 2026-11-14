@@ -273,6 +273,16 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
+/// M4.3 IDX-14：全量重建的确认文案（诊断页第三处全库入口与「全量重建」按钮收口）。
+///
+/// 逐字与 `app.rs::rebuild_root` / `DiagAction::RebuildAll` 的行为一致：
+/// 这是**强制重探的全量重建**，旧缩略图保留到被新图原子替换，原图 / 用户标记都不受影响。
+/// 抽成纯函数便于单测钉住「不再宣称清空全部缩略图」。
+pub fn rebuild_reason() -> &'static str {
+    "对全部关注文件夹做全量重建（逐张强制重新探测）；旧缩略图保留到被新图替换，\
+     原图文件与收藏 / 标签 / 说明 / 相册等用户标记不受影响。耗时较长，默认取消。"
+}
+
 /// 画诊断窗口。返回用户点出的动作（最多一个）。
 pub fn show(
     ctx: &Context,
@@ -319,22 +329,27 @@ pub fn show(
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if *confirm_rebuild {
+                        // IDX-11 / IDX-14：默认取消 —— 取消按钮先放且默认聚焦，
+                        // 真正重建必须再点一次「确认重建？」（两击确认，安全默认）。
+                        let cancel = ui.button("取消");
+                        cancel.request_focus();
+                        if cancel.clicked() {
+                            *confirm_rebuild = false;
+                        }
                         if ui
                             .button(
                                 RichText::new("确认重建？")
                                     .color(Color32::from_rgb(0xB0, 0x30, 0x20)),
                             )
+                            .on_hover_text(rebuild_reason())
                             .clicked()
                         {
                             action = Some(DiagAction::RebuildAll);
                             *confirm_rebuild = false;
                         }
-                        if ui.button("取消").clicked() {
-                            *confirm_rebuild = false;
-                        }
                     } else if ui
                         .button("全量重建…")
-                        .on_hover_text("清空全部缩略图并重新扫描所有根目录。耗时很长")
+                        .on_hover_text(rebuild_reason())
                         .clicked()
                     {
                         *confirm_rebuild = true;
@@ -606,6 +621,18 @@ mod tests {
         assert_eq!(human_bytes(2048), "2 KB");
         assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MB");
         assert!(human_bytes(2 * 1024 * 1024 * 1024).ends_with("GB"));
+    }
+
+    #[test]
+    fn rebuild_reason_matches_idx14_full_rebuild_wording() {
+        let s = rebuild_reason();
+        assert!(s.contains("全量重建"));
+        assert!(s.contains("强制重新探测"));
+        assert!(s.contains("旧缩略图保留到被新图替换"));
+        assert!(s.contains("用户标记不受影响"));
+        assert!(s.contains("默认取消"));
+        // 旧文案说「清空全部缩略图」，与 IDX-14「保留旧图到替换」冲突，不许回来。
+        assert!(!s.contains("清空全部缩略图"));
     }
 
     #[test]

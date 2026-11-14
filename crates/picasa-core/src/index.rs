@@ -285,6 +285,9 @@ struct Task {
     last_update: f64,
     /// 进入 `暂停` 前的状态，恢复时原样回去
     resume_to: Option<IndexState>,
+    /// 用户逐任务暂停标记（M4.3）：系统休眠恢复 `resume_all()` 不得越过它。
+    /// 这是内部状态，**不**进 [`TaskSnapshot`]。
+    user_paused: bool,
 }
 
 impl Task {
@@ -657,6 +660,8 @@ impl IndexBoard {
             };
             t.reason = None;
             t.last_update = now;
+            // 终态不再需要逐任务暂停标记；新批次也会经 `new_task` 重置。
+            t.user_paused = false;
             if t.failed == 0 && t.frozen {
                 t.percent_displayed = 100;
             }
@@ -682,7 +687,9 @@ impl IndexBoard {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut changed = false;
         for t in inner.tasks.iter_mut() {
-            if t.state.is_running() && t.state != IndexState::Paused {
+            // 已被用户逐任务暂停的任务：保留它自己的 reason/resume_to，
+            // 不把「系统休眠」盖到用户暂停上（M4.3 TC-M43-05）。
+            if t.state.is_running() && t.state != IndexState::Paused && !t.user_paused {
                 t.resume_to = Some(t.state);
                 t.state = IndexState::Paused;
                 t.reason = Some(reason.to_string());
@@ -701,12 +708,63 @@ impl IndexBoard {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut changed = false;
         for t in inner.tasks.iter_mut() {
-            if t.state == IndexState::Paused {
+            // 用户逐任务暂停的任务必须**跳过**：系统休眠恢复不能越过用户意愿
+            // （M4.3 TC-M43-05 / IDX-07）。只有系统暂停的能自动回去。
+            if t.state == IndexState::Paused && !t.user_paused {
                 t.state = t.resume_to.take().unwrap_or(IndexState::Thumbnailing);
                 t.reason = None;
                 t.last_update = now;
                 changed = true;
             }
+        }
+        drop(inner);
+        if changed {
+            self.bump();
+        }
+    }
+
+    /// 用户逐任务暂停（M4.3 阶段 1）：只动一个任务，并打上 `user_paused`
+    /// 让 `resume_all()` 的系统恢复不会越过它。幂等：已是本任务的暂停则不变。
+    pub fn pause_one(&self, path: &str, reason: &str) {
+        let now = now_secs();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut changed = false;
+        if let Some(t) = inner.find_mut(path) {
+            // 只接管还在跑的任务（终态任务不许被「暂停」复活）。
+            if !t.user_paused && t.state.is_running() {
+                if t.state != IndexState::Paused {
+                    // 与 pause_all 一致：记住进入暂停前的状态。
+                    t.resume_to = Some(t.state);
+                }
+                // 若此刻已是系统暂停（Paused 且 user_paused=false），
+                // 保留 pause_all 记下的 resume_to，不把 Paused 当成恢复目标。
+                t.user_paused = true;
+                t.state = IndexState::Paused;
+                t.reason = Some(reason.to_string());
+                t.last_update = now;
+                changed = true;
+            }
+        }
+        drop(inner);
+        if changed {
+            self.bump();
+        }
+    }
+
+    /// 解除用户逐任务暂停（M4.3 阶段 1）：清标记并恢复进入暂停前的状态。
+    /// 幂等：没有 `user_paused` 标记则不变；`revision` 只在真的变了时自增。
+    pub fn resume_one(&self, path: &str) {
+        let now = now_secs();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut changed = false;
+        if let Some(t) = inner.find_mut(path)
+            && t.user_paused
+        {
+            t.user_paused = false;
+            t.state = t.resume_to.take().unwrap_or(IndexState::Thumbnailing);
+            t.reason = None;
+            t.last_update = now;
+            changed = true;
         }
         drop(inner);
         if changed {
@@ -776,6 +834,7 @@ fn new_task(path: String, name: String, batch: u64, now: f64) -> Task {
         reason: None,
         last_update: now,
         resume_to: None,
+        user_paused: false,
     }
 }
 
@@ -933,6 +992,54 @@ mod tests {
         assert_eq!(s.tasks[0].state, IndexState::Thumbnailing);
         assert_eq!(s.tasks[0].percent, Some(10), "恢复后不得回退");
         assert!(s.tasks[0].reason.is_none());
+    }
+
+    /// M4.3 TC-M43-05 / IDX-07：用户对 A 的逐任务暂停，
+    /// 系统休眠恢复（`resume_all`）不得越过；`pause_all` 也不得盖掉它的 reason。
+    #[test]
+    fn pause_one_is_protected_from_resume_all() {
+        let b = IndexBoard::new();
+        b.begin_batch(&["/p/a".into(), "/p/b".into()]);
+        b.mark_scanning("/p/a");
+        b.mark_scanning("/p/b");
+        b.freeze_denominator("/p/a", 10, 0);
+        b.freeze_denominator("/p/b", 20, 0);
+        b.note_thumb_ok("/p/a");
+        b.note_thumb_ok("/p/b");
+
+        // 用户只暂停 A。
+        b.pause_one("/p/a", "用户暂停");
+        let s = b.snapshot();
+        let a = s.task_by_path("/p/a").unwrap();
+        assert_eq!(a.state, IndexState::Paused);
+        assert_eq!(a.reason.as_deref(), Some("用户暂停"));
+
+        // 系统休眠：pause_all 不能把「系统休眠」盖到 A 上，B 正常暂停。
+        b.pause_all("系统休眠");
+        let s = b.snapshot();
+        assert_eq!(
+            s.task_by_path("/p/a").unwrap().reason.as_deref(),
+            Some("用户暂停"),
+            "pause_all 不得覆盖用户逐任务暂停的 reason"
+        );
+        assert_eq!(s.task_by_path("/p/b").unwrap().state, IndexState::Paused);
+
+        // 系统恢复：A 仍停在用户暂停，B 回到暂停前的状态。
+        b.resume_all();
+        let s = b.snapshot();
+        let a = s.task_by_path("/p/a").unwrap();
+        let bb = s.task_by_path("/p/b").unwrap();
+        assert_eq!(a.state, IndexState::Paused, "A 不随系统恢复");
+        assert_eq!(a.reason.as_deref(), Some("用户暂停"));
+        assert_eq!(bb.state, IndexState::Thumbnailing, "B 恢复原状态");
+        assert!(bb.reason.is_none());
+
+        // 用户主动 resume_one 才真正恢复 A，并回到暂停前状态。
+        b.resume_one("/p/a");
+        let s = b.snapshot();
+        let a = s.task_by_path("/p/a").unwrap();
+        assert_eq!(a.state, IndexState::Thumbnailing);
+        assert!(a.reason.is_none());
     }
 
     #[test]

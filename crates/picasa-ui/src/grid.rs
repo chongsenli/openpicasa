@@ -30,7 +30,7 @@ use eframe::egui::{
 };
 use picasa_core::thumbs::JobKind;
 use picasa_core::{IndexSnapshot, ThumbJob, ThumbService, ViewMode, library};
-use picasa_db::{Db, PhotoRow};
+use picasa_db::{Db, PhotoRow, ThumbState};
 
 use crate::icons::{self, Icon};
 use crate::index_progress;
@@ -1206,7 +1206,11 @@ pub fn show(
             // (1) 本帧可见格 ∩ 框选矩形 → 并入累积集（占位格不参与，沿用 M1 语义）。
             let frame_ids = (first..last).filter_map(|index| {
                 let row = photos.get(index)?;
-                if row.thumb_state == 2 || row.thumb_state == 3 || row.thumb_state == 0 {
+                if row.thumb_state == 2
+                    || row.thumb_state == 3
+                    || row.thumb_state == 0
+                    || row.thumb_state == ThumbState::CloudOnly as i64
+                {
                     return None;
                 }
                 let cr = layout.thumb_rect(index)?.translate(origin.to_vec2());
@@ -1297,8 +1301,15 @@ pub fn show(
             // 未就绪就画**灰底「待生成」**，不隐藏、不放低清预览：
             // 隐藏会让栅格在索引过程中不断重排，用户正看的那张图会随缩略图完成而位移。
             let failed = row.thumb_state == 2 || row.thumb_state == 3;
-            let placeholder =
-                failed || (row.thumb_state == 0 && indexing_folders.contains(&row.folder_id));
+            // 云端占位（`ThumbState::CloudOnly`）：文件在、本机没内容。
+            // 它既不是「失败」（不需要用户处理），也不是「待生成」（这一轮不会去生成）。
+            // 注意：`CloudOnly` **不**在这里决定占位。一行可能是「原图在云上、
+            // 但索引库里有缩略图」（导入的索引包就是这样），那必须把图画出来。
+            // 只有真到「库里也没 BLOB」时，`tex_state` 才会是 `CloudOnly`，
+            // 那时才走下面的占位分支。
+            let cloud_only = row.thumb_state == ThumbState::CloudOnly as i64;
+            let placeholder = failed
+                || (row.thumb_state == 0 && indexing_folders.contains(&row.folder_id));
             // 描边目标：方格 = 实际贴图区（Ready 时是 contain 后的 fitted），
             // masonry = 去掉文件名带的图区。默认 img_rect，Ready 分支里覆写。
             let mut frame = img_rect;
@@ -1307,7 +1318,14 @@ pub fn show(
             // M4.2 `M42-PERF-00`：本格是否画了占位（未出图）。只做统计，不改绘制。
             let mut blank = placeholder;
             if placeholder {
-                index_progress::draw_placeholder(&painter, img_rect, theme, failed);
+                let state = if failed {
+                    index_progress::Placeholder::Failed
+                } else if cloud_only {
+                    index_progress::Placeholder::CloudOnly
+                } else {
+                    index_progress::Placeholder::Pending
+                };
+                index_progress::draw_placeholder_state(&painter, img_rect, theme, state);
             } else if use_atlas {
                 // ---- 微缩图集路径（`07-A` §A-2.2，格宽 ≤ 48 px）
                 //
@@ -1317,8 +1335,14 @@ pub fn show(
                 match draw_from_atlas(&painter, atlas, db, row, img_rect) {
                     true => {}
                     false => {
-                        // 还没进图集：画占位，等它进来（不阻塞本帧）
-                        index_progress::draw_placeholder(&painter, rect, theme, false);
+                        // 还没进图集：画占位，等它进来（不阻塞本帧）。
+                        // 云端占位在这里也走静默灰格，不写字（v0.7-dev23）。
+                        let state = if cloud_only {
+                            index_progress::Placeholder::CloudOnly
+                        } else {
+                            index_progress::Placeholder::Pending
+                        };
+                        index_progress::draw_placeholder_state(&painter, rect, theme, state);
                         blank = true;
                     }
                 }
@@ -1351,6 +1375,15 @@ pub fn show(
                     }
                     TexState::Failed => {
                         index_progress::draw_placeholder(&painter, rect, theme, true);
+                        blank = true;
+                    }
+                    TexState::CloudOnly => {
+                        index_progress::draw_placeholder_state(
+                            &painter,
+                            rect,
+                            theme,
+                            index_progress::Placeholder::CloudOnly,
+                        );
                         blank = true;
                     }
                 }
@@ -1699,7 +1732,9 @@ fn pump_atlas_from_db(
             });
             continue;
         }
-        if row.thumb_state != 1 {
+        // `CloudOnly(4)` 也要试：原图在云上，但库里可能有缩略图
+        // （导入的索引包就是这样）。只管「有没有 BLOB」，不管状态标记。
+        if row.thumb_state != 1 && row.thumb_state != ThumbState::CloudOnly as i64 {
             continue;
         }
         let Ok(Some(buf)) = db.get_thumb(row.id, 0) else {

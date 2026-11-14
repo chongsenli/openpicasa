@@ -49,6 +49,8 @@ pub enum TopbarAction {
     PickSortKey(SortKey),
     /// 翻转排序方向
     ToggleSortDirection,
+    /// 切换「有缩略图的排在前面」（只影响显示顺序）
+    ToggleThumbsFirst,
     /// 打开筛选面板（原「筛选」按钮）
     ToggleFilterMenu,
     /// 打开或关闭「…」弹出菜单
@@ -882,7 +884,12 @@ pub fn more_menu(
 }
 
 /// 排序弹出菜单：与截图观感一致的圆角白卡。返回选中的动作。
-pub fn sort_menu(ui: &mut Ui, at: Pos2, current: picasa_db::SortSpec) -> Option<TopbarAction> {
+pub fn sort_menu(
+    ui: &mut Ui,
+    at: Pos2,
+    current: picasa_db::SortSpec,
+    thumbs_first: bool,
+) -> Option<TopbarAction> {
     let mut action = None;
     egui::Area::new(ui.scope_id().with("topbar-sort-menu"))
         .fixed_pos(at)
@@ -926,6 +933,22 @@ pub fn sort_menu(ui: &mut Ui, at: Pos2, current: picasa_db::SortSpec) -> Option<
                             action = Some(TopbarAction::PickSortKey(key));
                             ui.close();
                         }
+                    }
+                    ui.separator();
+                    // 用户要求：有缩略图的往前放，没有的单独排在一起。
+                    // 这是「怎么排」之外的显示策略，所以单独一项，不混进排序键。
+                    let mark = if thumbs_first { "✓ " } else { "   " };
+                    if ui
+                        .add(
+                            egui::Button::new(format!("{mark}有缩略图的排在前面"))
+                                .frame(false)
+                                .min_size(vec2(ui.available_width(), 22.0)),
+                        )
+                        .on_hover_text("没有缩略图的（含云端未下载、生成失败）会集中排在后面")
+                        .clicked()
+                    {
+                        action = Some(TopbarAction::ToggleThumbsFirst);
+                        ui.close();
                     }
                     ui.separator();
                     let dir = if current.descending {

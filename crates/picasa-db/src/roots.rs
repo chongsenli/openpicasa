@@ -36,20 +36,28 @@ impl Db {
                 if case_insensitive { 1 } else { 0 }
             ],
         )?;
-        Ok(self
-            .conn
-            .query_row("SELECT id FROM roots WHERE path = ?1", params![path], |r| {
-                r.get(0)
-            })?)
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM roots WHERE path = ?1",
+            params![path],
+            |r| r.get(0),
+        )?;
+        // 重新添加同路径 = 重新建立一个可索引的根，之前「索引已移除」的
+        // 呈现标记必须一起清掉（`mark_root_index_removed` 的注释解释了它为什么
+        // 是独立于 `state` 的一位）。放这里是为了让「加根」只有一条路径可信，
+        // 不依赖每个调用点各自记得清。
+        let _ = self.clear_root_index_removed(id);
+        Ok(id)
     }
 
     /// 根目录列表。`include_closed = false` 时只返回 active（树用这个）。
     pub fn roots(&self, include_closed: bool) -> Result<Vec<RootRow>> {
         let sql = if include_closed {
-            "SELECT id, path, path_key, state, added_at, closed_at, case_insensitive
+            "SELECT id, path, path_key, state, added_at, closed_at, case_insensitive,
+                    origin, import_source_id
              FROM roots ORDER BY path"
         } else {
-            "SELECT id, path, path_key, state, added_at, closed_at, case_insensitive
+            "SELECT id, path, path_key, state, added_at, closed_at, case_insensitive,
+                    origin, import_source_id
              FROM roots WHERE state = 0 ORDER BY path"
         };
         let mut st = self.conn.prepare(sql)?;
@@ -61,7 +69,8 @@ impl Db {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, path, path_key, state, added_at, closed_at, case_insensitive
+                "SELECT id, path, path_key, state, added_at, closed_at, case_insensitive,
+                        origin, import_source_id
                  FROM roots WHERE id = ?1",
                 params![id],
                 map_root,
@@ -73,7 +82,8 @@ impl Db {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, path, path_key, state, added_at, closed_at, case_insensitive
+                "SELECT id, path, path_key, state, added_at, closed_at, case_insensitive,
+                        origin, import_source_id
                  FROM roots WHERE path = ?1",
                 params![nfc(path)],
                 map_root,
@@ -194,6 +204,8 @@ fn map_root(r: &rusqlite::Row<'_>) -> rusqlite::Result<RootRow> {
         added_at: r.get(4)?,
         closed_at: r.get(5)?,
         case_insensitive: r.get::<_, i64>(6)? != 0,
+        origin: r.get(7)?,
+        import_source_id: r.get(8)?,
     })
 }
 
@@ -234,4 +246,69 @@ impl Db {
         )?;
         Ok(())
     }
+
+    /// 彻底删掉一个关注根（IDX-21 ⑤：导入来源整组移除时用）。
+    ///
+    /// 只删 `roots` 行本身——`folders`/`photos` 必须已经由
+    /// `clear_index_for_root` 清干净（它负责标记快照与作废任务意图）。
+    /// **不碰磁盘**：只动自有 DB。
+    pub fn delete_root_row(&self, id: i64) -> Result<()> {
+        let _ = self.set_setting_raw(&index_removed_key(id), None);
+        self.conn
+            .execute("DELETE FROM exclusions WHERE root_id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM roots WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// 标记「这个根的索引已被用户移除」（IDX-10 / IDX-11）。
+    ///
+    /// ## 为什么另开一个标记，而不是复用 `state`
+    ///
+    /// `roots.state` 只有 0/1 两态，且 1 = **用户主动关闭**（`close_root`，
+    /// 索引原样保留，随时可重开）。移除索引是另一件事：索引真的没了，
+    /// 用户要能一眼看出「这行是删过索引的空壳」而不是「我不小心关掉了」。
+    /// 复用同一位会让这两种状态在界面上不可区分，也会让「关闭但保留索引」
+    /// 从此无法自证。
+    ///
+    /// 用 `settings["m43_index_removed_<id>"]` 而不是加列：这一位是
+    /// **纯 UI 呈现辅助**，查询侧一条都不依赖它；为它做一次 v9→v10 迁移
+    /// （全库 rebuild 表）不划算，也与既有 `m43_import_hidden_<id>` 的
+    /// 范式一致。
+    pub fn mark_root_index_removed(&self, id: i64) -> Result<()> {
+        self.set_setting_raw(&index_removed_key(id), Some("1"))
+    }
+
+    /// 清掉「索引已移除」标记（重新索引 / 重新添加同路径时调）。
+    pub fn clear_root_index_removed(&self, id: i64) -> Result<()> {
+        self.set_setting_raw(&index_removed_key(id), None)
+    }
+
+    /// 该根是否处于「索引已移除」状态。
+    pub fn root_index_removed(&self, id: i64) -> Result<bool> {
+        self.setting_bool(&index_removed_key(id), false)
+    }
+
+    /// 所有「索引已移除」的根 id（快照构建时一次读出来，别每行查一次）。
+    pub fn index_removed_root_ids(&self) -> Result<Vec<i64>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT key FROM settings WHERE key LIKE 'm43_index_removed_%' AND value = '1'")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for key in rows {
+            let key = key?;
+            if let Some(rest) = key.strip_prefix("m43_index_removed_")
+                && let Ok(id) = rest.parse::<i64>()
+            {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// `settings` 里「该根索引已移除」的键名（与 `m43_import_hidden_<id>` 同范式）。
+fn index_removed_key(root_id: i64) -> String {
+    format!("m43_index_removed_{root_id}")
 }

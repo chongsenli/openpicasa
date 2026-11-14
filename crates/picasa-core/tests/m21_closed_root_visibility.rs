@@ -168,3 +168,59 @@ fn excluded_subfolder_photos_disappear_from_the_parent_view() {
         "被排除子目录的照片仍在栅格里"
     );
 }
+
+/// 回归：**只靠 `tree_dirty` 的节流路径**下，「重新打开」也必须让根出现在树里。
+///
+/// 实机缺陷（v0.7-dev20 之后发现）：`Library::add_root` 只更新 `root_paths` 就返回，
+/// 没有把 `tree_dirty` 置真。UI 侧 `flush_reload` 里是先 `take_tree_dirty()` 再决定
+/// 要不要 `reload_tree()`——拿到 false 就直接跳过重建，于是「重新打开」在侧栏里
+/// 什么也没发生，用户看到的是「点了没反应」。
+///
+/// 上面 `closing_a_root_hides_its_photos_from_every_entry` 的 ⑥ 手工调了
+/// `reload_tree()`，正好绕过了这条路径，所以当时没测出来。这里只走 `take_tree_dirty()`
+/// 这一步，模拟 UI 的真实节流。
+#[test]
+fn reopening_a_root_marks_the_tree_dirty_for_the_throttled_reload() {
+    let (_tmp, mut lib, _keep, gone) = fixture();
+    lib.close_root(&gone);
+    // 关掉之后 UI 会把脏标记消化掉（相当于一次 flush_reload）
+    let _ = lib.take_tree_dirty();
+    let gone_key = picasa_core::paths::canonical_string(&gone);
+    assert!(
+        !lib.roots.iter().any(|r| r.path == gone_key),
+        "关闭后树里不该还有该根"
+    );
+
+    // 「重新打开」——这是用户点按钮后的唯一动作
+    lib.add_root(&gone);
+
+    assert!(
+        lib.take_tree_dirty(),
+        "add_root 必须把树标脏，否则 UI 的节流重建会被整个跳过（点「重新打开」像没反应）"
+    );
+    lib.reload_tree().unwrap();
+    assert!(
+        lib.roots.iter().any(|r| r.path == gone_key),
+        "重新打开后该根必须回到左栏树里：{:?}",
+        lib.roots.iter().map(|r| r.path.clone()).collect::<Vec<_>>()
+    );
+
+    // 而且照片要能立刻预览（索引从没删过，不需要重扫）
+    lib.reload_photos().unwrap();
+    assert_eq!(
+        lib.photos_total, 3,
+        "重新打开后照片必须立刻回到栅格（索引一直在，不该等重扫）"
+    );
+    assert!(
+        lib.photos.iter().any(|p| p.name == "3.jpg"),
+        "gone 根的照片没回到列表：{:?}",
+        lib.photos.iter().map(|p| p.name.clone()).collect::<Vec<_>>()
+    );
+    // 左栏那行也要有非零计数，否则用户看到的是「根在、但是 0 张」
+    let row = lib
+        .roots
+        .iter()
+        .find(|r| r.path == gone_key)
+        .expect("根必须回到树里");
+    assert_eq!(row.count, 1, "左栏该根的计数必须跟着索引走");
+}

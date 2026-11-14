@@ -20,10 +20,11 @@ use rusqlite::{OptionalExtension, params};
 /// `TaskRow` 的列清单 —— **全项目只此一份**。
 ///
 /// 与 `lib.rs::photo_cols()` 同样的道理：`recent_tasks` / `task` / `unfinished_tasks`
-/// 三处 SELECT 各写一遍列，加字段时漏改一处就只在运行期炸。收口之后
-/// `map_task` 的下标与它是一对。
+/// / `finished_tasks` 四处 SELECT 各写一遍列，加字段时漏改一处就只在运行期炸。
+/// 收口之后 `map_task` 的下标与它是一对。
 const TASK_COLS: &str = "task_id, root_id, scope_path, kind, status, started_at, finished_at,
-                         error_code, outcome, processed, failed, duration_ms";
+                         error_code, outcome, processed, failed, duration_ms,
+                         cancel_reason, user_paused, scope_kind, generation";
 
 fn map_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
     Ok(TaskRow {
@@ -39,6 +40,10 @@ fn map_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         processed: r.get(9)?,
         failed: r.get(10)?,
         duration_ms: r.get(11)?,
+        cancel_reason: r.get(12)?,
+        user_paused: r.get::<_, i64>(13)? != 0,
+        scope_kind: r.get(14)?,
+        generation: r.get(15)?,
     })
 }
 
@@ -141,6 +146,22 @@ impl Db {
                     LIMIT ?1
                )",
             params![keep as i64],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 清空任务历史（m10756「索引管理里增加清空日志按钮」）。
+    ///
+    /// 只删**已结束**的任务行（`finished_at IS NOT NULL`）；正在跑 / 排队 / 暂停的任务
+    /// 一条都不删——与 [`Db::prune_task_history`] 同一条底线，理由也一样：删了就查不到
+    /// 该恢复什么。失败明细 `index_task_failures` 靠 `ON DELETE CASCADE` 一起走，
+    /// 所以「失败分类」角标会跟着归零，这正是「清空日志」的预期效果。
+    ///
+    /// 返回删掉的任务条数（不含级联的失败明细行数）。
+    pub fn clear_task_history(&self) -> Result<u64> {
+        let n = self.conn.execute(
+            "DELETE FROM index_tasks WHERE finished_at IS NOT NULL",
+            [],
         )?;
         Ok(n as u64)
     }

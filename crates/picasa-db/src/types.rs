@@ -66,6 +66,11 @@ pub struct PhotoFilter {
     pub tag: Option<String>,
     /// 只看属于这个相册的（按名称）。`M4-ORG-03`。
     pub album: Option<String>,
+    /// 只看这批照片 id（IDX-19「本次导入 · N 张」的临时 scope）。
+    ///
+    /// `None` = 不过滤；`Some(vec)` 且为空集 = **明确「没有照片」**（空导入），
+    /// 与「不过滤」必须区分，否则空批次会显示整个图库。
+    pub ids: Option<Vec<i64>>,
 }
 
 impl PhotoFilter {
@@ -86,6 +91,7 @@ impl PhotoFilter {
             || self.starred_only
             || self.tag.is_some()
             || self.album.is_some()
+            || self.ids.is_some()
     }
 }
 
@@ -119,6 +125,13 @@ impl SizeClass {
         }
     }
 }
+
+/// 键集翻页的游标：上一页最后一行的 `(eff_taken_at, name_key)`。
+///
+/// 用 `name_key` 而不是 `id` 是因为 `SortSpec::order_by(TakenAt)` 的平局键是
+/// `name_key ASC`——同一秒拍的照片按文件名排，拿 `id` 当游标会跳过整批（见
+/// `Db::range_keyset` 的注释）。`name_key` 已做小写 + NFC，跨平台一致。
+pub type PageCursor = (i64, String);
 
 /// 一首照片记录（含它所在文件夹的路径，省一次 join 查询）。
 #[derive(Clone, Debug, Default)]
@@ -228,6 +241,12 @@ pub struct ThumbBuf {
 /// ⚠️ `Failed` 与 `Corrupt` 的区别是**「还会不会再试」**，不是「坏得严不严重」：
 /// `Failed`(2) 会在下一轮自动再试（卷可能回来了），`Corrupt`(3) 是终态。
 /// M2.2 §4.5 把 `FailureKind` 映射到这两个值，见 [`FailureKind::thumb_state`]。
+///
+/// `CloudOnly`(4) 是 M4.3 补遗新增的一态：文件**没有坏、也没有读失败**，只是
+/// 内容还在云端（OneDrive / iCloud 的 dataless 占位文件），本机没有任何字节可读。
+/// 与 `Failed` 的关键区别是**不该算进「失败数」、也不该被「重试失败项」反复碰**——
+/// 重试一百次也还是得等云客户端把文件拉下来。它同样是**非终态**：文件何时落到
+/// 本地不由我们决定，所以每次扫描都会重新问一次「本机有内容了吗」。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i64)]
 pub enum ThumbState {
@@ -235,6 +254,8 @@ pub enum ThumbState {
     Ok = 1,
     Failed = 2,
     Corrupt = 3,
+    /// 云端占位文件（本机无内容）：不算失败，等云客户端下载后再生成
+    CloudOnly = 4,
 }
 
 /// 任务结局（`index_tasks.outcome`，M2.2 §4.7）。
@@ -449,11 +470,20 @@ pub struct RootRow {
     pub closed_at: Option<i64>,
     /// 该卷是否不区分大小写（探测一次后固化）。排除判定的 `match_key` 依赖它。
     pub case_insensitive: bool,
+    /// `local`（用户自己加的）/ `imported`（从索引包带进来，IDX-21）。
+    pub origin: String,
+    /// `origin = imported` 时指向 `import_sources.id`。
+    pub import_source_id: Option<i64>,
 }
 
 impl RootRow {
     pub fn is_active(&self) -> bool {
         self.state == 0
+    }
+
+    /// 是否是导入带进来的根（左栏「导入的索引」组用）。
+    pub fn is_imported(&self) -> bool {
+        self.origin == "imported"
     }
 }
 
@@ -564,6 +594,15 @@ pub struct TaskRow {
     pub failed: i64,
     /// 耗时（毫秒）
     pub duration_ms: Option<i64>,
+    // --- v9（M4.3 Phase 1B · IDX-17 终态摘要）---
+    /// 取消原因（v9，非空即 Cancelled 终态）
+    pub cancel_reason: Option<String>,
+    /// 用户逐任务暂停意图（v9，INTEGER 0/1）
+    pub user_paused: bool,
+    /// 范围类型（v9 TaskScopeKind 编码：0=Root, 1=All）
+    pub scope_kind: i64,
+    /// 作废世代（v9）
+    pub generation: i64,
 }
 
 impl TaskRow {
@@ -602,6 +641,11 @@ pub struct ThumbStats {
     pub failed: u64,
     /// 待生成（`thumb_state = 0`）
     pub pending: u64,
+    /// 本机没有内容、文件还在云端（`thumb_state = 4`）。
+    ///
+    /// **刻意与 `failed` 分开**：这既不是坏了也不是没权限，重试也不会变好，
+    /// 混进失败数会让用户以为自己有 214 张坏图（实际只是没下载）。
+    pub cloud_only: u64,
 }
 
 /// 索引库的「缓存占用」统计（F 加固的诊断页用）。

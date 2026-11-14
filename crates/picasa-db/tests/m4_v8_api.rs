@@ -41,11 +41,12 @@ fn open(path: &Path) -> Db {
 
 #[test]
 fn v8_migration_is_last_and_adds_expected_tables() {
-    assert_eq!(SCHEMA_VERSION, 8);
-    assert_eq!(MIGRATIONS.last().unwrap().version, 8);
+    // M4.3 阶段 0：v9 身份骨架/检查点迁移接在 v8 之后；v8 的 EXIF/相册列与表仍须存在。
+    assert_eq!(SCHEMA_VERSION, 9);
+    assert_eq!(MIGRATIONS.last().unwrap().version, 9);
     let tmp = tempfile::tempdir().unwrap();
     let db = Db::open(tmp.path().join("lib.sqlite")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 8);
+    assert_eq!(db.schema_version().unwrap(), 9);
     let cols = db.column_names("photos").unwrap();
     for c in [
         "camera_make", "camera_model", "lens_model", "focal_length", "f_number",

@@ -74,7 +74,7 @@ fn v5_library_upgrades_to_v6_with_rows_intact() {
     let (db, db_path) = open_fixture(tmp.path());
 
     assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 8);
+    assert_eq!(SCHEMA_VERSION, 9);
 
     // 行数一条都不能少（§8.3：只增列，不动数据）
     assert_eq!(db.total_photos().unwrap(), 4);

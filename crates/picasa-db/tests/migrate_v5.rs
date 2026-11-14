@@ -67,7 +67,7 @@ fn v4_library_upgrades_to_v5_with_rows_intact() {
     // ⚠️ 这条断言在 M3 从 5 改成 6（`07` §8.1），M4 升到 7（收藏/标签/说明）。
     // 它守的是「SCHEMA_VERSION 常量与最新一条迁移一致」——与 v5 自己的内容
     // 无关，所以跟着版本号走是对的。
-    assert_eq!(SCHEMA_VERSION, 8);
+    assert_eq!(SCHEMA_VERSION, 9);
 
     // 行数一条都不能变（只增列，不动数据）
     let n: i64 = db

@@ -384,6 +384,7 @@ fn badge_counts_degraded_roots_but_not_offline_ones_twice() {
         id,
         path: format!("/p{id}"),
         closed,
+        index_removed: false,
         offline,
         photo_count: 0,
         thumb_bytes: 0,

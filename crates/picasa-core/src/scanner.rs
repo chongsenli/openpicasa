@@ -28,7 +28,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::{CoreError, Result, filters, index::FailureItem, index::IndexBoard, paths};
-use picasa_db::{Db, PhotoInput, PhotoRow, ThumbState};
+use picasa_db::{
+    Db, FailureKind, PhotoInput, PhotoRow, TaskKind, TaskOutcome, TaskScopeKind, TaskStatus,
+    ThumbState,
+};
 use picasa_imaging::ImageError;
 
 /// 扫描/后台任务推给 UI 的事件。全部是「值」，UI 侧不需要回调。
@@ -111,6 +114,22 @@ struct Job {
     /// 25.9 万张的库里有 22 万张从未尝试过的欠账，用户点一次「重建失败索引」
     /// 只想修那 970 张坏的，不该顺手把 22 万张一起卷进来变成几小时的满载。
     ids: Vec<i64>,
+    /// M4.3 阶段 1：持久任务行 `index_tasks.task_id`。
+    ///
+    /// 只有「关注文件夹扫描」(`enqueue_scan`) 带它；刷新 / 重试 / 点名重建
+    /// 这些会话级批次不带（`None`），它们不参与按 task_id 的暂停/取消/崩溃恢复。
+    /// 携带时 worker 会在目录边界读 DB 意图（user_paused / cancel_reason /
+    /// checkpoint），决定继续、让出还是作废——这是「暂停 A 而 B 可跑」的关键：
+    /// 被暂停的任务在目录边界 yield，单 worker 才能接着取队列里的下一个任务。
+    task_id: Option<i64>,
+    /// M4.3 阶段 2 / IDX-14：全量重建（「全量重建」按钮 / 诊断页 RebuildAll）。
+    ///
+    /// `true` 时逐目录走 `Db::apply_scan_force` 绕过 L1 缓存命中，让**每张**已存在
+    /// 照片都进 `touched` 重新生成缩略图；且 force 分支不删旧 BLOB、不把
+    /// `thumb_state` 归零，旧图保留到 `put_thumb` 原子替换为止（重建期间不出现灰格）。
+    /// 缩略图取数用 `Db::photos_by_ids_for_force`（忽略 `thumb_state = 0` 过滤）。
+    /// 只由 `enqueue_rebuild` 置 true；刷新 / 重试 / 点名重建恒为 false。
+    force_reprobe: bool,
 }
 
 struct Inner {
@@ -183,6 +202,13 @@ impl IndexService {
             .thread_name(|i| format!("op-thumb-{i}"))
             .build()
             .expect("无法创建缩略图线程池");
+        // M4.3 阶段 1：全局「暂停全部索引」是**持久意图**，重启后仍生效
+        // （IDX-07 / TC-M43-05）。构造时先读回来，否则一次重启就偷偷把暂停丢了。
+        let persisted_pause = db
+            .lock()
+            .ok()
+            .and_then(|d| d.index_pause_all().ok())
+            .unwrap_or(false);
         let inner = Arc::new(Inner {
             db,
             board,
@@ -194,7 +220,7 @@ impl IndexService {
             dirs: AtomicU64::new(0),
             found: AtomicU64::new(0),
             queued: Mutex::new(HashSet::new()),
-            paused: AtomicBool::new(false),
+            paused: AtomicBool::new(persisted_pause),
             epoch: AtomicU64::new(0),
             deleting: AtomicBool::new(false),
             suppress_finish: AtomicBool::new(false),
@@ -233,8 +259,14 @@ impl IndexService {
     /// 语义：**停在目录边界，不重扫、不丢进度**。worker 不再取新任务，
     /// 当前任务在下一个目录写完后就停住（最多等一个目录的处理时间）。
     /// 已经落库的照片照常显示、照常浏览——暂停的是"建立索引"，不是图库。
+    ///
+    /// M4.3 阶段 1：这个「全部暂停」意图**持久化**（`settings`），重启后
+    /// [`IndexService::new`] 会读回来生效（IDX-07 / TC-M43-05）。
     pub fn pause(&self) {
         self.inner.paused.store(true, Ordering::SeqCst);
+        if let Ok(db) = self.inner.db.lock() {
+            let _ = db.set_index_pause_all(true);
+        }
         // 显示层跟着走：面板/状态栏的「已暂停」来自 IndexBoard，不是这里自己记
         self.inner.board.pause_all("已手动暂停");
     }
@@ -242,11 +274,92 @@ impl IndexService {
     /// 继续索引：从暂停处接着跑，不需要重扫。
     pub fn resume(&self) {
         self.inner.paused.store(false, Ordering::SeqCst);
+        if let Ok(db) = self.inner.db.lock() {
+            let _ = db.set_index_pause_all(false);
+        }
+        // `resume_all` 会跳过被用户逐任务暂停的任务（TC-M43-05）。
         self.inner.board.resume_all();
     }
 
     pub fn is_paused(&self) -> bool {
         self.inner.paused.load(Ordering::Relaxed)
+    }
+
+    // ------------------------------------------------------------ 阶段 1：按任务暂停 / 继续 / 取消
+
+    /// 暂停**一条**索引任务（IDX-07 / TC-M43-05）：持久化 `user_paused` 意图，
+    /// 再让进度板上对应的任务进入 Paused。其它任务（root B）完全不受影响。
+    ///
+    /// worker 在下一个目录边界读到 Paused 后让出，单线程队列因此能继续取 B 的活。
+    /// 返回是否成功落库（行不存在 / DB 出错返回 false）。
+    pub fn pause_task(&self, task_id: i64) -> bool {
+        let Ok(db) = self.inner.db.lock() else {
+            return false;
+        };
+        let Some(intent) = db.task_intent(task_id).ok().flatten() else {
+            return false;
+        };
+        if db.set_task_user_paused(task_id, true).is_err() {
+            return false;
+        }
+        drop(db);
+        self.inner.board.pause_one(&intent.scope_path, "已手动暂停");
+        true
+    }
+
+    /// 继续**一条**被用户暂停的任务（IDX-08）：清持久意图、恢复进度板状态，
+    /// 再把该 root 重新入队。`begin_index_task` 会复用同一条任务行，
+    /// 于是 `walk_and_store` 从持久 `checkpoint` 之后的目录继续，不重置为 0、不从根重扫。
+    pub fn resume_task(&self, task_id: i64) -> bool {
+        let Ok(db) = self.inner.db.lock() else {
+            return false;
+        };
+        let Some(intent) = db.task_intent(task_id).ok().flatten() else {
+            return false;
+        };
+        if db.set_task_user_paused(task_id, false).is_err() {
+            return false;
+        }
+        drop(db);
+        self.inner.board.resume_one(&intent.scope_path);
+        let path = PathBuf::from(&intent.scope_path);
+        // IDX-14：全量重建任务行的 kind 被标成 Reindex，续跑必须继续走 force
+        // 入口，否则暂停/崩溃恢复会退化成「L1 全命中、啥都不做」的普通增量扫描。
+        if intent.kind == TaskKind::Reindex.code() {
+            self.enqueue_rebuild(&[path]);
+        } else {
+            self.enqueue_scan(&[path]);
+        }
+        true
+    }
+
+    /// 真取消**一条**索引任务（IDX-09 / TC-M43-06）：落持久 Cancelled 终态，
+    /// 幂等；已提交的照片 / 标记保留，未执行的目录工作丢弃，重启不自动恢复。
+    /// 取消 A 不暂停 B。
+    pub fn cancel_task(&self, task_id: i64, reason: &str) -> bool {
+        let Ok(db) = self.inner.db.lock() else {
+            return false;
+        };
+        let Some(intent) = db.task_intent(task_id).ok().flatten() else {
+            return false;
+        };
+        let changed = db.cancel_index_task(task_id, reason).unwrap_or(false);
+        drop(db);
+        if changed {
+            self.inner.board.forget(&intent.scope_path);
+        }
+        changed
+    }
+
+    /// 供 UI 启动提示：当前可自动续跑（未结束、未取消、未被用户暂停）的任务数。
+    pub fn resumable_task_count(&self) -> u64 {
+        self.inner
+            .db
+            .lock()
+            .ok()
+            .and_then(|db| db.resumable_index_tasks().ok())
+            .map(|v| v.len() as u64)
+            .unwrap_or(0)
     }
 
     /// 删除索引数据（照片 / 缩略图 / 目录 / 任务记录），保留关注文件夹与排除规则。
@@ -256,14 +369,77 @@ impl IndexService {
     ///
     /// 返回 `false` 表示已有一个删除在跑（连点保护）。
     pub fn delete_index(&self) -> bool {
+        self.spawn_delete("op-index-clear", None, |db| {
+            db.clear_index().map_err(|e| CoreError::Other(e.to_string()))
+        })
+    }
+
+    /// 删除**某一个关注文件夹（root）**的索引，其他 root 完全不动（M4.3 §3 / P-M43-04）。
+    ///
+    /// 与 [`IndexService::delete_index`] 共用同一套「暂停 → 抬世代 → 等队列安静 →
+    /// 持 db 锁删 → 收尾 → 广播」逻辑，只是把 DB 操作换成带稳定 `root_id` 的作用域版本。
+    /// 旧 UI 接线曾把 `DeleteIndexRoot(id)` 丢弃 id 后转全库 `delete_index()`，这是
+    /// 需求说明书 §0.1 点名的危险接线，本方法即为止血后的正确入口。
+    pub fn delete_index_for_root(&self, root_id: i64) -> bool {
+        // 作用域删除时把该 root 的规范化路径一起交给 spawn_delete：收尾只从面板
+        // forget 这一条路径，别把其它 root 正在显示的任务也一并清掉（IDX-11）。
+        let scope = self
+            .inner
+            .db
+            .lock()
+            .ok()
+            .and_then(|db| db.root(root_id).ok().flatten())
+            .map(|r| paths::canonical_string(std::path::Path::new(&r.path)));
+        self.spawn_delete("op-index-clear-root", scope, move |db| {
+            db.clear_index_for_root(root_id)
+                .map_err(|e| CoreError::Other(e.to_string()))
+        })
+    }
+
+    /// **彻底**删除某个关注根的索引（m10218）：连 `roots` 行一起删。
+    ///
+    /// 与 [`IndexService::delete_index_for_root`] 共用同一套后台骨架（连点保护、
+    /// 抬世代、等队列安静、持锁删、收尾广播），区别只在 DB 侧多走一步
+    /// [`Db::purge_index_for_root`]——那条路会连根行一起删掉，于是索引管理页
+    /// 里这一行连同它的子树、缩略图一起消失，而不是留一个「索引已移除」的空壳。
+    ///
+    /// 标记仍然不丢：`purge_index_for_root` 内部先做身份快照（R-M43-02）。
+    pub fn purge_index_for_root(&self, root_id: i64) -> bool {
+        let scope = self
+            .inner
+            .db
+            .lock()
+            .ok()
+            .and_then(|db| db.root(root_id).ok().flatten())
+            .map(|r| paths::canonical_string(std::path::Path::new(&r.path)));
+        self.spawn_delete("op-index-purge-root", scope, move |db| {
+            db.purge_index_for_root(root_id)
+                .map_err(|e| CoreError::Other(e.to_string()))
+        })
+    }
+
+    /// 删除操作的公共后台骨架（连点保护、世代作废、收尾、事件广播）。
+    ///
+    /// `op` 在持有 db 锁的临界区内调用，必须是**幂等/可失败**的纯 DB 操作；
+    /// 两条删除路径共用它，避免收尾逻辑复制出两份不一致。
+    ///
+    /// `scope`：全库删除传 `None`（面板确实要整体复位），单根删除传该 root 的
+    /// 规范化路径（只 forget 这一条）——IDX-11「作废范围只对当前 scope 生效」。
+    fn spawn_delete<F>(&self, thread_name: &'static str, scope: Option<String>, op: F) -> bool
+    where
+        F: FnOnce(&Db) -> Result<(u64, u64)> + Send + 'static,
+    {
         if self.inner.deleting.swap(true, Ordering::SeqCst) {
             return false;
         }
         let inner = self.inner.clone();
         let spawned = std::thread::Builder::new()
-            .name("op-index-clear".into())
+            .name(thread_name.into())
             .spawn(move || {
-                // ① 先停写：暂停 + 作废当前世代，让在跑的扫描放弃后续目录
+                // ① 先停写：暂停 + 作废当前世代，让在跑的扫描放弃后续目录。
+                //    记下删除前的「用户暂停」状态：删除只是临时停写，不该顺手
+                //    把用户按下的**持久**暂停意图清掉（M4.3 IDX-07）。
+                let was_paused = inner.paused.load(Ordering::SeqCst);
                 inner.suppress_finish.store(true, Ordering::SeqCst);
                 inner.paused.store(true, Ordering::SeqCst);
                 inner.epoch.fetch_add(1, Ordering::SeqCst);
@@ -280,8 +456,7 @@ impl IndexService {
                 let outcome: Result<(u64, u64)> = match lock_db(&inner.db) {
                     Some(db) => {
                         inner.epoch.fetch_add(1, Ordering::SeqCst);
-                        db.clear_index()
-                            .map_err(|e| CoreError::Other(e.to_string()))
+                        op(&db)
                     }
                     None => Err(CoreError::Other("db 锁中毒".into())),
                 };
@@ -296,8 +471,14 @@ impl IndexService {
                 if let Ok(mut s) = inner.started.lock() {
                     *s = None;
                 }
-                inner.board.forget_all();
-                inner.paused.store(false, Ordering::SeqCst);
+                // 全库删除 → 面板整体复位；单根删除 → 只 forget 该 root 这一条，
+                // 别把其它 root 正在显示的任务也清掉（IDX-11 / G11.4）。
+                if let Some(p) = &scope {
+                    inner.board.forget(p);
+                } else {
+                    inner.board.forget_all();
+                }
+                inner.paused.store(was_paused, Ordering::SeqCst);
                 inner.suppress_finish.store(false, Ordering::SeqCst);
                 inner.deleting.store(false, Ordering::SeqCst);
 
@@ -322,8 +503,50 @@ impl IndexService {
     }
 
     /// 关注文件夹入队（**新批次**）。返回批次号。
+    ///
+    /// M4.3 阶段 1：每个 root 建 / 复用一条持久 `index_tasks` 行，Job 携带
+    /// `task_id`，worker 才能在目录边界按 task_id 读持久意图、写检查点、崩溃续跑。
     pub fn enqueue_scan(&self, roots: &[PathBuf]) -> u64 {
+        self.enqueue_scan_inner(roots, true, false)
+    }
+
+    /// 全量重建（M4.3 IDX-14）：对整棵子树强制重新探测，绕过 L1 缓存命中，
+    /// 且保留旧缩略图到被新图替换为止。`force = true` 见 [`Job::force_reprobe`]。
+    ///
+    /// 持久任务行标成 `TaskKind::Reindex`，这样崩溃 / 暂停后续跑（`resume_task`）
+    /// 也能认出这是全量重建而不是普通增量扫描，不会退化成「啥都不做」。
+    pub fn enqueue_rebuild(&self, roots: &[PathBuf]) -> u64 {
+        self.enqueue_scan_inner(roots, true, true)
+    }
+
+    /// `persistent = false` 供 `enqueue_refresh` 用：会话级刷新不写持久任务行
+    /// （刷新的是单个子目录，不该变成「重启后要恢复」的关注根任务）。
+    fn enqueue_scan_inner(&self, roots: &[PathBuf], persistent: bool, force: bool) -> u64 {
         let keys: Vec<String> = roots.iter().map(|p| paths::canonical_string(p)).collect();
+
+        // 先建 / 复用持久任务行。同一 root 已有未完结行时 `begin_index_task`
+        // 原样复用（保留 checkpoint 与 user_paused）——崩溃恢复正靠它续跑。
+        let mut task_ids: Vec<Option<i64>> = vec![None; roots.len()];
+        if persistent
+            && let Ok(db) = self.inner.db.lock()
+        {
+            for (i, key) in keys.iter().enumerate() {
+                let root_id = db.root_id_for_path(key).ok().flatten();
+                match db.begin_index_task(root_id, key, TaskKind::FirstScan, TaskScopeKind::Root) {
+                    Ok(id) => {
+                        task_ids[i] = Some(id);
+                        // IDX-14：把 force 意图持久化到任务行的 kind，供续跑识别。
+                        if force {
+                            let _ = db.mark_task_reindex(id);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(scope = %key, error = %e, "建立持久索引任务失败")
+                    }
+                }
+            }
+        }
+
         if let Ok(mut q) = self.inner.queued.lock() {
             q.extend(keys.iter().cloned());
         }
@@ -336,11 +559,13 @@ impl IndexService {
             .inner
             .tx
             .send(CoreEvent::ScanStarted { roots: roots.len() });
-        for path in roots {
+        for (i, path) in roots.iter().enumerate() {
             let _ = self.inner.jobs.send(Job {
                 path: path.clone(),
                 retry: false,
                 ids: Vec::new(),
+                task_id: task_ids[i],
+                force_reprobe: force,
             });
         }
         batch
@@ -373,7 +598,8 @@ impl IndexService {
             }
             return false;
         }
-        self.enqueue_scan(&[path.to_path_buf()]);
+        // 会话级刷新：不建持久任务行（单个子目录的刷新不是「关注根任务」）。
+        self.enqueue_scan_inner(&[path.to_path_buf()], false, false);
         true
     }
 
@@ -404,6 +630,8 @@ impl IndexService {
             path: path.to_path_buf(),
             retry: true,
             ids: Vec::new(),
+            task_id: None,
+            force_reprobe: false,
         });
         batch
     }
@@ -433,6 +661,8 @@ impl IndexService {
             path: root.to_path_buf(),
             retry: false,
             ids,
+            task_id: None,
+            force_reprobe: false,
         });
         batch
     }
@@ -537,6 +767,81 @@ fn block_while_paused(inner: &Inner) {
     }
 }
 
+// ---------------------------------------------------------------- 阶段 1：持久任务意图
+
+/// 一条带 `task_id` 的扫描在「目录边界」读到的持久意图（M4.3 §2 IDX-07/08/09）。
+///
+/// 会话级批次（`task_id: None`，刷新 / 重试 / 点名重建）恒为 [`TaskRunIntent::Run`]，
+/// 不参与按 task_id 的暂停 / 取消 / 崩溃恢复。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskRunIntent {
+    /// 继续跑。
+    Run,
+    /// 用户显式暂停：本次在目录边界让出，保留检查点，等待 `resume_task`。
+    Paused,
+    /// 用户取消：让出并丢弃未执行工作；已提交的照片 / 标记保留。
+    Cancelled,
+}
+
+/// 从库里读一条任务的持久意图。
+///
+/// 三种「读不到」要区别对待：
+/// - `task_id: None`（会话级刷新/重试）恒 Run，本就不参与持久意图；
+/// - 锁中毒 / DB 报错 → 降级 Run，宁可多扫一遍也不能因意图层故障把索引卡死；
+/// - **行确实被删了**（`Ok(None)`）→ Cancelled：作用域删除会作废该 scope 的任务，
+///   内存队列里还没取出的旧 Job 必须让出，绝不能把已经移除的范围重新扫回来
+///   （IDX-11 / G11.3）。注意 `clear_index_for_root` 现在是把行标记成 Cancelled
+///   而非删除（走上面的 `cancel_reason` 分支），这条分支主要兜住全库 `clear_index`
+///   在 10s 等待窗口后仍有残留 Job 的极端情况。
+fn read_intent(inner: &Inner, task_id: Option<i64>) -> TaskRunIntent {
+    let Some(id) = task_id else {
+        return TaskRunIntent::Run;
+    };
+    let Ok(db) = inner.db.lock() else {
+        return TaskRunIntent::Run;
+    };
+    match db.task_intent(id) {
+        Ok(Some(t)) => {
+            if t.cancel_reason.is_some() {
+                TaskRunIntent::Cancelled
+            } else if t.user_paused {
+                TaskRunIntent::Paused
+            } else {
+                TaskRunIntent::Run
+            }
+        }
+        Ok(None) => TaskRunIntent::Cancelled,
+        Err(_) => TaskRunIntent::Run,
+    }
+}
+
+/// 给带 `task_id` 的任务写终态。
+///
+/// 写之前再读一次意图：取消 / 暂停可能发生在「最后一个目录边界检查」与「收尾」
+/// 之间，那时必须保留 `cancel_index_task` 已经落下的 Cancelled 终态，不能被
+/// `Completed / Success` 覆盖（TC-M43-06「已完成不伪报取消」的反向保护）。
+/// 活动任务的 status/outcome 由调用方按真实完成/失败数给出（部分失败写
+/// PartialFailed），这里只负责「别把已取消的行改写掉」与落库。
+fn finish_intent(
+    inner: &Inner,
+    task_id: Option<i64>,
+    status: TaskStatus,
+    outcome: TaskOutcome,
+    processed: u64,
+    failed: u64,
+    error_code: Option<&str>,
+) {
+    let Some(id) = task_id else {
+        return;
+    };
+    if read_intent(inner, Some(id)) != TaskRunIntent::Run {
+        return;
+    }
+    if let Ok(db) = inner.db.lock() {
+        let _ = db.finish_index_task(id, status, outcome, processed, failed, error_code);
+    }
+}
+
 fn worker_loop(rx: Receiver<Job>, inner: Arc<Inner>) {
     loop {
         if inner.cancel.load(Ordering::Relaxed) {
@@ -587,12 +892,51 @@ fn worker_loop(rx: Receiver<Job>, inner: Arc<Inner>) {
 
 fn run_job(inner: &Arc<Inner>, job: Job) {
     let key = paths::canonical_string(&job.path);
+
+    // M4.3 阶段 1：带持久 `task_id` 的任务，在**取到活之后、动任何写之前**先读一次
+    // 意图。取消可能发生在 Job 还排在队列里的时候；暂停可能来自上一次会话
+    // （`user_paused` 是持久的）。两者都在目录边界之前让出，于是单 worker 能
+    // 立刻接着处理队列里的下一个任务——「暂停/取消 A 不影响 B」就靠这里。
+    match read_intent(inner, job.task_id) {
+        TaskRunIntent::Paused => {
+            inner.board.pause_one(&key, "已手动暂停");
+            return;
+        }
+        TaskRunIntent::Cancelled => {
+            inner.board.forget(&key);
+            return;
+        }
+        TaskRunIntent::Run => {}
+    }
+
     inner.board.mark_scanning(&key);
+    // 复用中断任务时把状态从「暂停/等待」拉回运行，并清掉上一轮残留的结束时间。
+    // 会话级批次（`None`）不碰 index_tasks。
+    if let Some(id) = job.task_id
+        && let Ok(db) = inner.db.lock()
+    {
+        let _ = db.set_task_running(id, TaskStatus::Scanning);
+    }
 
     if !job.path.is_dir() {
-        inner
-            .board
-            .mark_unreachable(&key, "目录不存在或未挂载（外置盘被拔出？）");
+        // IDX-16：把「离线」作为一个明确的事件发出去，而不是静默跳过。
+        // 卷名（/Volumes/<name>）拼进原因里，方便界面显示是哪块盘没挂上；
+        // 消费者 `Library::apply_event` 会据 folder_id 更新 folders.is_online
+        // 并刷新面板。用现成的 `Unreachable`（code 6）承载 blocked，不新增第 8 态。
+        if let Some(folder_id) = db_folder_id(&inner.db, &key) {
+            let _ = inner.tx.send(CoreEvent::FolderOnline {
+                folder_id,
+                online: false,
+            });
+        }
+        let vol = volume_of(&job.path)
+            .map(|v| format!("（卷：{v}）"))
+            .unwrap_or_default();
+        inner.board.mark_unreachable(
+            &key,
+            format!("目录不存在或未挂载{vol}（外置盘被拔出？）"),
+        );
+        // 不写终态：外置盘下次插上、重开应用时这条任务应当继续（IDX-12）/ 自动续跑。
         return;
     }
 
@@ -605,7 +949,8 @@ fn run_job(inner: &Arc<Inner>, job: Job) {
         // 否则任务行在跑的时候只剩下通用的「正在生成缩略图」，看不出是用户点的那次。
         inner.board.mark_thumbnailing_keep_reason(&key);
         let epoch = inner.epoch.load(Ordering::SeqCst);
-        generate_thumbs_for_ids(inner, &job.ids, &key, &job.path, epoch);
+        // 点名重建不是全量重建：照常只补「待生成」的几张，force = false。
+        generate_thumbs_for_ids(inner, &job.ids, &key, &job.path, epoch, job.task_id, false);
         if !inner.cancel.load(Ordering::Relaxed) {
             inner.board.finish(&key);
         }
@@ -622,13 +967,21 @@ fn run_job(inner: &Arc<Inner>, job: Job) {
             }
         }
     } else {
-        match walk_and_store(inner, &job.path, &key, &mut discovered) {
+        match walk_and_store(
+            inner,
+            &job.path,
+            &key,
+            &mut discovered,
+            job.task_id,
+            job.force_reprobe,
+        ) {
             Ok(Some(id)) => id,
-            Ok(None) => return, // 已标不可访问
+            Ok(None) => return, // 已标不可访问 / 世代作废 / 暂停或取消让出
             Err(e) => {
                 tracing::warn!(path = %job.path.display(), error = %e, "扫描失败");
                 inner.board.mark_unreachable(&key, format!("扫描失败：{e}"));
                 let _ = inner.tx.send(CoreEvent::Error(format!("扫描失败：{e}")));
+                // 不写终态：扫描失败（I/O、盘被拔）多为暂时故障，留着让重启续跑。
                 return;
             }
         }
@@ -658,7 +1011,7 @@ fn run_job(inner: &Arc<Inner>, job: Job) {
     if job.retry && stats.pending > 0 {
         tracing::info!(path = %job.path.display(), pending = stats.pending, "重试：开始补全待生成缩略图");
         inner.board.mark_thumbnailing(&key);
-        generate_thumbs(inner, folder_id, &key, &job.path);
+        generate_thumbs(inner, folder_id, &key, &job.path, job.task_id);
         tracing::info!(path = %job.path.display(), "重试：补全结束");
 
         if inner.cancel.load(Ordering::Relaxed) {
@@ -671,7 +1024,39 @@ fn run_job(inner: &Arc<Inner>, job: Job) {
             return;
         }
     }
+    // 收尾前先从板上取真实失败数：board.finish() 会在 clean 时清空任务，
+    // 之后就再也读不到「本轮到底坏了几张」。IDX-17 要求「不以重试次数冒充
+    // 失败文件数」——board.failed 是按 photo_id 去重后的失败条目数
+    // （= failures.len()），与 index_task_failures 的 PK 口径一致。
+    let failed = inner
+        .board
+        .snapshot()
+        .task_by_path(&key)
+        .map(|t| t.failed)
+        .unwrap_or(0);
     inner.board.finish(&key);
+    // 正常收工才落持久终态。此处已是最后一个目录边界之后：若用户恰在收尾前
+    // 取消，`finish_intent` 会再读一次意图并保留 Cancelled，不会伪报成功；
+    // 而部分失败（缩略图坏了几张）要如实写 PartialFailed，不能一律 Success。
+    // processed 用本轮发现数作分母，completed 由 `processed - failed` 派生。
+    let (status, outcome, error_code) = if failed > 0 {
+        (
+            TaskStatus::PartialFailed,
+            TaskOutcome::PartialFailed,
+            Some("partial_thumb_failure"),
+        )
+    } else {
+        (TaskStatus::Completed, TaskOutcome::Success, None)
+    };
+    finish_intent(
+        inner,
+        job.task_id,
+        status,
+        outcome,
+        discovered,
+        failed,
+        error_code,
+    );
 }
 
 /// 只枚举目录（不读文件内容），按「父先于子」的顺序返回。
@@ -738,6 +1123,7 @@ fn apply_dir(
     dir: &Path,
     items: &[PhotoInput],
     epoch: u64,
+    force: bool,
 ) -> Result<Option<(i64, Vec<i64>)>> {
     let dir_str = paths::canonical_string(dir);
     let dir_key = paths::compare_key(&dir_str);
@@ -752,7 +1138,13 @@ fn apply_dir(
             return Ok(None);
         }
         let folder_id = guard.upsert_folder(&dir_str, &dir_key, volume_id.as_deref())?;
-        let apply = guard.apply_scan(folder_id, &dir_str, items, picasa_imaging::DECODER_VER)?;
+        // IDX-14：force 走 apply_scan_force（绕过 L1 命中、保留旧 BLOB 与
+        // thumb_state）；普通扫描走原 apply_scan（行为逐字不变）。
+        let apply = if force {
+            guard.apply_scan_force(folder_id, &dir_str, items, picasa_imaging::DECODER_VER)?
+        } else {
+            guard.apply_scan(folder_id, &dir_str, items, picasa_imaging::DECODER_VER)?
+        };
         (folder_id, apply)
     };
     let _ = inner.tx.send(CoreEvent::FolderScanned {
@@ -770,13 +1162,20 @@ fn apply_dir(
 
 /// 走一遍目录树 → **逐目录**落库。返回根目录的 folder_id。
 ///
-/// `Ok(None)` 表示「已标记为不可访问」或「索引已被删除、本次作废」，
-/// 调用方不需要再报错，也不该继续走缩略图阶段。
+/// `Ok(None)` 表示「已标记为不可访问」「索引已被删除、本次作废」或「持久任务
+/// 在目录边界被暂停/取消而让出」，调用方不需要再报错，也不该继续走缩略图阶段。
+///
+/// `task_id` 非空时：从持久 `checkpoint` 之后的目录续跑（IDX-08），并在每个
+/// 目录**提交之后**把该目录路径写成新检查点；目录边界按 `user_paused` /
+/// `cancel_reason` 让出（IDX-07/09）。目录顺序由 `collect_dirs` 的排序 DFS
+/// 决定，稳定可复现，因此检查点只需存一个路径字符串。
 fn walk_and_store(
     inner: &Arc<Inner>,
     root: &Path,
     key: &str,
     discovered: &mut u64,
+    task_id: Option<i64>,
+    force: bool,
 ) -> Result<Option<i64>> {
     // 本轮扫描的世代号。`delete_index` 会把它加一——之后本函数
     // 在目录边界上就会发现自己作废，立刻收工（详见 `Inner::epoch`）。
@@ -809,6 +1208,21 @@ fn walk_and_store(
     // 1) 先枚举目录（便宜）
     let dirs = collect_dirs(inner, root, &exclusion);
 
+    // 1.5) 崩溃恢复：从上次提交的检查点**之后**继续（IDX-08）。
+    //     检查点存的是「本目录已完整落库」的 canonical 路径；`collect_dirs`
+    //     是排序 DFS，顺序稳定，所以按路径定位一次即可。暂停的任务靠
+    //     `resume_task` 重新入队时同样走这里，不会从根重复全扫。
+    let mut start = 0usize;
+    if let Some(id) = task_id
+        && let Ok(db) = inner.db.lock()
+        && let Some(cp) = db.task_intent(id).ok().flatten().and_then(|t| t.checkpoint)
+        && let Some(pos) = dirs
+            .iter()
+            .position(|d| paths::canonical_string(d) == cp)
+    {
+        start = pos + 1;
+    }
+
     // 2) 再逐目录处理（贵）：列直接文件 → probe → 落库 → 报进度
     //
     // ⚠️ 这里每处理完一个目录就**立刻**落库并广播，而不是等整棵树走完。
@@ -817,10 +1231,23 @@ fn walk_and_store(
     let mut denied = 0u64;
     let mut last_report = Instant::now();
 
-    for dir in &dirs {
-        // 暂停 → 就停在这个目录边界上等；恢复后从同一个 dir 继续（不重扫前面的）
+    for (idx, dir) in dirs.iter().enumerate() {
+        if idx < start {
+            continue; // 检查点之前的目录已在上一轮落库
+        }
+        // 全局「暂停索引」→ 就停在这个目录边界上等；恢复后从同一个 dir 继续
         if wait_if_paused(inner) {
             break;
+        }
+        // 逐任务持久意图（IDX-07/09）：Paused / Cancelled 时**让出**而不是死等，
+        // 这样单 worker 能继续取队列里的其它任务（暂停 A 不影响 B）。
+        match read_intent(inner, task_id) {
+            TaskRunIntent::Paused => {
+                inner.board.pause_one(key, "已手动暂停");
+                return Ok(None);
+            }
+            TaskRunIntent::Cancelled => return Ok(None),
+            TaskRunIntent::Run => {}
         }
         // 索引被删了（世代变了）→ 剩下的目录没有意义，收工
         if inner.epoch.load(Ordering::SeqCst) != epoch {
@@ -852,6 +1279,11 @@ fn walk_and_store(
         };
 
         let mut items: Vec<PhotoInput> = Vec::new();
+        // M4.3 补遗：内容还在云端（OneDrive / iCloud 的 dataless 占位文件）的照片。
+        // 它们**完全不能读**——连 32 字节文件头都读不到（`read()` 直接 ETIMEDOUT，
+        // 实测单张 0.7～27 s）。所以既不探 EXIF、也不进缩略图队列，只在这里记一笔，
+        // 落库后标成 `ThumbState::CloudOnly`：界面上说明「云端未下载」，不计入失败数。
+        let mut cloud_only: Vec<String> = Vec::new();
         for entry in rd.flatten() {
             let Ok(ft) = entry.file_type() else { continue };
             if !ft.is_file() {
@@ -865,6 +1297,9 @@ fn walk_and_store(
             let Ok(meta) = entry.metadata() else {
                 continue;
             };
+            // 目录项在、本地没有字节：云占位符。判断只看元数据里的 SF_DATALESS 位，
+            // 一次 `stat` 就够（`entry.metadata()` 已经在手上），绝不会触发下载。
+            let has_content = picasa_imaging::meta_has_local_content(&meta);
 
             let size_bytes = meta.len() as i64;
             let mtime_ns = meta
@@ -875,14 +1310,41 @@ fn walk_and_store(
                 .unwrap_or(0);
             let name_key = paths::compare_key(&name);
 
+            if !has_content {
+                // 云端占位：按「有这个文件、但读不到内容」入库。
+                // 宽高留空（`dims_status` 保持 0，等下载后回填），日期回退文件时间，
+                // 格式记 0（未知——没读文件头，不能凭扩展名猜）。
+                if !cloud_only.contains(&name_key) {
+                    cloud_only.push(name_key.clone());
+                }
+                items.push(PhotoInput {
+                    name,
+                    name_key,
+                    size_bytes,
+                    mtime_ns,
+                    width: None,
+                    height: None,
+                    orientation: Some(1),
+                    taken_at: (mtime_ns > 0).then_some(mtime_ns / 1_000_000_000),
+                    taken_at_src: 2,
+                    format: 0,
+                });
+                *discovered += 1;
+                inner.found.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+
             // 缓存命中：尺寸/时间戳/解码器版本全对得上，且宽高这件事**已经出过结论**。
             // 直接复用库里的元数据 —— 这一次**完全不碰文件内容**。
             //
             // 「出过结论」包含两种：读到了宽高，以及读不到、已判终态（`dims_status = 2`）。
             // 后者若不算命中，这批文件每次启动都会被重新 `probe()` 一遍再判一次失败——
             // 真实库里这个数字是 903 张，而它们的结论永远不会变。
+            // IDX-14：全量重建时强制绕过 L1 缓存命中，让每张照片都真重探并
+            // 进入 `apply_scan_force` 的 touched 列表（旧缩略图保留到替换）。
             let hit = cached
                 .get(&name_key)
+                .filter(|_| !force)
                 .filter(|c| c.matches(size_bytes, mtime_ns, picasa_imaging::DECODER_VER))
                 .filter(|c| c.dims_settled());
 
@@ -976,10 +1438,36 @@ fn walk_and_store(
         //
         // `None` = 落库前一刻发现索引已被删除（世代变了），整轮收工。
         if !items.is_empty() {
-            let Some((_folder_id, touched)) = apply_dir(inner, dir, &items, epoch)? else {
+            let Some((folder_id, touched)) = apply_dir(inner, dir, &items, epoch, force)? else {
                 tracing::info!(root = %root.display(), "索引已删除，本次扫描作废");
                 return Ok(None);
             };
+
+            // M4.3 补遗：把「内容还在云端」的那批标出来，并把「上次在云上、这次已经
+            // 落到本地」的那批放回待生成。
+            //
+            // 两件事都必须在 `apply_dir` 之后做：新插入的行此刻才有 id，而且
+            // `apply_scan_inner` 的缓存命中分支有意不动 `thumb_state`（保住终态），
+            // 所以状态迁移只能在这里显式写。
+            //
+            // 顺序不能反：先把本目录**所有**「云端未下载」放回待生成（文件可能已经
+            // 下载好了），再把本次仍无内容的重新标上。反过来会把刚标的又抹掉。
+            if let Ok(db) = inner.db.lock() {
+                if let Err(e) = db.clear_cloud_only(folder_id) {
+                    tracing::warn!(error = %e, "复位云端占位状态失败");
+                }
+                if !cloud_only.is_empty() {
+                    match db.mark_photos_cloud_only(folder_id, &cloud_only) {
+                        Ok(n) if n > 0 => tracing::debug!(
+                            dir = %dir.display(),
+                            count = n,
+                            "标记为「云端未下载」（本机无内容，不生成缩略图）"
+                        ),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(error = %e, "标记云端占位失败"),
+                    }
+                }
+            }
 
             // ⚠️ 缩略图**就地补，但只补本次新增/变化的那几张**。
             //
@@ -990,7 +1478,7 @@ fn walk_and_store(
             //    22 万张历史欠账重跑一遍，启动动辄几小时。
             // 正确的口径是「新增的立刻看得见，历史欠账等用户显式要求」。
             if !touched.is_empty() {
-                generate_thumbs_for_ids(inner, &touched, key, root, epoch);
+                generate_thumbs_for_ids(inner, &touched, key, root, epoch, task_id, force);
             }
         }
 
@@ -1004,6 +1492,15 @@ fn walk_and_store(
                 photos: *discovered,
                 current: dir.display().to_string(),
             });
+        }
+
+        // 本目录已完整落库（含缩略图）→ 提交检查点。重启/继续时从这里之后
+        // 接着走，不重置为 0、不重复全扫（IDX-08 / TC-M43-08）。
+        // `apply_dir` 若因世代作废返回 None，上面已 return，不会走到这里。
+        if let Some(id) = task_id
+            && let Ok(db) = inner.db.lock()
+        {
+            let _ = db.set_task_checkpoint(id, &paths::canonical_string(dir));
         }
     }
 
@@ -1049,6 +1546,7 @@ fn process_batch(
     root: &Path,
     epoch: u64,
     watched: &AtomicU64,
+    task_id: Option<i64>,
 ) -> bool {
     use rayon::prelude::*;
 
@@ -1071,6 +1569,29 @@ fn process_batch(
                 return;
             }
             let path = row.abs_path();
+            // ---- 云端占位（OneDrive / iCloud dataless）：**不在这里读内容**
+            //
+            // 这类文件的目录项存在、`len()` 报原始大小，但本机没有字节；读它会去
+            // 问云，云客户端没跑就直接 `ETIMEDOUT`（实测单张 0.7～27 s）。若照旧
+            // 往下走：① 4 个缩略图线程会被几张占位图全部堵死；② 超时被归成
+            // `Unreachable` → `thumb_state = 2`「失败」，可这些文件**没坏**，只是
+            // 没下载，用户看到一片「失败」还重试不掉。
+            //
+            // 所以在这里就地判掉，并且**只标成 `CloudOnly` 不改别的**：已经有图
+            // 的（`thumb_state = 1`）绝不动，那是导入包带来的缩略图，必须保留。
+            if !picasa_imaging::has_local_content(&path) {
+                if let Ok(guard) = inner.db.lock() {
+                    if row.thumb_state != ThumbState::Ok as i64 {
+                        let _ = guard.set_thumb_state(row.id, ThumbState::CloudOnly);
+                    }
+                    progressed.fetch_add(1, Ordering::Relaxed);
+                }
+                let _ = inner.tx.send(CoreEvent::ThumbFailed {
+                    photo_id: row.id,
+                    reason: picasa_imaging::CLOUD_ONLY_REASON.to_string(),
+                });
+                return;
+            }
             // ---- R-M3-10 解码隔离：**任何解码器对任何输入都不得崩进程**
             //
             // `catch_unwind` 不是防御性编程的装饰——`image` crate 的几个解码器
@@ -1097,6 +1618,14 @@ fn process_batch(
                     picasa_imaging::format::global_guard().note_panic(fmt);
                     if let Ok(guard) = inner.db.lock() {
                         let _ = guard.set_thumb_state(row.id, ThumbState::Corrupt);
+                        if let Some(id) = task_id {
+                            let _ = guard.record_task_failure_kind(
+                                id,
+                                &thumb_relative_path(key, row),
+                                &msg,
+                                FailureKind::Corrupt,
+                            );
+                        }
                         progressed.fetch_add(1, Ordering::Relaxed);
                     }
                     inner.board.note_thumb_failed(
@@ -1144,6 +1673,14 @@ fn process_batch(
                     tracing::debug!(path = %path.display(), error = %e, "缩略图生成失败");
                     if let Ok(guard) = inner.db.lock() {
                         let _ = guard.set_thumb_state(row.id, ThumbState::Failed);
+                        if let Some(id) = task_id {
+                            let _ = guard.record_task_failure_kind(
+                                id,
+                                &thumb_relative_path(key, row),
+                                &reason,
+                                failure_kind(&e),
+                            );
+                        }
                         progressed.fetch_add(1, Ordering::Relaxed);
                     }
                     inner.board.note_thumb_failed(
@@ -1172,7 +1709,15 @@ fn process_batch(
 /// 所以这里不会顺手把库里 22 万张历史欠账也补一遍。
 /// 取的时候仍然带 `thumb_state = 0` 条件：同一次扫描里重复的目录、
 /// 或者刚被别处补过的照片，会被自然跳过（跳过的也会从列表里消失，不会死循环）。
-fn generate_thumbs_for_ids(inner: &Arc<Inner>, ids: &[i64], key: &str, root: &Path, epoch: u64) {
+fn generate_thumbs_for_ids(
+    inner: &Arc<Inner>,
+    ids: &[i64],
+    key: &str,
+    root: &Path,
+    epoch: u64,
+    task_id: Option<i64>,
+    force: bool,
+) {
     if ids.is_empty() {
         return;
     }
@@ -1181,16 +1726,24 @@ fn generate_thumbs_for_ids(inner: &Arc<Inner>, ids: &[i64], key: &str, root: &Pa
         if inner.cancel.load(Ordering::Relaxed) || inner.epoch.load(Ordering::SeqCst) != epoch {
             return;
         }
-        let pending = match lock_db(&inner.db)
-            .and_then(|db| db.pending_thumbs_by_ids(chunk, THUMB_CHUNK).ok())
-        {
+        let pending = match lock_db(&inner.db).and_then(|db| {
+            // IDX-14：force 路径里旧缩略图仍是 thumb_state = 1(Ok)，
+            // `pending_thumbs_by_ids` 的 `thumb_state = 0` 过滤会把它们全滤掉，
+            // 所以用不受该过滤的 `photos_by_ids_for_force` 按 id 取行。
+            let res = if force {
+                db.photos_by_ids_for_force(chunk, THUMB_CHUNK)
+            } else {
+                db.pending_thumbs_by_ids(chunk, THUMB_CHUNK)
+            };
+            res.ok()
+        }) {
             Some(v) => v,
             None => return,
         };
         if pending.is_empty() {
             continue;
         }
-        if !process_batch(inner, &pending, key, root, epoch, &watched) {
+        if !process_batch(inner, &pending, key, root, epoch, &watched, task_id) {
             return;
         }
     }
@@ -1201,7 +1754,13 @@ fn generate_thumbs_for_ids(inner: &Arc<Inner>, ids: &[i64], key: &str, root: &Pa
 /// 只给「用户显式重试 / 补全」用。启动扫描**不走这里**：
 /// 25.9 万张的库有 22 万张历史欠账，每次启动全补一遍就是几小时，
 /// 那不是「打开相册」，那是「离线批处理」。
-fn generate_thumbs(inner: &Arc<Inner>, folder_id: i64, key: &str, root: &Path) {
+fn generate_thumbs(
+    inner: &Arc<Inner>,
+    folder_id: i64,
+    key: &str,
+    root: &Path,
+    task_id: Option<i64>,
+) {
     let epoch = inner.epoch.load(Ordering::SeqCst);
     let watched = AtomicU64::new(0);
     let ids = match lock_db(&inner.db).and_then(|db| db.subtree_folder_ids(folder_id).ok()) {
@@ -1223,7 +1782,7 @@ fn generate_thumbs(inner: &Arc<Inner>, folder_id: i64, key: &str, root: &Path) {
                 break;
             }
             tracing::debug!(folder_id = id, batch = pending.len(), "补全批次");
-            if !process_batch(inner, &pending, key, root, epoch, &watched) {
+            if !process_batch(inner, &pending, key, root, epoch, &watched, task_id) {
                 tracing::warn!(folder_id = id, "补全批次未推进（状态写不进库），退出");
                 return;
             }
@@ -1282,6 +1841,38 @@ fn classify(e: &ImageError) -> &'static str {
         ImageError::Unsupported(_) => "不支持的格式",
         ImageError::Exif(_) => "EXIF 解析失败",
     }
+}
+
+/// 把 `ImageError` 直接映射成持久失败分类（M4.3 IDX-17）。
+///
+/// 不用 `picasa_db::classify_failure` 的英文文本匹配：面板要显示的是中文人话，
+/// 喂给文本分类器会全落到 `Unreachable`。这里按错误变体精确分类，保证
+/// `failure_groups` / `photo_ids_of_failure_kind` / 「只重试失败项」有真实数据。
+fn failure_kind(e: &ImageError) -> FailureKind {
+    match e {
+        ImageError::Io(io) => match io.kind() {
+            std::io::ErrorKind::PermissionDenied => FailureKind::NoPermission,
+            // 文件消失、盘被拔、读失败都属「暂时失联」，卷回来可重试。
+            _ => FailureKind::Unreachable,
+        },
+        ImageError::Decode(_) | ImageError::Exif(_) => FailureKind::Corrupt,
+        ImageError::Unsupported(_) => FailureKind::Unsupported,
+    }
+}
+
+/// 失败条目相对任务范围（scope）的路径。
+///
+/// `index_task_failures.relative_path` 就是这个口径：`photo_ids_of_failure_kind`
+/// 用 `join_scope(scope, rel)` 拼回完整路径再反查 `photos.id`。所以 rel 必须是
+/// 「从根范围看进去」的相对路径，不能直接塞绝对路径，否则查不回失败项。
+fn thumb_relative_path(scope: &str, row: &PhotoRow) -> String {
+    let folder = row.folder_path.trim_end_matches('/');
+    let full = format!("{folder}/{}", row.name);
+    let base = scope.trim_end_matches('/');
+    full.strip_prefix(base)
+        .unwrap_or(&full)
+        .trim_start_matches('/')
+        .to_string()
 }
 
 fn lock_db(db: &Arc<Mutex<Db>>) -> Option<std::sync::MutexGuard<'_, Db>> {
@@ -1466,6 +2057,56 @@ mod tests {
             }
         }
         false
+    }
+
+    // ---------- M4.3 IDX-17：失败分类与失败条目相对路径 ----------
+
+    #[test]
+    fn failure_kind_maps_image_errors_by_variant_not_text() {
+        let corrupt = ImageError::Decode(image::ImageError::Decoding(
+            image::error::DecodingError::new(image::error::ImageFormatHint::Unknown, "bad"),
+        ));
+        assert_eq!(failure_kind(&corrupt), FailureKind::Corrupt);
+        assert_eq!(
+            failure_kind(&ImageError::Exif("x".into())),
+            FailureKind::Corrupt
+        );
+        assert_eq!(
+            failure_kind(&ImageError::Unsupported("raw".into())),
+            FailureKind::Unsupported
+        );
+        let denied = ImageError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert_eq!(failure_kind(&denied), FailureKind::NoPermission);
+        let gone = ImageError::Io(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(failure_kind(&gone), FailureKind::Unreachable);
+    }
+
+    #[test]
+    fn thumb_relative_path_is_scoped_and_joinable() {
+        let row = PhotoRow {
+            id: 1,
+            folder_id: 1,
+            folder_path: "/media/2020".into(),
+            name: "a.jpg".into(),
+            size_bytes: 0,
+            mtime_ns: 0,
+            width: None,
+            height: None,
+            orientation: None,
+            taken_at: None,
+            taken_at_src: 0,
+            thumb_state: 0,
+            decoder_ver: 0,
+            eff_taken_at: 0,
+            starred: false,
+        };
+        assert_eq!(thumb_relative_path("/media", &row), "2020/a.jpg");
+        // 目录本身就是范围根时，得到纯文件名，`join_scope` 仍能拼回全路径。
+        let root_row = PhotoRow {
+            folder_path: "/media".into(),
+            ..row.clone()
+        };
+        assert_eq!(thumb_relative_path("/media", &root_row), "a.jpg");
     }
 
     #[test]

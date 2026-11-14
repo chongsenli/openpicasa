@@ -55,6 +55,10 @@ pub struct IndexManifest {
     pub content_flags: ContentFlags,
     pub counts: ManifestCounts,
     pub source_roots: Vec<ManifestRoot>,
+    /// M4.3 IDX-20（format v2）：显式的文件夹树。`None` = v1 包 / 原始 DB，
+    /// 导入端按 `folders` 表或 `photos` 路径重建。
+    #[serde(default)]
+    pub folder_tree: Option<FolderTree>,
     pub payload_checksum: String,
     pub notes: String,
 }
@@ -86,6 +90,84 @@ pub struct ManifestRoot {
     pub is_online: bool,
 }
 
+/// 清单里的**显式文件夹树**（M4.3 IDX-20，`format_version = 2` 起）。
+///
+/// 为什么在 `roots` / `folders` 两张表之外再存一份树：导出包本身是 SQLite 快照、
+/// 表结构随 schema 版本漂移，而「这台机器上用户看到的层级」是可校验的产品语义。
+/// 导入端要能在换机、老版本包、甚至 folders 表被删掉的样本上还原出同一棵树，
+/// 所以把它写成清单里的一段 JSON：
+///
+/// - 校验和覆盖它，篡改即被拒（IDX-20 ③）；
+/// - v1 读者读 `index_manifest` 时只取它认识的 key，多出来的 `folder_tree` 被忽略
+///   （P-M43-08①），所以 `min_reader_version` 仍是 `0.4.0`；
+/// - 空文件夹（`direct_count = total_count = 0`）也在这里，导出 / 预览 / 分组都能
+///   显示（P-M43-08④）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderTree {
+    /// 导出机器的路径分隔符（`/` 或 `\`），仅供显示与重映射提示，不参与匹配。
+    pub path_separator: String,
+    /// 导出机器的平台标识（`macos` / `windows` / `linux`）。
+    pub platform: String,
+    pub roots: Vec<FolderTreeRoot>,
+    pub folders: Vec<FolderTreeNode>,
+}
+
+/// 树里的一个根。`abs_path` 是导出时的原始绝对路径，**换机后只作显示与重映射
+/// 提示、不自动猜新路径**（P-M43-08⑤）；跨机器真正稳定的键是 `root_key`。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderTreeRoot {
+    pub root_key: String,
+    pub abs_path: String,
+    pub display_name: String,
+    pub path_key: String,
+    pub case_insensitive: bool,
+    pub closed: bool,
+    pub is_online: bool,
+    pub photo_count: i64,
+}
+
+/// 树里的一个文件夹。`rel_path` 相对所属根、以 `/` 分隔，根自身为 `""`。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderTreeNode {
+    pub root_key: String,
+    pub rel_path: String,
+    pub parent_rel: Option<String>,
+    pub depth: i64,
+    pub name: String,
+    pub direct_count: i64,
+    pub total_count: i64,
+    pub is_online: bool,
+}
+
+/// 导入端拿到的树是怎么来的（IDX-20 ④）：清单自带 / 由 folders 表重建 /
+/// 由 photos 的 folder_id → 路径推导。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TreeSource {
+    /// 清单 `folder_tree` 段，校验和已覆盖。
+    #[default]
+    Manifest,
+    /// 老包（format v1）或本产品原始库：按包内 `folders` 表重建。
+    DerivedFromFolders,
+    /// `folders` 缺失或与 `photos` 不一致：按 `photos.folder_id → 路径` 推导，
+    /// 计数按 photos 重算。预览必须标「结构由照片路径推导」。
+    DerivedFromPhotos,
+}
+
+impl TreeSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            TreeSource::Manifest => "清单自带（校验和覆盖）",
+            TreeSource::DerivedFromFolders => "由包内文件夹表重建",
+            TreeSource::DerivedFromPhotos => "结构由照片路径推导",
+        }
+    }
+
+    /// 是否需要向用户明示「这棵树不是清单里原样的」。
+    pub fn needs_notice(self) -> bool {
+        self != TreeSource::Manifest
+    }
+}
+
 impl Default for IndexManifest {
     fn default() -> Self {
         Self {
@@ -102,6 +184,7 @@ impl Default for IndexManifest {
             },
             counts: ManifestCounts::default(),
             source_roots: Vec::new(),
+            folder_tree: None,
             payload_checksum: String::new(),
             notes: String::new(),
         }
@@ -127,6 +210,16 @@ pub struct ImportReport {
     pub conflicts: i64,
     pub failures: Vec<String>,
     pub upgraded_from: Option<i64>,
+    /// 来源文件 SHA-256（IDX-02：原文件全程只读，导入前后摘要不变）。
+    pub source_sha256: String,
+    /// Replace 策略执行前的完整备份路径（IDX-03：可一键回退）。
+    pub backup_path: Option<std::path::PathBuf>,
+    /// 该备份的 SHA-256（显示/复核用）。
+    pub backup_sha256: Option<String>,
+    /// 本次导入写进 `import_sources` 的来源 id（IDX-21「导入的索引」分组用）。
+    pub import_source_id: Option<i64>,
+    /// 本次导入写进 `import_batches` 的批次 id（IDX-19「本次导入 · N 张」scope 用）。
+    pub import_batch_id: Option<i64>,
 }
 
 impl Db {

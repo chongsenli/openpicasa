@@ -65,8 +65,13 @@ pub fn show(
 // M3.1 起整个 XP 工具行也由单行顶栏替代（见文件头）。不留残骸。
 
 /// 排序弹出菜单：转调顶栏版本（观感与截图一致）。
-pub fn sort_menu(ui: &mut Ui, at: Pos2, current: picasa_db::SortSpec) -> Option<TopbarAction> {
-    crate::topbar::sort_menu(ui, at, current)
+pub fn sort_menu(
+    ui: &mut Ui,
+    at: Pos2,
+    current: picasa_db::SortSpec,
+    thumbs_first: bool,
+) -> Option<TopbarAction> {
+    crate::topbar::sort_menu(ui, at, current, thumbs_first)
 }
 
 /// 「…」弹出菜单：转调顶栏版本。

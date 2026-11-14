@@ -66,6 +66,19 @@ impl ThumbService {
         let tx = self.tx.clone();
         let inflight = self.inflight.clone();
         self.pool.spawn(move || {
+            // 云端占位文件：本机没有字节，读它只会 ETIMEDOUT（实测 0.7～27 s）。
+            // 直接判「本机没内容」，不占着 worker 干等——否则几张占位图就能把
+            // 4 个缩略图线程全堵死，正常的照片跟着一起不显示。
+            if !picasa_imaging::has_local_content(&job.path) {
+                let _ = tx.send(CoreEvent::ThumbFailed {
+                    photo_id: job.photo_id,
+                    reason: picasa_imaging::CLOUD_ONLY_REASON.to_string(),
+                });
+                if let Ok(mut set) = inflight.lock() {
+                    set.remove(&key);
+                }
+                return;
+            }
             let result = match job.kind {
                 JobKind::Thumb => {
                     picasa_imaging::thumb_from_file(&job.path, THUMB_T0).map(|(jpeg, w, h)| {

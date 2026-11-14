@@ -4,8 +4,8 @@
 //! 临时库导入，逐项核对：数量、整理关系、失败/损坏/取消时现有索引保持可用。
 
 use picasa_db::{
-    Db, ImportStrategy, PhotoInput, check_export_dir, execute_import, export_index,
-    inspect_index,
+    Db, FORMAT_VERSION, ImportStrategy, PhotoInput, TreeSource, check_export_dir, execute_import,
+    export_index, inspect_index,
 };
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -140,7 +140,14 @@ fn inspect_reports_version_and_conflicts_without_mutating() {
     let dst = tmp.path().join("dst.sqlite");
     let dst_db = Db::open(&dst).unwrap();
     let prev = inspect_index(&dst_db, &out, tmp.path()).unwrap();
-    assert_eq!(prev.manifest.format_version, 1);
+    // M4.3 IDX-20：格式版本升到 2（清单多一段 folder_tree）。
+    assert_eq!(prev.manifest.format_version, FORMAT_VERSION);
+    assert_eq!(FORMAT_VERSION, 2);
+    assert!(
+        prev.manifest.folder_tree.is_some(),
+        "v2 导出必须自带文件夹树"
+    );
+    assert_eq!(prev.tree_source, TreeSource::Manifest, "清单自带时以清单为准");
     assert_eq!(prev.manifest.counts.photos, 3);
     assert_eq!(dst_db.photo_count_total().unwrap(), 0, "预览不写任何数据");
 }

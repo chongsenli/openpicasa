@@ -21,6 +21,16 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::theme::Metrics;
 use picasa_core::texbudget::TextureBudget;
 
+/// [`TextureCache::missing_state`] 的判定结果（见那里的文档）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MissingState {
+    /// 库里没 BLOB，但本机也没有原图字节（云端占位）。
+    CloudOnly,
+    /// 库里没 BLOB、还可以去生成。
+    Pending,
+}
+
+
 /// 一张缩略图在本帧的可用性。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TexState {
@@ -30,6 +40,8 @@ pub enum TexState {
     Pending,
     /// 解码失败（画「破损」占位，不重试）
     Failed,
+    /// 文件在云端、本机没有内容（画「云端未下载」占位，**不是失败**）
+    CloudOnly,
 }
 
 pub struct TextureCache {
@@ -131,6 +143,20 @@ impl TextureCache {
         self.textures.is_empty()
     }
 
+    /// 一张照片「库里没有 BLOB」时该怎么呈现。
+    ///
+    /// 必须**先**问「有没有 BLOB」再问「是不是云端占位」：导入的索引包会把
+    /// 缩略图一起带过来（`content_flags.thumbnails`），那些照片的原图在本机
+    /// 往往根本不存在，行上也会带 `CloudOnly`。若先判 `CloudOnly` 就直接返回，
+    /// 包里存着的图就永远画不出来——这是 v0.7-dev22 引入的缺陷。
+    fn missing_state(thumb_state: i64) -> MissingState {
+        if thumb_state == picasa_db::ThumbState::CloudOnly as i64 {
+            MissingState::CloudOnly
+        } else {
+            MissingState::Pending
+        }
+    }
+
     /// 拿一张纹理；拿不到就在预算允许时现场解码/上传，或请求后台生成。
     pub fn get(
         &mut self,
@@ -187,6 +213,17 @@ impl TextureCache {
                 }
             },
             Ok(None) => {
+                // 库里确实没有 BLOB。**只有到这一步**才可能是「云端未下载」：
+                // 有 BLOB 就必须画出来（导入的索引包自带缩略图，那些照片的
+                // 原图在本机可能根本没有——不能因为原图在云上就不显示包里的图）。
+                match Self::missing_state(row.thumb_state) {
+                    MissingState::CloudOnly => {
+                        // 本机没有内容，请求生成也只会白等一轮超时，直接判掉；
+                        // 但**不记进 `failed`**——文件下载到本地后下一轮扫描会把它回队列。
+                        return TexState::CloudOnly;
+                    }
+                    MissingState::Pending => {}
+                }
                 // ③ 还没有：请求后台生成（同一张只请求一次）
                 if self.requested.insert(row.id) {
                     service.request(ThumbJob {
@@ -344,4 +381,51 @@ fn decode_jpeg(bytes: &[u8]) -> Option<egui::ColorImage> {
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     Some(egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 用户反馈（v0.7-dev22 的缺陷）：打了「云端未下载」的行，若索引库里
+    /// 其实存着缩略图（典型：从别的电脑导出的索引包，包里带
+    /// `content_flags.thumbnails`），必须照样把图画出来。
+    ///
+    /// 判定顺序写反过一版——先看 `thumb_state` 就直接返回 `CloudOnly`，
+    /// 于是包里存着的图永远画不出来。这里把顺序钉死。
+    #[test]
+    fn cloud_only_rows_still_render_thumbs_that_exist_in_the_database() {
+        // 有 BLOB 时，`get` 走的是 `db.get_thumb` 的 `Ok(Some(_))` 分支，
+        // 根本不会问 `missing_state`——所以这里能验证的就是：
+        // `missing_state` 只在「库里确实没有 BLOB」之后才被调用。
+        assert_eq!(
+            TextureCache::missing_state(picasa_db::ThumbState::CloudOnly as i64),
+            MissingState::CloudOnly
+        );
+        assert_eq!(
+            TextureCache::missing_state(picasa_db::ThumbState::Ok as i64),
+            MissingState::Pending,
+            "有图的行走的是 Ready 分支，不该被当成云端占位"
+        );
+
+        // 源码级断言：`missing_state` 的调用点必须在 `db.get_thumb` 之后。
+        let src = include_str!("textures.rs");
+        let get_thumb = src.find("match db.get_thumb(row.id, 0)").expect("必须有读 BLOB 的分支");
+        let call = src
+            .find("match Self::missing_state(row.thumb_state)")
+            .expect("必须有 missing_state 的调用点");
+        assert!(
+            get_thumb < call,
+            "先判云端占位再读 BLOB 会让导入包里的缩略图永不显示（v0.7-dev22 的缺陷）"
+        );
+        // 只钉住调用点还不够：在 `get` 开头再加一句 `if row.thumb_state == CloudOnly
+        // { return TexState::CloudOnly; }` 一样能把 BLOB 挡掉，而上面的断言察觉不到
+        // （调用点仍在 get_thumb 之后）。所以再钉住「`get_thumb` 之前不许出现
+        // `return TexState::CloudOnly`」。
+        let early_return = src.find("return TexState::CloudOnly;").expect("必须有该返回");
+        assert!(
+            get_thumb < early_return,
+            "在读完 BLOB 之前就返回 CloudOnly，会把导入包里已有的缩略图挡掉"
+        );
+    }
 }

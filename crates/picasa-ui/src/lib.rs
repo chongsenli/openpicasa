@@ -32,6 +32,7 @@ pub mod macos;
 pub mod shortcuts;
 pub mod sidebar;
 pub mod statusbar;
+pub mod tag_counts_task;
 pub mod textures;
 pub mod theme;
 pub mod toolbar;
@@ -127,16 +128,138 @@ fn init_tracing(paths: &picasa_core::AppPaths) {
     let filter =
         EnvFilter::try_from_env("OPENPICASA_LOG").unwrap_or_else(|_| EnvFilter::new(default));
     // 日志写应用容器（`~/Library/Logs/app.openpicasa/`），**不写照片目录**。
-    let file = std::fs::File::create(paths.logs.join("openpicasa.log")).ok();
-    match file {
-        Some(f) => {
+    match LogSink::open(&paths.logs.join("openpicasa.log")) {
+        Some(sink) => {
+            // 存一份给「清空运行日志」用：截断必须走**同一个已打开的句柄**，
+            // 否则文件被清空后旧句柄的偏移还停在原处，下一次写会留下一个巨大的空洞。
+            let _ = LOG_SINK.set(sink.clone());
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(filter)
-                .with_writer(std::sync::Mutex::new(f))
+                .with_writer(sink)
                 .try_init();
         }
         None => {
             let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
         }
+    }
+}
+
+/// 日志文件的唯一持有者（m10756「清空运行日志」）。
+///
+/// `tracing_subscriber` 的 writer 一旦装好就换不掉，所以「清空」只能
+/// 在**同一个 `File` 句柄**上 `set_len(0)` + `seek(0)`。包一层 `Mutex` 既满足
+/// `MakeWriter` 要求的 `Send + Sync`，也保证截断与写日志不会互相踩到偏移。
+///
+/// 外面再包一层 newtype 是**孤儿规则**逼的：`Arc` 和 `MakeWriter` 都不在本 crate，
+/// 没法直接 `impl MakeWriter for Arc<LogWriter>`。
+#[derive(Clone)]
+pub struct LogSink {
+    file: std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+}
+
+/// 全局唯一的日志写入者；`clear_log_file()` 借它做截断。
+static LOG_SINK: std::sync::OnceLock<LogSink> = std::sync::OnceLock::new();
+
+impl LogSink {
+    fn open(path: &std::path::Path) -> Option<Self> {
+        let file = std::fs::File::create(path).ok()?;
+        Some(Self {
+            file: std::sync::Arc::new(std::sync::Mutex::new(file)),
+        })
+    }
+
+    /// 截断到 0 字节并把写游标归零，返回清掉的字节数。
+    fn truncate(&self) -> std::io::Result<u64> {
+        let mut file = match self.file.lock() {
+            Ok(f) => f,
+            // 锁中毒（某次写日志时 panic）：拿回内部值继续，清空日志不该因此失败。
+            Err(e) => e.into_inner(),
+        };
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        file.set_len(0)?;
+        // 偏移必须一起归零：`set_len` 不动游标，否则下一次写会从旧位置开始，
+        // 在文件里留下 0 填充的空洞（看起来像「清空后日志变成一坨 NUL」）。
+        std::io::Seek::seek(&mut *file, std::io::SeekFrom::Start(0))?;
+        Ok(len)
+    }
+}
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self.file.lock() {
+            Ok(mut f) => f.write(buf),
+            // 锁中毒不能把日志吞掉也不能 panic：退化成丢这一行，日志线程继续活着。
+            Err(_) => Ok(buf.len()),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.file.lock() {
+            Ok(mut f) => f.flush(),
+            Err(_) => Ok(()),
+        }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// 清空运行日志文件（`~/Library/Logs/app.openpicasa/openpicasa.log`）。
+///
+/// 返回清掉的字节数。**只截断、不删除、不换文件**：删除会让已经打开的句柄指向
+/// 一个没人看得到的 inode，之后所有日志都写进虚空；换文件则要重建 subscriber，
+/// 运行期做不到。截断 + 归零偏移是唯一两头都对的做法。
+///
+/// 还没初始化日志（例如无窗口测试）时返回 `Ok(0)`，不报错。
+pub fn clear_log_file() -> std::io::Result<u64> {
+    // 还没初始化日志（例如无窗口测试）时返回 0，不报错。
+    match LOG_SINK.get() {
+        Some(sink) => sink.truncate(),
+        None => Ok(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// m10756：清空运行日志必须**真的把文件截到 0**，而且要把写游标一起归零。
+    ///
+    /// 只断 `metadata().len() == 0` 抓不住「游标没归零」这个 bug：那是写下去之后
+    /// 才暴露的——文件会从旧偏移开始写，前面留一大段 0。所以这里清空后**再写一行**
+    /// 并断言文件内容就是那一行（长度等于它、开头不是 NUL）。
+    #[test]
+    fn clearing_the_run_log_truncates_the_file_and_resets_the_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("openpicasa.log");
+        let mut sink = LogSink::open(&path).expect("能创建日志文件");
+
+        use std::io::Write as _;
+        sink.write_all("旧日志一行\n".as_bytes()).unwrap();
+        sink.flush().unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+
+        let cleared = sink.truncate().unwrap();
+        assert_eq!(cleared, "旧日志一行\n".len() as u64, "返回值应为清掉的字节数");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+
+        // 清空后继续写：内容必须紧贴文件开头，不能有空洞。
+        sink.write_all("新日志一行\n".as_bytes()).unwrap();
+        sink.flush().unwrap();
+        let body = std::fs::read(&path).unwrap();
+        assert_eq!(body, "新日志一行\n".as_bytes());
+    }
+
+    /// 日志还没初始化时清空是**无操作而不是报错**（无窗口测试/早期启动路径）。
+    #[test]
+    fn clearing_before_logging_is_initialised_is_a_no_op() {
+        // 本测试进程可能已经初始化过（其它用例），这里只验「不会 panic、不会 Err」。
+        let r = clear_log_file();
+        assert!(r.is_ok(), "清空日志不该失败：{r:?}");
     }
 }

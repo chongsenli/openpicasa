@@ -34,6 +34,7 @@
 use eframe::egui::{self, Align2, FontId, Rect, Ui, pos2, vec2};
 use picasa_core::{IndexEntryState, IndexSnapshot, Library, MgmtSnapshot, View};
 
+use crate::index_mgr::IoUi;
 use crate::theme::{Metrics, Theme};
 
 /// 状态栏的一帧输出（只有「入口被点」需要上层处理）。
@@ -48,6 +49,8 @@ pub struct StatusbarOut {
     pub index_clicked: bool,
     /// 「诊断」入口被点（F 加固）。**过渡期保留**，见文件头注释。
     pub diag_clicked: bool,
+    /// M4.3 IDX-18：全局导入 / 导出进度指示器被点 → 打开「导入 / 导出」标签。
+    pub import_clicked: bool,
     pub button_rect: Option<Rect>,
 }
 
@@ -68,6 +71,8 @@ pub fn show(
     _zoom_px: f32,
     // M32-UI-09 起不再使用：总数/结果数只在主区标题行出现
     _snap: &IndexSnapshot,
+    // M4.3 IDX-18：导入 / 导出全局进度指示器的数据源。
+    io: &IoUi,
 ) -> StatusbarOut {
     let mut out = StatusbarOut::default();
     let rect = Rect::from_min_size(
@@ -104,13 +109,64 @@ pub fn show(
     // 等需解释的术语（`10` M32-UI-11 验收项）。`diag_clicked` 保留在结构里恒为 false，
     // 避免牵动调用点签名；索引管理窗口仍是唯一入口。
     out.diag_clicked = false;
-    let diag = btn; // 「已选 N 张」仍从索引入口左侧起算
+
+    // M4.3 IDX-18 ②「全局指示器」：导入 / 导出任务活跃时，在索引入口左侧画一个
+    // 紧凑 pill（阶段 + 已处理 N / M）。它是**跨标签可见**的唯一入口：用户关掉索引
+    // 管理窗口、在别的标签浏览照片时，仍能看见后台任务在跑并一键跳回详情。
+    // 总数未知画不确定条、不编造百分比；确定态画单调百分比（io.percent 上包络）。
+    // 永久禁令：任何状态都不显示 ETA / 预计 / 剩余时间。
+    let mut left_edge = btn.left();
+    if let Some(snap) = &io.snapshot
+        && (io.state == crate::index_mgr::IoState::Running
+            || io.state == crate::index_mgr::IoState::Preparing)
+    {
+        const PILL_W: f32 = 210.0;
+        const BAR_H: f32 = 4.0;
+        let pill = Rect::from_center_size(
+            pos2(left_edge - 10.0 - PILL_W / 2.0, rect.center().y),
+            vec2(PILL_W, Metrics::STATUS_H - 4.0),
+        );
+        left_edge = pill.left();
+        let pill_resp = ui.interact(
+            pill,
+            ui.scope_id().with("io-progress-pill"),
+            egui::Sense::click(),
+        );
+        out.import_clicked = pill_resp.clicked();
+        if pill_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            painter.rect_filled(pill, 2.0, theme.cell_hover);
+        }
+        let short = crate::index_mgr::progress_short_label(snap);
+        painter.text(
+            pos2(pill.left() + 8.0, pill.center().y - 5.0),
+            Align2::LEFT_CENTER,
+            short,
+            FontId::new(10.0, egui::FontFamily::Proportional),
+            theme.text_primary,
+        );
+        let bar_rect = Rect::from_min_size(
+            pos2(pill.left() + 8.0, pill.bottom() - BAR_H - 3.0),
+            vec2(PILL_W - 16.0, BAR_H),
+        );
+        painter.rect_filled(bar_rect, 0.0, theme.separator);
+        let frac = snap.fraction().unwrap_or(0.3);
+        let fill = Rect::from_min_size(bar_rect.left_top(), vec2(bar_rect.width() * frac, BAR_H));
+        painter.rect_filled(fill, 0.0, theme.progress);
+        // 不确定态：让 egui 持续重绘（循环条动画）；确定态不额外唤醒。
+        if snap.fraction().is_none() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if pill_resp.hovered() {
+            pill_resp.on_hover_text("点击查看导入 / 导出进度详情");
+        }
+    }
 
     // ---- 缩放滑块已于 M3.1 移除；M4 起底栏右侧只剩「索引管理」唯一入口。
     let sel = lib.selected_count();
     if sel > 0 {
         painter.text(
-            pos2(diag.left() - 10.0, rect.center().y),
+            pos2(left_edge - 10.0, rect.center().y),
             Align2::RIGHT_CENTER,
             format!("已选 {sel} 张"),
             font,

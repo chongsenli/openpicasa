@@ -843,8 +843,50 @@ pub fn draw_state_dot(
     }
 }
 
-/// 占位格（`04` §3.2.1）：灰底 +「待生成」，**不放任何图片内容**。
-pub fn draw_placeholder(painter: &egui::Painter, rect: Rect, theme: &Theme, failed: bool) {
+/// 占位格的三种理由。文案与角标都由它决定，避免调用方各自拼字符串。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Placeholder {
+    /// 还没生成（首次索引 / 队列里排着）
+    #[default]
+    Pending,
+    /// 生成失败（读不到、解不开、写不进库）——需要用户知道并可能重试
+    Failed,
+    /// 本机没有内容，文件还在云端（OneDrive / iCloud 的 dataless 占位符）。
+    /// **不是失败**：文件没坏、也没权限问题，只是这台机器上暂时读不到字节。
+    ///
+    /// 用户口径（v0.7-dev23）：这种格子**完全静默**——只画一块安静的空灰格，
+    /// 不写任何字、不画角标。理由：一次出现五万多个「云端未下载」，
+    /// 满屏文字比留白更糟；它既不是用户要处理的事，也不是程序出错。
+    CloudOnly,
+}
+
+impl Placeholder {
+    fn label(self) -> &'static str {
+        match self {
+            Placeholder::Pending => "待生成",
+            Placeholder::Failed => "失败",
+            // 静默：不写字。见 `CloudOnly` 的文档。
+            Placeholder::CloudOnly => "",
+        }
+    }
+
+    /// 这一态是否只画空灰格（不写文案、不画角标）。
+    fn is_silent(self) -> bool {
+        self.label().is_empty()
+    }
+}
+
+/// 占位格（`04` §3.2.1）：灰底 + 一行说明，**不放任何图片内容**。
+///
+/// 两态有文案：「待生成」= 常规灰；「失败」= 警示色 + 右上「!」角标。
+/// 「云端未下载」自 v0.7-dev23 起**静默**：只画灰底，不写字、不画角标——
+/// 这类格子数量可达五万级，满屏文字与角标是噪音，且它不需要用户处理。
+pub fn draw_placeholder_state(
+    painter: &egui::Painter,
+    rect: Rect,
+    theme: &Theme,
+    state: Placeholder,
+) {
     painter.rect_filled(rect.shrink(1.0), 1.0, theme.placeholder_bg);
     painter.rect_stroke(
         rect,
@@ -852,29 +894,51 @@ pub fn draw_placeholder(painter: &egui::Painter, rect: Rect, theme: &Theme, fail
         Stroke::new(1.0, theme.cell_border),
         StrokeKind::Inside,
     );
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        if failed { "失败" } else { "待生成" },
-        FontId::new(11.0, egui::FontFamily::Proportional),
-        if failed {
-            theme.warn
-        } else {
-            theme.text_secondary
-        },
-    );
-    if failed {
-        // 警示角标：失败的那张不消失、也不假装"文件不存在"
-        let c = pos2(rect.right() - 9.0, rect.top() + 9.0);
-        painter.circle_filled(c, 4.5, theme.warn);
+    let color = match state {
+        Placeholder::Failed => theme.warn,
+        Placeholder::Pending | Placeholder::CloudOnly => theme.text_secondary,
+    };
+    // 静默态只留灰底（见 `Placeholder::CloudOnly` 的文档）。
+    if !state.is_silent() {
         painter.text(
-            c,
+            rect.center(),
             Align2::CENTER_CENTER,
-            "!",
-            FontId::new(8.0, egui::FontFamily::Proportional),
-            Color32::WHITE,
+            state.label(),
+            FontId::new(11.0, egui::FontFamily::Proportional),
+            color,
         );
     }
+    match state {
+        Placeholder::Failed => {
+            // 警示角标：失败的那张不消失、也不假装"文件不存在"
+            let c = pos2(rect.right() - 9.0, rect.top() + 9.0);
+            painter.circle_filled(c, 4.5, theme.warn);
+            painter.text(
+                c,
+                Align2::CENTER_CENTER,
+                "!",
+                FontId::new(8.0, egui::FontFamily::Proportional),
+                Color32::WHITE,
+            );
+        }
+        // 静默：不画角标。云朵轮廓是 dev22 的写法，用户明确否掉了——
+        // 「不要显示云端未下载」，角标同属提示噪音。
+        Placeholder::CloudOnly | Placeholder::Pending => {}
+    }
+}
+
+/// 兼容旧调用点：只有「失败 / 未失败」两态的地方仍可用。
+pub fn draw_placeholder(painter: &egui::Painter, rect: Rect, theme: &Theme, failed: bool) {
+    draw_placeholder_state(
+        painter,
+        rect,
+        theme,
+        if failed {
+            Placeholder::Failed
+        } else {
+            Placeholder::Pending
+        },
+    );
 }
 
 pub fn ellipsize(s: &str, max_chars: usize) -> String {
@@ -938,6 +1002,17 @@ mod tests {
         b.mark_scanning("/p/a");
         b.freeze_denominator("/p/a", 10, 0);
         b
+    }
+
+    #[test]
+    fn cloud_only_placeholder_is_silent() {
+        // 用户口径（v0.7-dev23）：「不要显示云端未下载」——这类格子只留灰底。
+        assert_eq!(Placeholder::CloudOnly.label(), "");
+        assert!(Placeholder::CloudOnly.is_silent());
+        assert_eq!(Placeholder::Pending.label(), "待生成");
+        assert!(!Placeholder::Pending.is_silent());
+        assert_eq!(Placeholder::Failed.label(), "失败");
+        assert!(!Placeholder::Failed.is_silent(), "失败必须能读出来，不能静默");
     }
 
     #[test]
