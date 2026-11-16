@@ -13,7 +13,7 @@
 //! │ ④ 托盘    │                                   │
 //! │（贴底）   │                                   │
 //! ├──────────┴───────────────────────────────────┤
-//! │ ⑤ 状态栏（信任提示 · 计数 · 最右索引管理）    │
+//! │ ⑤ 状态栏（只读运行状态 · 最右缩略图滑块）    │
 //! └──────────────────────────────────────────────┘
 //! ```
 //!
@@ -29,6 +29,7 @@ pub mod import_task;
 pub mod index_mgr;
 pub mod index_progress;
 pub mod macos;
+pub mod settings;
 pub mod shortcuts;
 pub mod sidebar;
 pub mod statusbar;

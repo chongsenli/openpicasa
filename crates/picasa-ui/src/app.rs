@@ -33,6 +33,9 @@ use crate::toolbar;
 use crate::toolbar::{FilterPanelAction, MoreAction, TopbarAction};
 use crate::viewer::{self, Viewer, ViewerAction};
 
+/// 底栏「已用」计时允许的空档（批次切换时 `running` 会短暂为 false）。
+const INDEX_RUN_GAP: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// 索引管理页数据的刷新间隔（毫秒）。
 ///
 /// 规格 §6.1 的上限是 4 次/秒（`picasa_core::SNAPSHOT_HZ_MAX`），这里取 1 次/秒：
@@ -143,6 +146,8 @@ pub struct OpenPicasaApp {
     sort_menu_frame: u64,
     /// 「…」菜单打开的帧号（同上豁免）
     more_menu_frame: u64,
+    /// M5-IA-04：设置页（入口壳）是否打开。会话级状态，不进偏好。
+    settings_open: bool,
     /// 左栏是否显示（顶栏侧栏开关；不进偏好——会话级）
     sidebar_visible: bool,
     /// 方格模式是否显示文件名（§7.4，默认开；会话级可选项）
@@ -216,6 +221,15 @@ pub struct OpenPicasaApp {
     confirm_delete_index: bool,
     /// 「重建失败索引」是否已进入二次确认（`Some(n)` = 待约定的失败项数量）
     confirm_rebuild_failed: Option<u64>,
+    /// M5-IA-02：底栏「已用 mm:ss」的单调计时起点。
+    ///
+    /// 用 `Instant` 而不是快照的 `started_at`：watcher 每发现一次外部变化就开
+    /// 新批次，用批次时刻会让连续运行中的「已用」反复归零。这里只在
+    /// 「连续运行」时保持，短暂的空档（< [`INDEX_RUN_GAP`]）不重置——
+    /// 批次之间本来就会有一两帧的 `running = false`。
+    index_run_started: Option<std::time::Instant>,
+    /// 最近一次看到「没有运行中的索引任务」的时刻（用于空档容忍）。
+    index_run_stopped_at: Option<std::time::Instant>,
     /// §4.8 启动增量校验的执行器（首屏之后才建，跑完置 `None`）
     verify: Option<picasa_core::verify::VerifyRunner>,
     /// 启动校验是否已跑完（跑完就不再尝试重建，避免每帧重试）
@@ -373,6 +387,7 @@ impl OpenPicasaApp {
             more_menu_open: false,
             more_menu_pos: Pos2::ZERO,
             more_menu_frame: u64::MAX,
+            settings_open: false,
             filter_menu_open: false,
             filter_menu_frame: u64::MAX,
             filter_menu_pos: Pos2::ZERO,
@@ -438,6 +453,8 @@ impl OpenPicasaApp {
             tag_counts_applied: 0,
             sidebar_albums: Vec::new(),
             sidebar_groups_dirty: true,
+            index_run_started: None,
+            index_run_stopped_at: None,
             verify: None,
             verify_done: false,
             verify_text: String::new(),
@@ -2397,9 +2414,8 @@ impl OpenPicasaApp {
                     self.lib.toast = Some((format!("已放入托盘 {n} 张"), 2.5));
                 }
             }
-            // M3.1：`⌘1`/`⌘2`/`⌘+`/`⌘−` 全部走对数档步进（与顶栏 −/+ 同一
-            // 条路径）；`⌘1` = 小一档、`⌘2` = 大一档（旧的三刻度点语义
-            // 随「缩略图」按钮一起退役）。
+            // M5-KB-06/07：`⌘1` / `⌘−` 小 16 px，`⌘2` / `⌘+` / `⌘=` 大 16 px，
+            // 与底栏滑块**同一状态**（不再是对数档 / 三档预设）。
             KeyAction::TierSmall => {
                 self.step_zoom(-1);
                 ctx.request_repaint();
@@ -2408,10 +2424,17 @@ impl OpenPicasaApp {
                 self.step_zoom(1);
                 ctx.request_repaint();
             }
+            // M5-KB-08：`⌘0` 回 96 px（§11 #1 的默认边长未裁定，不在这里定稿）。
             KeyAction::ZoomReset => {
                 self.zoom.reset();
                 self.zoom.end_drag(std::time::Instant::now());
                 self.persist_zoom();
+                ctx.request_repaint();
+            }
+            // M5-IA-04：`⌘,` → 设置页（与更多菜单「设置…」同一入口）。
+            KeyAction::OpenSettings => {
+                self.settings_open = true;
+                ctx.request_repaint();
             }
             KeyAction::ToggleRecurse => self.toggle_recurse(),
             KeyAction::FocusSearch => {
@@ -2585,14 +2608,18 @@ impl OpenPicasaApp {
         }
     }
 
-    /// 对数档走一步。已经在端点时不再写库。
+    /// 线性 16 px 走一步（`M5-KB-06/07`）。已经在端点时不再写库。
+    ///
+    /// 与底栏滑块共用 `ZoomState`：键盘改的就是滑块显示的那个值，
+    /// 不存在「键盘一套档位、滑块另一套」的双真相。
     fn step_zoom(&mut self, dir: i32) {
-        if picasa_core::at_log_bound(self.zoom.cell_px(), dir) {
+        if picasa_core::at_linear_bound(self.zoom.cell_px(), dir) {
             return;
         }
-        let next = picasa_core::step_log(self.zoom.cell_px(), dir);
+        let next =
+            picasa_core::step_linear(self.zoom.cell_px(), dir, picasa_core::KEYBOARD_STEP_PX);
         let now = std::time::Instant::now();
-        self.zoom.drag_to(next, now);
+        self.zoom.set_cell_px(next, now);
         self.zoom.end_drag(now);
         self.persist_zoom();
     }
@@ -2683,10 +2710,9 @@ impl OpenPicasaApp {
                         || f.size_class.is_some()
                         || !f.formats.is_empty()
                 });
-                // §7.2：顶栏只放操作/排布/缩放/搜索，不再放大号标题。
+                // §7.2：顶栏只放操作/排布/搜索，不再放大号标题。
                 // 标题与副标题已移到中区左侧（文件树之上）。
-                let zoom_min = picasa_core::at_log_bound(self.zoom.cell_px(), -1);
-                let zoom_max = picasa_core::at_log_bound(self.zoom.cell_px(), 1);
+                // M5-TB-10：缩略图 −/+ 已从顶栏移除，尺寸只在底栏最右的滑块上。
                 // M4.1 `M41-UI-01`：四个对象操作按钮的双态判定，只读内存、不查库。
                 let obj = toolbar::ObjectActionState {
                     has_selection: !self.lib.selection.is_empty(),
@@ -2719,8 +2745,6 @@ impl OpenPicasaApp {
                     self.lib.search_in_current,
                     self.search_open,
                     self.lib.view_mode,
-                    zoom_min,
-                    zoom_max,
                     // 左段右缘与文件夹树右缘对齐（侧栏隐藏时退回默认宽度）
                     if self.sidebar_visible {
                         self.lib.prefs.sidebar_width
@@ -2771,16 +2795,6 @@ impl OpenPicasaApp {
                                     m.surrender_focus(egui::Id::unique("topbar-search"))
                                 });
                             }
-                            ctx.request_repaint();
-                        }
-                        TopbarAction::ZoomOut => {
-                            // 按钮是在本帧开头按「还没步进」的状态画的。
-                            // 不补一帧的话，点到端点后鼠标不动，−/+ 会一直保持可点的颜色。
-                            self.step_zoom(-1);
-                            ctx.request_repaint();
-                        }
-                        TopbarAction::ZoomIn => {
-                            self.step_zoom(1);
                             ctx.request_repaint();
                         }
                         TopbarAction::PickViewMode(mode) => {
@@ -2864,43 +2878,58 @@ impl OpenPicasaApp {
             .exact_size(Metrics::STATUS_H)
             .frame(egui::Frame::new().fill(theme.chrome_bg))
             .show(ui, |ui| {
+                // M5-IA-02：「已用 mm:ss」以**连续运行**计时，而不是批次时刻。
+                // 批次在 watcher 每次外部变化时都会重开，用批次时刻会让读数反复归零。
+                let running_now = snap.running();
+                let elapsed_secs = match self.index_run_started {
+                    Some(t) if running_now => {
+                        self.index_run_stopped_at = None;
+                        Some(t.elapsed().as_secs())
+                    }
+                    Some(t) => {
+                        // 批次之间的空档：短暂停顿不算「停了」，计时继续；
+                        // 超过 INDEX_RUN_GAP 才认为这一轮真的结束，下次重新计时。
+                        let since = *self
+                            .index_run_stopped_at
+                            .get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() >= INDEX_RUN_GAP {
+                            self.index_run_started = None;
+                            self.index_run_stopped_at = None;
+                            None
+                        } else {
+                            Some(t.elapsed().as_secs())
+                        }
+                    }
+                    None if running_now => {
+                        self.index_run_started = Some(std::time::Instant::now());
+                        self.index_run_stopped_at = None;
+                        Some(0)
+                    }
+                    None => None,
+                };
                 let out = statusbar::show(
                     ui,
                     &self.lib,
                     &theme,
-                    &self.mgmt,
                     &self.verify_text,
                     self.zoom.cell_px(),
                     &snap,
+                    elapsed_secs,
                     &self.index_mgr.io,
                 );
-                // M3.1：状态栏滑块已移除（顶栏 −/+ 按钮替代），
-                // zoom_drag / zoom_released 分支随之退役。
-                if out.index_clicked {
-                    // M2.2 §2.6：唯一入口 → 索引管理页（并自动定位到有问题的标签）。
-                    // 旧的 `progress.open_panel()` 不再挂在这里——右下角弹框仍然自己出现
-                    // （M2-FD-29~36 保留），但**索引按钮**只剩这一个。
-                    // 先刷快照再开窗：这一帧的「存储与诊断」不能拿默认的全 0。
-                    self.refresh_mgmt();
-                    self.index_mgr
-                        .open_at(&self.mgmt, self.mgmt.failed_task_count);
+                // M5-TB-10：底栏最右是线性滑块（22–512，step=1）。
+                // `input` 即刻改网格边长；松手才写进 `settings.grid_cell_px`。
+                //
+                // ⚠️ 底栏**没有**可点索引入口 / IO 入口：`StatusbarOut` 里已经没有
+                // 这两个字段（M5-IA-02 已确认，不再作为待定）。索引管理改由
+                // 更多「设置…」→「打开索引管理」与更多「索引管理…」到达。
+                if let Some(px) = out.zoom_px {
+                    self.zoom
+                        .set_cell_px(px, std::time::Instant::now());
                     ctx.request_repaint();
                 }
-                if out.import_clicked {
-                    // M4.3 IDX-18：点全局进度 pill → 打开索引管理并定位「导入 / 导出」。
-                    // 注意顺序：open_at 会按 mgmt 快照选默认标签，所以 tab 要在其后设。
-                    self.refresh_mgmt();
-                    self.index_mgr
-                        .open_at(&self.mgmt, self.mgmt.failed_task_count);
-                    self.index_mgr.tab = picasa_core::MgmtTab::ImportExport;
-                    ctx.request_repaint();
-                }
-                if out.diag_clicked {
-                    // 过渡期：旧的「诊断」页仍从这里打开。它不是"忘了删的旧入口"，
-                    // 而是新页面「存储与诊断」标签还没齐的两项（诊断日志导出、
-                    // 带进度/取消的 VACUUM）目前的唯一可达路径。齐了之后按规格 §9 迭代 3 再删。
-                    self.diagnostics_open = true;
-                    self.diag_dirty = true;
+                if out.zoom_released {
+                    self.persist_zoom();
                 }
             });
 
@@ -3424,6 +3453,30 @@ impl OpenPicasaApp {
         let theme = self.theme;
         let ctx = ui.ctx().clone();
 
+        // M5-IA-04：设置壳（入口壳）。页内的「打开索引管理」「添加关注文件夹…」
+        // 都落到既有能力上——前者与更多菜单「索引管理…」同一个 `open_at`，
+        // 后者与顶栏导入**同一个** `add_folder`（M5-IM-01，不写第二套）。
+        if self.settings_open {
+            if let Some(action) = crate::settings::show(&ctx, &theme, &mut self.settings_open) {
+                match action {
+                    crate::settings::SettingsAction::OpenIndexManager => {
+                        // 先刷快照再开窗：这一帧的「存储与诊断」不能拿默认全 0。
+                        self.refresh_mgmt();
+                        self.index_mgr
+                            .open_at(&self.mgmt, self.mgmt.failed_task_count);
+                        // 设置壳是「启动器」：跳进索引管理后收起，避免两个窗口叠着
+                        // 互相遮（索引管理是独立窗口，关它不影响后台任务）。
+                        self.settings_open = false;
+                    }
+                    crate::settings::SettingsAction::AddFolder => {
+                        // 与顶栏「导入」同一函数：系统选目录 + 同一套 intake 规则。
+                        self.add_folder();
+                    }
+                }
+                ctx.request_repaint();
+            }
+        }
+
         // 排序菜单
         if self.sort_menu_open && self.viewer.is_none() {
             if let Some(action) = toolbar::sort_menu(
@@ -3480,7 +3533,19 @@ impl OpenPicasaApp {
             for a in actions {
                 use crate::topbar::MoreAction;
                 match a {
-                    crate::topbar::TopbarAction::More(MoreAction::AddFolder) => self.add_folder(),
+                    // M5-MN-01：更多菜单不再有「添加文件夹…」（枚举值已删）。
+                    // M5-IA-04：设置… → 设置壳（页内有「打开索引管理」）。
+                    crate::topbar::TopbarAction::More(MoreAction::Settings) => {
+                        self.settings_open = true;
+                    }
+                    crate::topbar::TopbarAction::More(MoreAction::IndexManager) => {
+                        // M5-IA-02：直达五标签索引管理。默认标签逻辑仍走
+                        // `open_at`（失败任务 → 任务，否则离线根 → 关注文件夹…），
+                        // 不默认打开「导入 / 导出」。
+                        self.refresh_mgmt();
+                        self.index_mgr
+                            .open_at(&self.mgmt, self.mgmt.failed_task_count);
+                    }
                     crate::topbar::TopbarAction::More(MoreAction::ToggleRecurse) => {
                         self.toggle_recurse()
                     }
@@ -3512,7 +3577,9 @@ impl OpenPicasaApp {
             {
                 let pos = ctx.input(|i| i.pointer.interact_pos());
                 if let Some(p) = pos
-                    && !Rect::from_min_size(self.more_menu_pos, vec2(200.0, 140.0)).contains(p)
+                    // M5：菜单多了「设置… / 索引管理…」两项，命中区跟着加高，
+                    // 否则点最下面两项时会被这句「点空白关闭」抢先关掉。
+                    && !Rect::from_min_size(self.more_menu_pos, vec2(220.0, 260.0)).contains(p)
                 {
                     self.more_menu_open = false;
                 }

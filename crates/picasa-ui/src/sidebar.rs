@@ -4,8 +4,15 @@
 //!
 //! * 「图库」组：所有照片 / 最近更改 / 星标（→ 只看收藏筛选）
 //! * 时间轴：按拍摄年份筛选（数据来自 `timeline_years`）
+//! * 「标签」「相册」组（应用内虚拟集合，M4）
 //! * 「文件夹」组：真实目录树
+//! * 「导入的索引」组（仅有来源时，紧挨文件夹后，IDX-21）
 //! * 底部照片托盘（收起 / 展开行为不变）
+//!
+//! ## M5-IA-01 / M5-SB-01 的固定顺序
+//!
+//! **图库 → 标签 → 相册 → 文件夹 → 导入的索引（仅有来源时）→ 底部托盘。**
+//! 设置组与「索引管理」侧栏子项不存在；它们不是被隐藏，而是本文件里没有绘制点。
 //!
 //! ## §7 版式（覆盖 M3.1 早期的 Photos 大行高侧栏）
 //!
@@ -163,6 +170,19 @@ pub struct SidebarCtx<'a> {
     pub snapshot: &'a IndexSnapshot,
 }
 
+/// M5-IA-01 / M5-SB-01 的固定分组顺序（「导入的索引」只在有来源时追加在末尾）。
+///
+/// 这是左栏结构的**单一事实源**：`show()` 按它逐组绘制，单测按它断言顺序。
+/// 「设置」组与「索引管理」子项不在此列——M5 已整组删除；设置页与索引管理
+/// 窗口本身仍在（入口改到更多菜单 / 设置壳，见 `app.rs`）。
+pub const SIDEBAR_GROUPS: [&str; 4] = ["图库", "标签", "相册", "文件夹"];
+
+/// 左栏「还没有加入任何文件夹」的指引（`M5-SH-04`）。
+///
+/// 指向**顶栏「导入」**——更多菜单里的「添加文件夹…」已在 M5 删除，
+/// 旧文案会指向一个不存在的菜单项。
+pub const EMPTY_SIDEBAR_HINT: &str = "还没有加入任何文件夹\n点顶栏「导入」添加照片文件夹";
+
 pub fn show(
     ui: &mut Ui,
     lib: &Library,
@@ -199,20 +219,59 @@ pub fn show(
             ui.painter()
                 .rect_filled(ui.max_rect(), 0.0, theme.sidebar_bg);
 
-            // ---- 图库（截图的「图库」组：三行主入口）----
-            section_title(ui, "图库", ctx.favorites_collapsed, &mut actions);
-            if !ctx.favorites_collapsed {
-                favorites(ui, lib, &*ctx, &mut actions);
+            // M5-IA-01 / M5-SB-01：固定顺序
+            //   图库 → 标签 → 相册 → 文件夹 → 导入的索引（仅有来源时，紧挨文件夹后）→ 托盘
+            // 托盘已先占底部；「设置」组及其「索引管理」子项**整组不存在**（不是隐藏）。
+            for group in SIDEBAR_GROUPS {
+                if group != SIDEBAR_GROUPS[0] {
+                    ui.add_space(6.0);
+                }
+                match group {
+                    "图库" => {
+                        section_title(ui, "图库", ctx.favorites_collapsed, &mut actions);
+                        if !ctx.favorites_collapsed {
+                            favorites(ui, lib, &*ctx, &mut actions);
+                        }
+                    }
+                    "标签" => m4_group(
+                        ui,
+                        "标签",
+                        ctx.tags_collapsed,
+                        ctx.tags.to_vec(),
+                        &mut actions,
+                        true,
+                        ctx.tags_active,
+                        ctx.tags_sort,
+                        ctx.show_zero_tags,
+                        if ctx.view_is_all {
+                            None
+                        } else {
+                            Some(ctx.tags_in_view)
+                        },
+                    ),
+                    "相册" => m4_group(
+                        ui,
+                        "相册",
+                        ctx.albums_collapsed,
+                        ctx.albums.to_vec(),
+                        &mut actions,
+                        false,
+                        None,
+                        picasa_core::TagsSort::Name,
+                        false,
+                        None,
+                    ),
+                    "文件夹" => {
+                        section_title(ui, "文件夹", ctx.folders_collapsed, &mut actions);
+                        if !ctx.folders_collapsed {
+                            folder_tree(ui, lib, &*ctx, &mut actions);
+                        }
+                    }
+                    _ => {}
+                }
             }
 
-            // ---- 文件夹（真实目录树）----
-            ui.add_space(6.0);
-            section_title(ui, "文件夹", ctx.folders_collapsed, &mut actions);
-            if !ctx.folders_collapsed {
-                folder_tree(ui, lib, &*ctx, &mut actions);
-            }
-
-            // ---- IDX-21：导入的索引（位于「文件夹」之后、「标签」之前）----
+            // ---- IDX-21 / M5-IA-01：导入的索引（仅当有来源时，紧挨「文件夹」之后）----
             if !ctx.import_groups.is_empty() {
                 ui.add_space(6.0);
                 section_title(ui, "导入的索引", ctx.imported_collapsed, &mut actions);
@@ -220,38 +279,6 @@ pub fn show(
                     imported_index(ui, lib, &*ctx, &mut actions);
                 }
             }
-
-            // ---- M4：标签 / 相册（应用内虚拟集合，不是磁盘目录）----
-            ui.add_space(6.0);
-            m4_group(
-                ui,
-                "标签",
-                ctx.tags_collapsed,
-                ctx.tags.to_vec(),
-                &mut actions,
-                true,
-                ctx.tags_active,
-                ctx.tags_sort,
-                ctx.show_zero_tags,
-                if ctx.view_is_all {
-                    None
-                } else {
-                    Some(ctx.tags_in_view)
-                },
-            );
-            ui.add_space(6.0);
-            m4_group(
-                ui,
-                "相册",
-                ctx.albums_collapsed,
-                ctx.albums.to_vec(),
-                &mut actions,
-                false,
-                None,
-                picasa_core::TagsSort::Name,
-                false,
-                None,
-            );
         });
 
     actions
@@ -629,7 +656,7 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
         ui.horizontal(|ui| {
             ui.add_space(14.0);
             ui.label(
-                egui::RichText::new("还没有加入任何文件夹\n点顶栏「…」→「添加文件夹…」")
+                egui::RichText::new(EMPTY_SIDEBAR_HINT)
                     .size(11.5)
                     .color(t.text_secondary),
             );
@@ -1096,6 +1123,31 @@ fn tray(ui: &mut Ui, lib: &Library, ctx: &mut SidebarCtx<'_>, actions: &mut Vec<
     );
     if cresp.clicked() {
         actions.push(SidebarAction::TrayClear);
+    }
+}
+
+#[cfg(test)]
+mod m5_sidebar_order_tests {
+    use super::*;
+
+    /// `M5-IA-01` / `M5-SB-01`：固定顺序是
+    /// 图库 → 标签 → 相册 → 文件夹；「导入的索引」只在有来源时紧挨文件夹之后。
+    #[test]
+    fn m5_sidebar_group_order_is_fixed() {
+        assert_eq!(SIDEBAR_GROUPS, ["图库", "标签", "相册", "文件夹"]);
+        // 设置组与「索引管理」子项整组不存在（不是隐藏）。
+        assert!(!SIDEBAR_GROUPS.contains(&"设置"));
+        assert!(!SIDEBAR_GROUPS.iter().any(|g| g.contains("索引管理")));
+    }
+
+    /// `M5-SH-04`：左栏空态指向顶栏导入，不再指向已删除的「… → 添加文件夹…」。
+    #[test]
+    fn m5_sidebar_empty_hint_points_at_import() {
+        let hint = EMPTY_SIDEBAR_HINT;
+        assert!(hint.contains("还没有加入任何文件夹"), "{hint}");
+        assert!(hint.contains("「导入」"), "{hint}");
+        assert!(!hint.contains("「…」"), "{hint}");
+        assert!(!hint.contains("添加文件夹"), "{hint}");
     }
 }
 

@@ -5,7 +5,7 @@
 //! ```text
 //! ┌──────────────────────────────────────────────────────────────────────────┐
 //! │ ●●●  图库 / 旅行 / 京都                                        （上行）  │
-//! │ [侧栏][导入][幻灯片][编辑]   [方格|纵瀑|横瀑] [−|+]   [🔍][⇅][≡][…]（下行）│
+//! │ [侧栏][导入][幻灯片][编辑]      [方格|纵瀑|横瀑]     [🔍][⇅][≡][…]（下行）│
 //! └──────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -14,9 +14,10 @@
 //! * 上行：红绿灯 + **双语境面包屑**——文件夹语境画「图库 / 祖先… / 当前」
 //!   （祖先段可点击跳转），根语境弱化为单段「图库」；
 //! * 下行分**三段**：左段 = 侧栏开关 + 导入/幻灯片/编辑（对象操作）；
-//!   中段 = 排布胶囊 + −/+（图库浏览，居中）；右段 = 搜索/排序/筛选/…（右对齐）；
+//!   中段 = 排布胶囊（图库浏览，居中）；右段 = 搜索/排序/筛选/…（右对齐）；
 //! * 排布是**无文字三图标连体胶囊**，选中片为**淡橙圆**（定稿截图采样）；
-//! * −/+ 维持连体胶囊（用户 2026-11-04 拍板：不做滑杆）；搜索在右段首位
+//! * **M5-TB-10**：顶栏缩略图 −/+ 连同占位一起退役，缩略图尺寸改到底栏
+//!   最右侧的线性滑块（22–512 px，step=1）；搜索在右段首位
 //!   （点开后输入框在上行右侧原地展开，不挤压下行控件）。
 //!
 //! 排序 / 筛选 / 「…」保留为右侧图标组：它们是既有功能，不能在版式重排里丢。
@@ -37,10 +38,6 @@ pub enum TopbarAction {
     AddFolder,
     /// 占位入口（幻灯片 / 编辑）：App 用 toast 说明，不做假功能
     Placeholder(&'static str),
-    /// 缩小一格（对数档，`⌘−` 同路径）
-    ZoomOut,
-    /// 放大一格（对数档，`⌘+` 同路径）
-    ZoomIn,
     /// 视图模式三选一（原「视图」菜单的三项）
     PickViewMode(ViewMode),
     /// 打开排序弹出菜单（由 App 画，位置取按钮 rect）
@@ -77,14 +74,21 @@ pub enum TopbarAction {
 }
 
 /// 「…」菜单里的真实功能项。
+///
+/// M5-MN-01：`AddFolder` 已删除——更多菜单不再提供「添加文件夹…」，
+/// 添加关注文件夹只走顶栏「导入」按钮（索引进度空态与设置壳也走同一个
+/// [`TopbarAction::AddFolder`]）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoreAction {
-    AddFolder,
     ToggleRecurse,
     ToggleFullscreen,
     About,
     /// 方格模式下显示/隐藏文件名（§7.4）
     ToggleShowFilename,
+    /// M5-IA-04：打开设置页（⌘,）。
+    Settings,
+    /// M5-IA-02：直达五标签索引管理窗口。
+    IndexManager,
 }
 
 pub struct TopbarOutput {
@@ -144,9 +148,6 @@ pub fn show(
     search: &mut String,
     search_open: bool,
     search_in_current: bool,
-    // 缩放是否到端点（−/+ 置灰）
-    zoom_min: bool,
-    zoom_max: bool,
     // 左栏当前宽度（M32-UI-01/02 v1.3：左段右缘与文件夹树右缘对齐）
     sidebar_w: f32,
     // M4.1：四个对象操作按钮的双态判定（App 从内存选中集算好传入）
@@ -228,13 +229,12 @@ pub fn show(
     // 纯函数算 rect，便于单测「不与中段重叠」（窗口最窄 900 时也要守住）。
     let obj_rects = object_button_rects(edit_r.right(), bar2_center, d);
     let [fav_r, cap_r, tag_r, tray_r] = obj_rects;
-    // ---- 中段（排布胶囊 + −/+）：默认居中；窄窗口让左段优先 ----
-    // M4.1：左段在「编辑」之后新增四枚对象操作钮。窗口最窄 900 时绝对居中会
-    // 与新增按钮重叠——此时把中段右移到四按钮组之后（1280 默认值仍居中）。
+    // ---- 中段（排布胶囊）：默认居中；窄窗口让左段优先 ----
+    // M5-TB-10：顶栏缩略图 −/+ 及其占位已去掉，中段只剩三枚排布图标。
+    // 左段在「编辑」之后有四枚对象操作钮；窗口最窄 900 时绝对居中会与它们
+    // 重叠——把中段右移到四按钮组之后（1280 默认值仍居中）。
     let layout_w = 3.0 * 34.0;
-    let zoom_w = 76.0;
-    let mid_gap = 10.0;
-    let mid_w = layout_w + mid_gap + zoom_w;
+    let mid_w = layout_w;
     let centered_mid_left = rect.left() + (rect.width() - mid_w) / 2.0;
     let after_objects = obj_rects[3].right() + 18.0;
     let mid_left = centered_mid_left
@@ -245,10 +245,6 @@ pub fn show(
     let layout_rect = Rect::from_min_size(
         pos2(mid_left, bar2_center - Metrics::ZOOM_PILL_H / 2.0),
         vec2(layout_w, Metrics::ZOOM_PILL_H),
-    );
-    let zoom_rect = Rect::from_min_size(
-        pos2(layout_rect.right() + mid_gap, bar2_center - Metrics::ZOOM_PILL_H / 2.0),
-        vec2(zoom_w, Metrics::ZOOM_PILL_H),
     );
 
 
@@ -272,7 +268,9 @@ pub fn show(
         (
             import_r,
             Icon::Import,
-            "导入：添加文件夹…",
+            // M5-IM-01 / M5-TB-02：顶栏导入是添加关注文件夹的主入口。
+            // 打开的是系统选目录面板（标题「选择照片文件夹（只读，不会修改你的文件）」）。
+            "导入：添加照片文件夹…",
             Some(TopbarAction::AddFolder),
         ),
         (
@@ -330,9 +328,6 @@ pub fn show(
 
     // ---- ③ 排布：无文字三图标连体胶囊 ----
     draw_layout_pill(ui, &painter, layout_rect, theme, view_mode, &mut out);
-
-    // ---- ④ −/+ 缩放胶囊 ----
-    draw_zoom_pill(ui, &painter, zoom_rect, theme, zoom_min, zoom_max, &mut out);
 
     // ---- ⑤ 搜索：紧接在 + 之后（展开时输入框画到上行右侧）----
     if search_open {
@@ -562,96 +557,6 @@ fn icon_btn_ex(
     resp
 }
 
-/// −/+ 缩放胶囊：**白底圆角胶囊 + 软阴影**（毛玻璃）、中间 1px 竖线，左右两枚可点。
-///
-/// 点击走**对数档**（`picasa_core::step_log`）——与 ⌘+/⌘− 同一条路径；
-/// 到端点后按钮置灰（截图里按钮永远可见，端点行为由置灰表达）。
-#[allow(clippy::too_many_arguments)]
-fn draw_zoom_pill(
-    ui: &mut Ui,
-    painter: &egui::Painter,
-    rect: Rect,
-    theme: &Theme,
-    zoom_min: bool,
-    zoom_max: bool,
-    out: &mut TopbarOutput,
-) {
-    // v1.8：回退 M4 白底胶囊，但用三件套阴影脱底。
-    draw_control_chrome(painter, rect, rect.height() / 2.0, theme);
-    painter.rect_filled(rect, rect.height() / 2.0, Color32::WHITE);
-    painter.rect_stroke(
-        rect,
-        rect.height() / 2.0,
-        egui::Stroke::new(1.0, theme.control_hairline),
-        egui::StrokeKind::Inside,
-    );
-    // 中缝竖线
-    let mid_x = rect.center().x;
-    painter.line_segment(
-        [
-            pos2(mid_x, rect.top() + 6.0),
-            pos2(mid_x, rect.bottom() - 6.0),
-        ],
-        egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 0, 0, 36)),
-    );
-    let half_w = rect.width() / 2.0;
-    let minus_r = Rect::from_min_size(rect.left_top(), vec2(half_w, rect.height()));
-    let plus_r = Rect::from_min_size(pos2(mid_x, rect.top()), vec2(half_w, rect.height()));
-
-    for (r, icon, enabled, tip, action) in [
-        (
-            minus_r,
-            Icon::Minus,
-            !zoom_min,
-            "缩小缩略图 · ⌘−",
-            TopbarAction::ZoomOut,
-        ),
-        (
-            plus_r,
-            Icon::Plus,
-            !zoom_max,
-            "放大缩略图 · ⌘+",
-            TopbarAction::ZoomIn,
-        ),
-    ] {
-        // 端点只响应悬停：再点不会发出一次无效缩放，光标也不会变成手形。
-        let sense = if enabled {
-            Sense::click()
-        } else {
-            Sense::hover()
-        };
-        let resp = ui.interact(r, ui.scope_id().with(("zoom", tip)), sense);
-        if !enabled {
-            painter.rect_filled(
-                r,
-                rect.height() / 2.0,
-                Color32::from_rgba_unmultiplied(255, 255, 255, 150),
-            );
-        } else if resp.hovered() {
-            painter.rect_filled(r, rect.height() / 2.0, theme.sidebar_hover);
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        let color = if enabled {
-            theme.toolbar_icon
-        } else {
-            theme.text_disabled
-        };
-        let inner = Rect::from_center_size(r.center(), vec2(14.0, 14.0));
-        icons::draw(painter, icon, inner, color, 1.4);
-        let tip = if enabled {
-            tip
-        } else if matches!(action, TopbarAction::ZoomOut) {
-            "已是最小缩略图"
-        } else {
-            "已是最大缩略图"
-        };
-        resp.clone().on_hover_text(tip);
-        if enabled && resp.clicked() {
-            out.actions.push(action);
-        }
-    }
-}
-
 /// 排布胶囊：三枚无文字图标（方格 / 纵向瀑布 / 横向瀑布），**白底胶囊 + 软阴影**，
 /// 选中片为**淡橙圆**（定稿效果图采样，`09` §7.2 像素校准）。
 fn draw_layout_pill(
@@ -814,7 +719,43 @@ fn draw_search(
     }
 }
 
-/// 「…」弹出菜单：真实功能项（添加文件夹 / 含子文件夹 / 全屏 / 关于 / 文件名）。
+/// 「…」菜单的可见项（纯函数，便于单测锁定 M5 的入口集合）。
+///
+/// 顺序照 v1.4 壳：含子文件夹、显示文件名、设置…、索引管理…、全屏、关于。
+/// **没有**「添加文件夹…」（M5-MN-01）；也没有「列表布局（演示扩展）」
+/// 「恢复演示数据」「帮助与快捷键」「切换主题」——最后两项是 §11 #3 / #4 未决。
+pub fn more_menu_items(
+    recurse_on: bool,
+    recurse_available: bool,
+    show_filename: bool,
+) -> Vec<(String, bool, MoreAction)> {
+    vec![
+        (
+            if recurse_on {
+                "✓ 只看本文件夹".to_string()
+            } else {
+                "含子文件夹".to_string()
+            },
+            recurse_available,
+            MoreAction::ToggleRecurse,
+        ),
+        (
+            if show_filename {
+                "✓ 方格显示文件名".to_string()
+            } else {
+                "方格显示文件名".to_string()
+            },
+            true,
+            MoreAction::ToggleShowFilename,
+        ),
+        ("设置…".to_string(), true, MoreAction::Settings),
+        ("索引管理…".to_string(), true, MoreAction::IndexManager),
+        ("全屏".to_string(), true, MoreAction::ToggleFullscreen),
+        ("关于 OpenPicasa".to_string(), true, MoreAction::About),
+    ]
+}
+
+/// 「…」弹出菜单：真实功能项（含子文件夹 / 文件名 / 设置 / 索引管理 / 全屏 / 关于）。
 pub fn more_menu(
     ui: &mut Ui,
     at: Pos2,
@@ -843,36 +784,24 @@ pub fn more_menu(
                 .inner_margin(egui::Margin::same(5))
                 .show(ui, |ui| {
                     ui.set_min_width(210.0);
-                    let items: Vec<(String, bool, MoreAction)> = vec![
-                        ("添加文件夹…".to_string(), true, MoreAction::AddFolder),
-                        (
-                            if recurse_on {
-                                "✓ 只看本文件夹".to_string()
-                            } else {
-                                "含子文件夹".to_string()
-                            },
-                            recurse_available,
-                            MoreAction::ToggleRecurse,
-                        ),
-                        (
-                            if show_filename {
-                                "✓ 方格显示文件名".to_string()
-                            } else {
-                                "方格显示文件名".to_string()
-                            },
-                            true,
-                            MoreAction::ToggleShowFilename,
-                        ),
-                        ("全屏".to_string(), true, MoreAction::ToggleFullscreen),
-                        ("关于 OpenPicasa".to_string(), true, MoreAction::About),
-                    ];
-                    for (label, enabled, action) in items {
+                    for (label, enabled, action) in
+                        more_menu_items(recurse_on, recurse_available, show_filename)
+                    {
                         let btn = ui.add_enabled(
                             enabled,
                             egui::Button::new(label)
                                 .frame(false)
                                 .min_size(vec2(ui.available_width(), 22.0)),
                         );
+                        // 设置… / 索引管理… 是 M5 新增的两条入口，快捷键写在悬停提示里，
+                        // 不额外占菜单宽度（v1.4 截图里显示在右侧）。
+                        let btn = match action {
+                            MoreAction::Settings => btn.on_hover_text("设置 · ⌘,"),
+                            MoreAction::IndexManager => {
+                                btn.on_hover_text("索引管理（五标签 · 后台任务不会因关窗取消）")
+                            }
+                            _ => btn,
+                        };
                         if btn.clicked() {
                             actions.push(TopbarAction::More(action));
                             ui.close();
@@ -1002,7 +931,7 @@ mod m41_tests {
         let rects = object_button_rects(300.0, 60.0, d);
         let after_objects = rects[3].right() + 18.0;
         for width in [1280.0_f32, 900.0_f32] {
-            let mid_w = 3.0 * 34.0 + 10.0 + 76.0;
+            let mid_w = 3.0 * 34.0;
             let centered = (width - mid_w) / 2.0;
             let search_left = width - 14.0 - 4.0 * d - 2.0 * 4.0 - 14.0; // 右段近似左缘
             let mid_left = centered
@@ -1015,6 +944,46 @@ mod m41_tests {
                 rects[3].right()
             );
         }
+    }
+
+    /// `M5-MN-01` / `M5-IA-04`：更多菜单的第一项不再是「添加文件夹…」，
+    /// 必须有「设置…」与「索引管理…」，且没有演示扩展 / 恢复演示数据。
+    #[test]
+    fn m5_more_menu_drops_add_folder_and_exposes_settings_and_index_manager() {
+        let items = more_menu_items(false, true, true);
+        let labels: Vec<&str> = items.iter().map(|(l, _, _)| l.as_str()).collect();
+        assert!(
+            !labels.iter().any(|l| l.contains("添加文件夹")),
+            "更多菜单不许再有「添加文件夹…」：{labels:?}"
+        );
+        assert!(labels.contains(&"设置…"), "{labels:?}");
+        assert!(labels.contains(&"索引管理…"), "{labels:?}");
+        assert!(labels.contains(&"含子文件夹"), "{labels:?}");
+        assert!(labels.contains(&"全屏"), "{labels:?}");
+        assert!(labels.contains(&"关于 OpenPicasa"), "{labels:?}");
+        // 「演示与数据」不得进入正式产品；「列表布局」「恢复演示数据」是原型 OUT-C。
+        for banned in ["演示", "列表布局", "恢复演示数据", "帮助与快捷键"] {
+            assert!(
+                !labels.iter().any(|l| l.contains(banned)),
+                "不该出现 {banned}：{labels:?}"
+            );
+        }
+        let actions: Vec<MoreAction> = items.iter().map(|(_, _, a)| *a).collect();
+        assert!(actions.contains(&MoreAction::Settings));
+        assert!(actions.contains(&MoreAction::IndexManager));
+    }
+
+    /// `M5-MN-01`：文件夹语境才有「含子文件夹」；非文件夹语境置灰但仍在。
+    #[test]
+    fn m5_more_menu_recurse_is_context_gated() {
+        let items = more_menu_items(false, false, false);
+        let recurse = items
+            .iter()
+            .find(|(_, _, a)| *a == MoreAction::ToggleRecurse)
+            .expect("含子文件夹这一项仍在");
+        assert!(!recurse.1, "非文件夹语境应置灰");
+        let items = more_menu_items(true, true, false);
+        assert_eq!(items[0].0, "✓ 只看本文件夹", "开着时以勾选说明当前语义");
     }
 
     /// `M41-UI-01`：双态判定的默认值（无选中）应让两个按钮都不进选中态。

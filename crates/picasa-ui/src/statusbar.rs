@@ -1,77 +1,78 @@
-//! 底部状态栏（U-33~U-35）+ **唯一的索引入口**（M2.2 §2.6 / M3.1 §7.5）。
+//! 底部状态栏（U-33~U-35）+ **M5 的只读索引进度**与缩略图滑块。
 //!
-//! ## §7.5 定稿
+//! ## M5-IA-02 / M5-IA-04 / M5-IDX-01：底栏不再是入口
 //!
-//! * 左：本地信任提示「本地 · 不改原文件」；
-//! * 中：视图语境计数、已选数等（精简，不重复标题副标题）；
-//! * **最右**：「索引管理」——既有索引管理流程的唯一显式按钮入口。
+//! | 改动 | 前（M4 / 被 v1.4 覆盖） | 后（M5） |
+//! | --- | --- | --- |
+//! | 「索引管理」按钮 | 底栏右区恒为一个按钮（四态文案都是「索引管理」+ 红角标） | **删除** |
+//! | 角标 | 底栏按钮上的红底数字 + 三句悬停 | **删除**（失败信息仍在索引管理「任务」页与浮层） |
+//! | IO 短进度 pill | 可点，点开切到「导入 / 导出」标签 | **只读**，放底栏左侧，不可点 |
+//! | 缩略图滑块 | 顶栏 −/+ 胶囊（对数档） | 底栏**最右**：线性滑块 + 实时像素文案 |
 //!
-//! ## 三个入口合成一个（M4-BUG-04 已收口）
+//! 索引管理的入口改由「更多 → 设置… → 打开索引管理」与「更多 → 索引管理…」
+//! 直达（见 `app.rs`）；本模块只画状态，不产出任何打开窗口的动作。
 //!
-//! 之前这里有「索引进度」和「诊断」两个按钮，工具栏还有一个「索引管理」二级菜单。
-//! 三个入口的问题是**功能会漏**（R-M22-5）：加一个操作得记得在三处都加一遍。
-//! 现在索引只剩这一个按钮，点开是五个标签的索引管理页（[`crate::index_mgr`]）。
+//! ## 只读运行状态的文案口径
 //!
-//! ✅ **旧「诊断」入口已于 M4 移除**：它承载的两件事都已在新的「存储与诊断」标签落地——
-//! 诊断日志导出（`m4_export_diag_log`，§4.9）、带反馈的 VACUUM（`MgrAction::Vacuum` → `vacuum()`）。
-//! 底栏不再出现「诊断」等需解释的术语（`10` M32-UI-11 验收项）；零功能丢失已兑现。
+//! * 索引任务运行中：`已处理 N 张 · 已用 mm:ss`（[`running_status_text`]）。
+//!   N 是**分项之和**的已完成数；**没有分母、没有百分比、没有 ETA**——
+//!   `TaskView.elapsed_text` 明确写了「不许加 ETA」。
+//! * 导入 / 导出运行中：短句沿用 [`crate::index_mgr::progress_short_label`]
+//!   （阶段 + 已处理 N / M）。这是**条目口径**，与照片张数分开说。
+//! * 两者同时进行：索引短句在前、IO 短句在后，中间用 `·` 分隔，仍是一行状态。
 //!
-//! 入口**放在状态栏右区**：不占栅格宽度，也不动左栏布局——这是 `04` §2.2 的硬约束，
-//! 因为进度 UI 的本分是"如实呈现"，不是重新排版整个界面。
+//! ## 缩略图滑块
 //!
-//! ## 四态互斥（§2.6）
-//!
-//! | 态 | 条件 |
-//! | --- | --- |
-//! | 空闲 | 无任务、角标 = 0 |
-//! | 进行中 | 有 `Running` 任务（+ 环形指示，**无百分比数字**） |
-//! | 系统暂停 | 任意任务 `Paused` |
-//! | 需要处理 | 角标 > 0 |
-//!
-//! 判定的**唯一实现**在 [`picasa_core::MgmtSnapshot::entry_state`]，这里只负责画——
-//! 「失败优先于进度」（R-M2-4）那条规则不能有两份。
+//! 范围 **22–512 px**、线性 **step=1**、`input` 即刻改网格边长（`ZoomState::set_cell_px`），
+//! 松手（`drag_stopped`）与键盘动作后写入 `settings.grid_cell_px`。
+//! 与键盘共用同一状态：⌘−/⌘1 小 16 px、⌘+/⌘=/⌘2 大 16 px、⌘0 回 96 px。
 
 use eframe::egui::{self, Align2, FontId, Rect, Ui, pos2, vec2};
-use picasa_core::{IndexEntryState, IndexSnapshot, Library, MgmtSnapshot, View};
+use picasa_core::{IndexSnapshot, Library};
 
 use crate::index_mgr::IoUi;
 use crate::theme::{Metrics, Theme};
 
-/// 状态栏的一帧输出（只有「入口被点」需要上层处理）。
+/// 状态栏的一帧输出。
 ///
-/// ## M3.1 变更
-///
-/// 缩放滑块已从状态栏移除（用户指令：滑块改成顶栏的 −/+ 按钮）。
-/// `zoom_drag` / `zoom_released` 字段与滑块绘制一并退役。
+/// M5 起**不再**有 `index_clicked` / `import_clicked`：底栏没有任何可点入口
+/// （`M5-IA-02` 已确认，不再作为待定）。只剩滑块的「拖动中 / 松手」两类事件。
 #[derive(Clone, Debug, Default)]
 pub struct StatusbarOut {
-    /// 索引入口被点（打开索引管理页）
-    pub index_clicked: bool,
-    /// 「诊断」入口被点（F 加固）。**过渡期保留**，见文件头注释。
-    pub diag_clicked: bool,
-    /// M4.3 IDX-18：全局导入 / 导出进度指示器被点 → 打开「导入 / 导出」标签。
-    pub import_clicked: bool,
-    pub button_rect: Option<Rect>,
+    /// 滑块本帧被拖动 / 点轨道改值：新的格边长（逻辑 px，整数）。
+    ///
+    /// `Some` 表示「立刻改网格边长」（`M5-TB-10` 的 `input` 即刻生效）；
+    /// `None` 表示本帧没动滑块。
+    pub zoom_px: Option<f32>,
+    /// 滑块松手（或点击轨道后）——把值写进 `settings.grid_cell_px`。
+    pub zoom_released: bool,
 }
 
-/// 索引入口按钮宽度（图标 + 文案 + 角标）。定值，避免文字长度影响布局。
-const INDEX_BTN_W: f32 = 104.0;
-/// 角标圆点直径
-const BADGE_D: f32 = 14.0;
+/// 滑块两侧的像素文案宽度（「512 px」），定值让滑块不会随数字长度抖动。
+const PX_LABEL_W: f32 = 48.0;
+/// 「缩略图」标题宽度。
+const SLIDER_TITLE_W: f32 = 42.0;
+/// 滑块本体宽度（成组贴右，v1.4 量感 ≈ 96）。
+const SLIDER_W: f32 = 96.0;
 
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     lib: &Library,
     theme: &Theme,
-    mgmt: &MgmtSnapshot,
-    // §4.8 启动校验的进度文案（空 = 没在跑）
+    // §4.8 启动校验的进度文案（空 = 没在跑）；M5 起只在左侧只读状态里出现
     verify_text: &str,
-    // M3.1 起不再使用：缩放改为顶栏 −/+ 按钮（参数保留以减少调用点改动）
-    _zoom_px: f32,
-    // M32-UI-09 起不再使用：总数/结果数只在主区标题行出现
-    _snap: &IndexSnapshot,
-    // M4.3 IDX-18：导入 / 导出全局进度指示器的数据源。
+    // 当前缩略图边长（逻辑 px）
+    zoom_px: f32,
+    // 索引进度快照：左侧只读「已处理 N 张 · 已用 mm:ss」
+    snap: &IndexSnapshot,
+    // 本次连续运行已持续多少秒（None = 当前没有运行中的索引任务）。
+    //
+    // 为什么不直接用快照的 `started_at`：watcher 每次外部变化都会开一个新批次，
+    // 用批次时刻会让「已用」在连续运行时反复归零（实测 9 张的库每几秒一次）。
+    // 由 App 用单调时钟记住「第一次看到 running 的时刻」，跨批次连续。
+    elapsed_secs: Option<u64>,
+    // M4.3 IDX-18：导入 / 导出进度（只读短句）
     io: &IoUi,
 ) -> StatusbarOut {
     let mut out = StatusbarOut::default();
@@ -89,206 +90,332 @@ pub fn show(
 
     let font = FontId::new(11.0, egui::FontFamily::Proportional);
 
-    // M32-UI-11 / M32-UI-09（v1.2）：
-    // * 「本地 · 不改原文件」从底栏退役——该文案改到编辑入口/保存环节出现（F4 域落地时接线）；
-    // * 总数/结果数不再在底栏重复（主区标题行是唯一结果数位置）；
-    // 普通浏览态底栏左侧允许为空，右区依次是：已选 N 张 → 诊断 → 索引入口。
-    let _ = font;
+    // ---- 右区：缩略图滑块 + 实时像素文案（成组贴右）----
+    // 先画右区，拿到它的左缘，左区才知道自己能用多少宽度。
+    let slider = draw_zoom_slider(ui, &painter, rect, theme, zoom_px, &mut out);
 
-    // 右区：唯一入口 → 选中数
-    let btn = Rect::from_center_size(
-        pos2(rect.right() - 8.0 - INDEX_BTN_W / 2.0, rect.center().y),
-        vec2(INDEX_BTN_W, Metrics::STATUS_H - 4.0),
-    );
-    out.button_rect = Some(btn);
-    out.index_clicked = index_entry_button(ui, theme, mgmt, btn, &font, verify_text);
-
-    // M4-BUG-04：旧「诊断」入口退役。它承载的两件事已在索引管理窗口
-    // 「存储与诊断」标签落地：诊断日志导出（`m4_export_diag_log`）、带 toast 反馈的
-    // VACUUM（`MgrAction::Vacuum` → `vacuum()`）。底栏不再出现「诊断 / 索引 / 缓存 / 本地」
-    // 等需解释的术语（`10` M32-UI-11 验收项）。`diag_clicked` 保留在结构里恒为 false，
-    // 避免牵动调用点签名；索引管理窗口仍是唯一入口。
-    out.diag_clicked = false;
-
-    // M4.3 IDX-18 ②「全局指示器」：导入 / 导出任务活跃时，在索引入口左侧画一个
-    // 紧凑 pill（阶段 + 已处理 N / M）。它是**跨标签可见**的唯一入口：用户关掉索引
-    // 管理窗口、在别的标签浏览照片时，仍能看见后台任务在跑并一键跳回详情。
-    // 总数未知画不确定条、不编造百分比；确定态画单调百分比（io.percent 上包络）。
-    // 永久禁令：任何状态都不显示 ETA / 预计 / 剩余时间。
-    let mut left_edge = btn.left();
-    if let Some(snap) = &io.snapshot
-        && (io.state == crate::index_mgr::IoState::Running
-            || io.state == crate::index_mgr::IoState::Preparing)
-    {
-        const PILL_W: f32 = 210.0;
-        const BAR_H: f32 = 4.0;
-        let pill = Rect::from_center_size(
-            pos2(left_edge - 10.0 - PILL_W / 2.0, rect.center().y),
-            vec2(PILL_W, Metrics::STATUS_H - 4.0),
-        );
-        left_edge = pill.left();
-        let pill_resp = ui.interact(
-            pill,
-            ui.scope_id().with("io-progress-pill"),
-            egui::Sense::click(),
-        );
-        out.import_clicked = pill_resp.clicked();
-        if pill_resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            painter.rect_filled(pill, 2.0, theme.cell_hover);
-        }
-        let short = crate::index_mgr::progress_short_label(snap);
-        painter.text(
-            pos2(pill.left() + 8.0, pill.center().y - 5.0),
-            Align2::LEFT_CENTER,
-            short,
-            FontId::new(10.0, egui::FontFamily::Proportional),
-            theme.text_primary,
-        );
-        let bar_rect = Rect::from_min_size(
-            pos2(pill.left() + 8.0, pill.bottom() - BAR_H - 3.0),
-            vec2(PILL_W - 16.0, BAR_H),
-        );
-        painter.rect_filled(bar_rect, 0.0, theme.separator);
-        let frac = snap.fraction().unwrap_or(0.3);
-        let fill = Rect::from_min_size(bar_rect.left_top(), vec2(bar_rect.width() * frac, BAR_H));
-        painter.rect_filled(fill, 0.0, theme.progress);
-        // 不确定态：让 egui 持续重绘（循环条动画）；确定态不额外唤醒。
-        if snap.fraction().is_none() {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-        }
-        if pill_resp.hovered() {
-            pill_resp.on_hover_text("点击查看导入 / 导出进度详情");
+    // ---- 左区：只读运行状态（不可点）----
+    // 有运行任务时先报索引任务、再报 IO；都空闲时才显示「已选 N 张」。
+    // 右侧硬边界 = 滑块组左缘 - 12，状态文字**永远在滑块左边**。
+    let mut texts: Vec<String> = Vec::new();
+    if let Some(t) = running_status_text(snap, elapsed_secs) {
+        texts.push(t);
+    }
+    if let Some(t) = io_status_text(io) {
+        texts.push(t);
+    }
+    // 启动校验（L1/L2）也是后台状态，只读展示；不带百分比、不带 ETA。
+    if !verify_text.is_empty() {
+        texts.push(format!("启动校验：{verify_text}"));
+    }
+    if texts.is_empty() {
+        let sel = lib.selected_count();
+        if sel > 0 {
+            texts.push(format!("已选 {sel} 张"));
         }
     }
-
-    // ---- 缩放滑块已于 M3.1 移除；M4 起底栏右侧只剩「索引管理」唯一入口。
-    let sel = lib.selected_count();
-    if sel > 0 {
-        painter.text(
-            pos2(left_edge - 10.0, rect.center().y),
-            Align2::RIGHT_CENTER,
-            format!("已选 {sel} 张"),
-            font,
+    // 运行中的「已用 mm:ss」要跟着走：egui 是事件驱动的，没有新帧就不会重算，
+    // 底栏会停在「已用 00:00」直到用户碰鼠标。这里按 4 fps 约一帧即可
+    // （不打满 60 fps：软件光栅下那是白烧 CPU）。
+    if running_status_text(snap, elapsed_secs).is_some() || io_status_text(io).is_some() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
+    }
+    if let Some(text) = texts.first() {
+        let x = rect.left() + 16.0;
+        let mut galley = painter.layout_no_wrap(text.clone(), font.clone(), theme.status_text);
+        // 窄窗口：放不下就截断成「…」，而不是压到滑块上。
+        let room = (slider.left() - 12.0 - x).max(0.0);
+        if galley.size().x > room {
+            let keep = ((text.chars().count() as f32) * room / galley.size().x).floor() as usize;
+            let short: String = text.chars().take(keep.max(1)).collect();
+            galley = painter.layout_no_wrap(format!("{short}…"), font.clone(), theme.status_text);
+        }
+        painter.galley(
+            pos2(x, rect.center().y - galley.size().y / 2.0),
+            galley,
             theme.status_text,
         );
     }
+
     out
 }
 
-/// 画唯一入口：四态 + 角标。右键**无菜单**（§2.6）。
-fn index_entry_button(
-    ui: &mut Ui,
-    theme: &Theme,
-    mgmt: &MgmtSnapshot,
-    rect: Rect,
-    font: &FontId,
-    // §4.8 启动校验的进度文案（空 = 没在跑）
-    verify_text: &str,
-) -> bool {
-    let painter = ui.painter_at(rect);
-    let resp = ui.interact(
-        rect,
-        ui.scope_id().with("index-entry"),
-        egui::Sense::click(),
-    );
-    let state = mgmt.entry_state();
-
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        painter.rect_filled(rect, 2.0, theme.cell_hover);
+/// 运行中的索引任务只读文案：`已处理 N 张 · 已用 mm:ss`。
+///
+/// 口径（`M5-IDX-01`）：
+/// * **只有已完成张数与已用时长**，不出现分母、百分号、ETA；
+/// * 分母未知时同样只用 N——不造 `N / ?`，更不造百分比；
+/// * 没有运行中的索引任务 → `None`（空闲态底栏左侧允许为空）。
+pub fn running_status_text(snap: &IndexSnapshot, elapsed_secs: Option<u64>) -> Option<String> {
+    // 只看还在跑的任务：已完成 / 失败的旧任务不该在底栏常驻。
+    let running: Vec<&picasa_core::TaskSnapshot> = snap
+        .tasks
+        .iter()
+        .filter(|t| t.state.is_running())
+        .collect();
+    if running.is_empty() {
+        return None;
     }
-
-    let (label, color) = match state {
-        // §7.5：入口文案固定为「索引管理」，状态只体现在颜色/指示器/角标上，
-        // 避免用户找不到「索引管理」四个字。
-        IndexEntryState::Idle => ("索引管理", theme.status_text),
-        IndexEntryState::Running => ("索引管理", theme.progress),
-        IndexEntryState::Paused => ("索引管理", theme.warn),
-        IndexEntryState::Attention => ("索引管理", theme.danger),
-    };
-
-    // 进行中：轻量环形指示（**无百分比数字**，§2.6）
-    if state.shows_spinner() {
-        let c = pos2(rect.left() + 10.0, rect.center().y);
-        let r = 5.0;
-        // 用 egui 的时间驱动旋转：每帧重绘，不必自己起动画线程
-        let t = ui.ctx().input(|i| i.time);
-        let a = (t * 3.0) as f32;
-        painter.circle_stroke(c, r, egui::Stroke::new(1.5, theme.separator));
-        painter.line_segment(
-            [c, pos2(c.x + r * a.cos(), c.y + r * a.sin())],
-            egui::Stroke::new(1.5, color),
-        );
-    }
-
-    painter.text(
-        pos2(rect.left() + 22.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        label,
-        font.clone(),
-        color,
-    );
-
-    // 角标：只在「需要处理」态画（§2.6），红底白字，≥100 显示 99+
-    if state.shows_badge() {
-        let c = pos2(rect.right() - BADGE_D / 2.0 - 2.0, rect.center().y);
-        painter.circle_filled(c, BADGE_D / 2.0, theme.danger);
-        painter.text(
-            c,
-            Align2::CENTER_CENTER,
-            mgmt.badge_text(),
-            FontId::new(9.0, egui::FontFamily::Proportional),
-            egui::Color32::WHITE,
-        );
-    }
-
-    // 悬停解释角标（§4.4：三行，为 0 的分量省略）
-    // ⚠️ `on_hover_text` 会**移走** `Response`，所以点击状态必须在它之前取出来。
-    let clicked = resp.clicked();
-    if resp.hovered() {
-        let mut lines = mgmt.badge_tooltip(mgmt.failed_task_count);
-        // §4.8 要求启动校验「可见」：进度挂在入口的 tooltip 上，
-        // 不额外占状态栏——校验是后台行为，进了角标反而像「出问题了」。
-        if !verify_text.is_empty() {
-            lines.push(String::new());
-            lines.push(format!("启动校验：{verify_text}"));
-        }
-        resp.on_hover_text(lines.join("\n"));
-    }
-    clicked
+    let done: u64 = running.iter().map(|t| t.completed).sum();
+    Some(match elapsed_secs.map(format_mmss) {
+        Some(t) => format!("已处理 {done} 张 · 已用 {t}"),
+        None => format!("已处理 {done} 张"),
+    })
 }
 
-/// 当前视图有对应索引任务时，返回 `已就绪 X / 已发现 Y`（`04` §3.2 第四条）。
+/// 秒数 → `mm:ss`（超过一小时写 `h:mm:ss`）。
+pub fn format_mmss(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
+/// 导入 / 导出运行中的只读短句。空闲 / 终态返回 `None`。
 ///
-/// 只对**文件夹视图**生效：在「所有照片」下把整库分母摆到状态栏上，
-/// 会和左栏的库总数打架（一个是视图口径、一个是任务口径）。
-///
-/// M32-UI-09 v1.2 起底栏不再显示该计数（进度数字仍同源出现在弹框/角标 tooltip），
-/// 保留实现供测试与后续「任务摘要行」复用。
-#[allow(dead_code)]
-fn double_count_text(lib: &Library, snap: &IndexSnapshot) -> Option<String> {
-    let View::Folder(id) = lib.view else {
+/// 沿用 [`crate::index_mgr::progress_short_label`] 的「阶段 · 已处理 N / M」口径；
+/// 这是**条目数**，与上面索引的「张」分开说，不混成一个分母。
+pub fn io_status_text(io: &IoUi) -> Option<String> {
+    if !matches!(
+        io.state,
+        crate::index_mgr::IoState::Running | crate::index_mgr::IoState::Preparing
+    ) {
+        return None;
+    }
+    let Some(snap) = &io.snapshot else {
         return None;
     };
-    let path = lib.folder_path(id)?;
-    let task = snap.task_by_path(&path)?;
-    Some(format!(
-        "已就绪 {} / 已发现 {}",
-        task.completed, task.discovered
-    ))
+    // 口径与索引管理的短标签一致（阶段 + 已处理），但只读、且**不带百分比 / ETA**。
+    Some(match snap.total {
+        Some(total) if total > 0 => {
+            format!("{} · 已处理 {} / {} 项", snap.stage, snap.done, total)
+        }
+        _ => format!("{} · 已处理 {} 项", snap.stage, snap.done),
+    })
+}
+
+/// 底栏最右侧的缩略图滑块 + 像素文案，返回整组的左缘（左区据此排布）。
+///
+/// * 范围 **22–512**、线性 **step=1**（用 `egui::Slider::integer()`）；
+/// * `input` 即刻生效：滑块值每帧写回 `ZoomState`（由调用方执行）；
+/// * 松手才落库（`M5-TB-10`「松开后写入偏好」）。
+fn draw_zoom_slider(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    bar: Rect,
+    theme: &Theme,
+    zoom_px: f32,
+    out: &mut StatusbarOut,
+) -> Rect {
+    let cy = bar.center().y;
+    let px_label = Rect::from_center_size(
+        pos2(bar.right() - 8.0 - PX_LABEL_W / 2.0, cy),
+        vec2(PX_LABEL_W, Metrics::STATUS_H),
+    );
+    let slider_rect = Rect::from_center_size(
+        pos2(px_label.left() - SLIDER_W / 2.0, cy),
+        vec2(SLIDER_W, Metrics::STATUS_H),
+    );
+    let title_rect = Rect::from_center_size(
+        pos2(slider_rect.left() - SLIDER_TITLE_W / 2.0, cy),
+        vec2(SLIDER_TITLE_W, Metrics::STATUS_H),
+    );
+
+    // 「缩略图」小标题（不可点）
+    painter.text(
+        title_rect.center(),
+        Align2::CENTER_CENTER,
+        "缩略图",
+        FontId::new(11.0, egui::FontFamily::Proportional),
+        theme.text_secondary,
+    );
+
+    // 实时像素文案：跟着滑块值走，不四舍五入到档位。
+    let px = zoom_px.round().clamp(
+        picasa_core::CELL_MIN_PX,
+        picasa_core::CELL_MAX_PX,
+    ) as i32;
+    painter.text(
+        px_label.center(),
+        Align2::CENTER_CENTER,
+        format!("{px} px"),
+        FontId::new(11.0, egui::FontFamily::Proportional),
+        theme.status_text,
+    );
+
+    // 滑块本体：在 `slider_rect` 里嵌一个子 Ui，避免影响状态栏的整行分配。
+    let mut value = zoom_px.clamp(picasa_core::CELL_MIN_PX, picasa_core::CELL_MAX_PX) as i32;
+    let slider_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("statusbar-zoom-slider")
+            .max_rect(slider_rect),
+    );
+    let mut slider_ui = slider_ui;
+    slider_ui.style_mut().spacing.slider_width = SLIDER_W - 8.0;
+    let resp = slider_ui.add(
+        egui::Slider::new(
+            &mut value,
+            picasa_core::CELL_MIN_PX as i32..=picasa_core::CELL_MAX_PX as i32,
+        )
+        .integer()
+        .show_value(false),
+    );
+    if resp.changed() {
+        out.zoom_px = Some(value as f32);
+    }
+    if resp.drag_stopped() {
+        out.zoom_released = true;
+    }
+    // 点击轨道（不是拖动）也会改值，且没有 drag_stopped：用 clicked 补一次落库。
+    if resp.clicked() {
+        out.zoom_px = Some(value as f32);
+        out.zoom_released = true;
+    }
+    title_rect.union(px_label)
+}
+
+/// 滑块组左缘（供左区排布 / 单测断言「状态不在滑块右侧」）。
+pub fn slider_group_left(bar: Rect) -> f32 {
+    bar.right() - 8.0 - PX_LABEL_W - SLIDER_W - SLIDER_TITLE_W
+}
+
+/// 状态区的可点性：M5 底栏**没有任何**可点索引入口 / IO 入口。
+///
+/// 保留成函数是为了让「底栏不可点」成为可单测的结构性事实，而不是一句注释。
+pub fn statusbar_has_clickable_entry() -> bool {
+    false
 }
 
 #[cfg(test)]
 mod tests {
-    use picasa_core::{ExclusionView, MgmtSnapshot, RootView};
+    use picasa_core::{IndexSnapshot, IndexState, TaskSnapshot};
+
+    use super::*;
+    use crate::index_mgr::{IoState, IoUi, ProgressSnapshot};
+
+    fn task(state: IndexState, completed: u64, discovered: u64) -> TaskSnapshot {
+        TaskSnapshot {
+            path: "/photos".into(),
+            name: "photos".into(),
+            state,
+            batch: 1,
+            discovered,
+            completed,
+            failed: 0,
+            percent: if state == IndexState::Scanning { None } else { Some(0) },
+            reason: None,
+            last_update: 0.0,
+            failures: Vec::new(),
+        }
+    }
+
+    /// `M5-IA-STATUS`：运行中只读文案是「已处理 N 张 · 已用 mm:ss」，
+    /// **不带分母、不带百分号、不带 ETA**。
+    #[test]
+    fn m5_running_status_has_no_denominator_percent_or_eta() {
+        let mut snap = IndexSnapshot {
+            batch: 1,
+            tasks: vec![task(IndexState::Thumbnailing, 37, 120)],
+            ..Default::default()
+        };
+        let text =
+            running_status_text(&snap, Some(65)).expect("运行中要有只读状态");
+        assert!(text.contains("已处理 37 张"), "{text}");
+        assert!(text.contains("已用 01:05"), "已用时长要 mm:ss：{text}");
+        for banned in ["/", "%", "％", "预计", "剩余", "ETA", "比"] {
+            assert!(!text.contains(banned), "只读状态不许出现 {banned}：{text}");
+        }
+
+        // 扫描阶段（分母未知）也只报 N，不造 N / ?。
+        snap.tasks = vec![task(IndexState::Scanning, 5, 0)];
+        let text = running_status_text(&snap, Some(9)).unwrap();
+        assert!(text.contains("已处理 5 张"), "{text}");
+        assert!(!text.contains('/'), "{text}");
+    }
+
+    /// 空闲 / 终态：底栏左侧不常驻索引文案。
+    #[test]
+    fn m5_running_status_is_absent_when_idle() {
+        assert_eq!(running_status_text(&IndexSnapshot::default(), None), None);
+        let done = IndexSnapshot {
+            tasks: vec![task(IndexState::Completed, 10, 10)],
+            ..Default::default()
+        };
+        assert_eq!(
+            running_status_text(&done, Some(30)),
+            None,
+            "已完成任务不该常驻底栏"
+        );
+    }
+
+    /// `M5-IDX-01`：IO 短句只在准备 / 运行中出现，终态不常驻；
+    /// 它是「条目」口径，不是照片分母。
+    #[test]
+    fn m5_io_status_is_short_and_only_while_running() {
+        let mut io = IoUi::default();
+        assert_eq!(io_status_text(&io), None);
+        io.state = IoState::Success;
+        assert_eq!(io_status_text(&io), None);
+        io.state = IoState::Running;
+        io.snapshot = Some(ProgressSnapshot {
+            stage: "导出".into(),
+            done: 12,
+            total: Some(40),
+            current: String::new(),
+            errors: Vec::new(),
+            revision: 1,
+        });
+        let text = io_status_text(&io).unwrap();
+        assert!(text.contains("已处理 12 / 40"), "{text}");
+        // 永久禁令：IO 短句也不许出现 ETA。
+        for banned in ["预计", "剩余", "ETA"] {
+            assert!(!text.contains(banned), "{text}");
+        }
+    }
+
+    /// `M5-IA-02`：底栏没有任何可点索引入口 / IO 入口。
+    #[test]
+    fn m5_statusbar_has_no_clickable_entry() {
+        assert!(!statusbar_has_clickable_entry());
+        // 结构上也没有「入口被点」的字段了——这里用类型事实兜底：
+        // `StatusbarOut` 只有滑块的两种事件。
+        let out = StatusbarOut::default();
+        assert!(out.zoom_px.is_none());
+        assert!(!out.zoom_released);
+    }
+
+    /// `M5-IA-STATUS`：滑块组贴右，状态区在它左边（不挤在滑块右侧）。
+    #[test]
+    fn m5_slider_is_at_the_far_right() {
+        let bar = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, Metrics::STATUS_H));
+        let left = slider_group_left(bar);
+        assert!(left > 900.0, "滑块组必须贴右：left={left}");
+        assert!(bar.right() - left < 210.0, "滑块 + 文案 + 标题的总宽要紧凑");
+        assert!(left - bar.left() > 200.0, "左侧要留出只读状态的空间");
+    }
+
+    /// 已用时长格式：分:秒，超一小时带小时。
+    #[test]
+    fn m5_elapsed_formats_mmss() {
+        assert_eq!(format_mmss(0), "00:00");
+        assert_eq!(format_mmss(65), "01:05");
+        assert_eq!(format_mmss(3599), "59:59");
+        assert_eq!(format_mmss(3725), "1:02:05", "超过一小时写 h:mm:ss");
+    }
+
+    use picasa_core::MgmtSnapshot;
 
     /// 悬停文案的三个分量加起来必须等于角标总数（§4.4）。
     ///
     /// 这条用例守的是「界面上写的原因」与「角标上的数字」不自相矛盾——
     /// 数字说 6、原因加起来只有 5，用户就会认为角标是瞎算的。
+    /// M5 起角标不再画在底栏，但这条口径仍是索引管理窗口里解释数字的依据。
     #[test]
     fn badge_tooltip_components_add_up_to_the_badge() {
+        use picasa_core::{ExclusionView, RootView};
         let mut snap = MgmtSnapshot {
             roots: vec![RootView {
                 id: 1,

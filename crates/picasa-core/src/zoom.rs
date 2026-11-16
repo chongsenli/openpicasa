@@ -58,6 +58,12 @@ pub const ZOOM_SETTLE_MS: u64 = 150;
 /// 滚轮每格调多少 px（`07-A` 附录 A `grid.wheel_zoom_step_px = 16`）。
 pub const WHEEL_ZOOM_STEP_PX: f32 = 16.0;
 
+/// 键盘 / 底栏按钮的**线性**步进（M5-TB-10：⌘−/⌘1 小一档、⌘+/⌘=/⌘2 大一档）。
+///
+/// 16 px 是产品事实，不是 96/192 三档预设。M5 之前顶栏 −/+ 用的是
+/// [`step_log`] 的对数档；M5 起统一到这条线性步进。
+pub const KEYBOARD_STEP_PX: f32 = 16.0;
+
 /// 12 档对数刻度（`08-D` §A-2.1）。
 ///
 /// `⌘+` / `⌘-` 按档跳，`⌘0` 回默认。对数刻度让「小图区域」的档位更密——
@@ -156,6 +162,29 @@ pub fn snap_to_point(cell_px: f32) -> f32 {
         Some((_, p)) => p,
         None => clamped,
     }
+}
+
+/// 键盘 / 底栏滑块共用的**线性**步进（M5-TB-10 / M5-KB-06/07）。
+///
+/// M5 起缩略图尺寸是「线性 step=1 的连续滑块 + 键盘 16 px 一档」，
+/// 不再走 [`step_log`] 的 12 档对数刻度（那是旧顶栏 −/+ 的语义）。
+/// 端点夹到 [`CELL_MIN_PX`] / [`CELL_MAX_PX`]，到端点后返回端点本身。
+pub fn step_linear(cell_px: f32, dir: i32, step: f32) -> f32 {
+    let step = step.abs();
+    let cur = cell_px.clamp(CELL_MIN_PX, CELL_MAX_PX);
+    if dir > 0 {
+        (cur + step).clamp(CELL_MIN_PX, CELL_MAX_PX)
+    } else if dir < 0 {
+        (cur - step).clamp(CELL_MIN_PX, CELL_MAX_PX)
+    } else {
+        cur
+    }
+}
+
+/// 线性步进是否已经顶到这一侧（端点外再按不会变）。
+pub fn at_linear_bound(cell_px: f32, dir: i32) -> bool {
+    let cur = cell_px.clamp(CELL_MIN_PX, CELL_MAX_PX);
+    (step_linear(cur, dir, 1.0) - cur).abs() < 0.5
 }
 
 /// 对数档是否已经顶到这一侧（再 [`step_log`] 不会变）。
@@ -263,13 +292,33 @@ impl ZoomState {
         self.last_change = Some(now);
     }
 
-    /// 拖动中改值（`07-A` ZOOM-01/04）。
+    /// 拖动中改值（`07-A` ZOOM-01/04）——**旧三刻度点语义**，保留给 M3 的
+    /// 吸附验收（`TC-M3-ZOOM-001`）与滚轮路径；M5 底栏滑块请用
+    /// [`Self::set_cell_px`]（线性 step=1，不吸附）。
     ///
     /// 返回 `true` 表示**布局需要重建**（格尺寸变了）。
     /// ⚠️ 这里**不**改 `self.tier`：拖动中不换纹理。纹理档位只在 [`Self::settle`] 里更新。
     pub fn drag_to(&mut self, cell_px: f32, now: std::time::Instant) -> bool {
         let next = snap_to_point(cell_px);
         if (next - self.cell_px).abs() < f32::EPSILON {
+            return false;
+        }
+        self.cell_px = next;
+        self.last_change = Some(now);
+        true
+    }
+
+    /// 直接设定格边长（M5 底栏滑块 / 键盘步进共用）。
+    ///
+    /// 不做刻度吸附，只做「1 px 取整 + 22～512 夹紧」。返回 `true` = 布局要重建。
+    pub fn set_cell_px(&mut self, cell_px: f32, now: std::time::Instant) -> bool {
+        if !cell_px.is_finite() {
+            return false;
+        }
+        let next = cell_px.round().clamp(CELL_MIN_PX, CELL_MAX_PX);
+        if (next - self.cell_px).abs() < 0.5 {
+            // 值没变：仍刷新「最后变化时刻」，滑块静止判定才不会被前一帧吃掉。
+            self.last_change = Some(now);
             return false;
         }
         self.cell_px = next;
@@ -678,6 +727,66 @@ mod tests {
         }
         // 默认刻度在档位表里
         assert!(LOG_STEPS.contains(&DEFAULT_CELL_PX));
+    }
+
+    /// `M5-TB-10` / `M5-KB-06/07`：键盘与滑块共用**线性** 16 px 一档，
+    /// 不再走 12 档对数刻度；两端夹在 22–512。
+    #[test]
+    fn keyboard_steps_are_linear_sixteen_pixels() {
+        assert_eq!(KEYBOARD_STEP_PX, 16.0);
+        let mut v = DEFAULT_CELL_PX;
+        v = step_linear(v, 1, KEYBOARD_STEP_PX);
+        assert_eq!(v, 112.0, "96 大一档 = 112，不是对数刻度的 128");
+        v = step_linear(v, 1, KEYBOARD_STEP_PX);
+        assert_eq!(v, 128.0);
+        v = step_linear(v, -1, KEYBOARD_STEP_PX);
+        assert_eq!(v, 112.0);
+        v = step_linear(v, -1, KEYBOARD_STEP_PX);
+        assert_eq!(v, 96.0);
+
+        // 从非刻度值出发也走同一线性步长（⌘1/⌘2 与滑块同一状态）
+        assert_eq!(step_linear(100.0, 1, KEYBOARD_STEP_PX), 116.0);
+        assert_eq!(step_linear(100.0, -1, KEYBOARD_STEP_PX), 84.0);
+        // 夹在 22–512
+        assert_eq!(step_linear(22.0, -1, KEYBOARD_STEP_PX), 22.0);
+        assert_eq!(step_linear(512.0, 1, KEYBOARD_STEP_PX), 512.0);
+        assert_eq!(step_linear(505.0, 1, KEYBOARD_STEP_PX), 512.0);
+        assert_eq!(step_linear(600.0, 1, KEYBOARD_STEP_PX), 512.0);
+        // dir = 0 不动
+        assert_eq!(step_linear(100.0, 0, KEYBOARD_STEP_PX), 100.0);
+        // 端点判定
+        assert!(at_linear_bound(22.0, -1));
+        assert!(!at_linear_bound(22.0, 1));
+        assert!(at_linear_bound(512.0, 1));
+        assert!(!at_linear_bound(512.0, -1));
+    }
+
+    /// `M5-TB-10`：滑块是「线性 step=1」——直接设定值时不吸附到历史刻度点，
+    /// 只做取整与夹紧；跨页面 / 刷新后值原样保持。
+    #[test]
+    fn slider_setter_is_linear_and_does_not_snap_to_marks() {
+        let mut z = ZoomState::new(100.0);
+        // 130 距 128 只有 2 px：旧吸附逻辑会把它吸到 128，M5 必须原样保留。
+        assert!(z.set_cell_px(130.0, t(0)));
+        assert_eq!(z.cell_px(), 130.0);
+        // 514 / 20 夹到范围内
+        assert!(z.set_cell_px(514.0, t(10)));
+        assert_eq!(z.cell_px(), CELL_MAX_PX);
+        assert!(z.set_cell_px(20.0, t(20)));
+        assert_eq!(z.cell_px(), CELL_MIN_PX);
+        // 1 px 也能改（step=1）
+        assert!(z.set_cell_px(23.0, t(30)));
+        assert_eq!(z.cell_px(), 23.0);
+        // 同值不变 → 返回 false（不重建布局）
+        assert!(!z.set_cell_px(23.0, t(40)));
+        // 写进 preferences 的口径是四舍五入后的整数，回读一致
+        let mut z = ZoomState::new(0.0);
+        z.set_cell_px(311.0, t(0));
+        assert_eq!(z.to_setting(), 311);
+        assert_eq!(ZoomState::from_setting(Some(311.0)).cell_px(), 311.0);
+        // 非有限值直接忽略，不把 NaN 写进布局
+        z.set_cell_px(f32::NAN, t(50));
+        assert_eq!(z.cell_px(), 311.0);
     }
 }
 

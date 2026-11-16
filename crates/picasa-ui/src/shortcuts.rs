@@ -35,8 +35,10 @@ pub enum KeyAction {
     ToggleCompare,
     /// 切换「包含子文件夹」（`07-A` RECURSE-01：`⌘⇧R`）
     ToggleRecurse,
-    /// `⌘0`：缩略图滑块回默认刻度（`07-A` ZOOM-03）
+    /// `⌘0`：缩略图滑块回默认刻度 96 px（`M5-KB-08`；产品事实，不随 §11 #1 改）
     ZoomReset,
+    /// `⌘,`：打开设置页（`M5-IA-04`，与更多菜单「设置…」同一入口）
+    OpenSettings,
     /// `⌘F`：展开并聚焦顶栏搜索（§7.2 搜索紧接在 + 之后）
     FocusSearch,
 }
@@ -85,7 +87,9 @@ pub fn collect(ctx: &Context, in_viewer: bool) -> Vec<KeyAction> {
             if cmd && i.key_pressed(Key::Num0) {
                 out.push(KeyAction::ZoomReset);
             }
-            // M3.1：`⌘+` / `⌘−` 与顶栏 −/+ 按钮同一条路径（对数档）。
+            // M5-TB-10：`⌘1`/`⌘2`/`⌘+`/`⌘−` 与底栏滑块共用同一状态，
+            // 按**线性 16 px** 一档（不再是对数档）。
+            // `⌘0` 回 96 px（产品事实；§11 #1 的默认 96 vs 144 未裁定，不擅自改）。
             if cmd && (i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals)) {
                 out.push(KeyAction::TierLarge);
             }
@@ -95,6 +99,10 @@ pub fn collect(ctx: &Context, in_viewer: bool) -> Vec<KeyAction> {
             // `⌘F`：展开顶栏搜索框并聚焦（M3.1 既有快捷键，§7 版式下仍适用）
             if cmd && i.key_pressed(Key::F) {
                 out.push(KeyAction::FocusSearch);
+            }
+            // `⌘,`：设置页（与「更多 → 设置…」同一入口，AC-IA-MORE）
+            if cmd && i.key_pressed(Key::Comma) {
+                out.push(KeyAction::OpenSettings);
             }
             // `⌘⇧R`：包含子文件夹（`07-A` RECURSE-01）。
             // 用 `shift` 而不是另设 `⌘R`——后者在不少应用里是「刷新」，

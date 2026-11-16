@@ -1313,8 +1313,9 @@ pub fn show(
             // 描边目标：方格 = 实际贴图区（Ready 时是 contain 后的 fitted），
             // masonry = 去掉文件名带的图区。默认 img_rect，Ready 分支里覆写。
             let mut frame = img_rect;
-            // M4.1 `M41-UI-02`：三种布局统一 8px 圆角（此前 masonry 是 0.0 直角）。
-            let frame_radius = Metrics::THUMB_RADIUS;
+            // M4.1 `M41-UI-02`：三种布局统一圆角（此前 masonry 是 0.0 直角）。
+            // M5-TB-10：极小尺寸（约 22–64 px）按边长收窄，避免看起来像胶囊。
+            let frame_radius = thumb_radius_for(cell_px);
             // M4.2 `M42-PERF-00`：本格是否画了占位（未出图）。只做统计，不改绘制。
             let mut blank = placeholder;
             if placeholder {
@@ -1363,10 +1364,11 @@ pub fn show(
                         // M4.2 `M42-UI-02`：与微缩图集档共用 [`rounded_image_shape`]，
                         // 让「圆角」成为单一结构性不变量，任一路都回退不了直角。
                         painter.add(theme.thumb_shadow.as_shape(fitted, frame_radius));
-                        painter.add(rounded_image_shape(
+                        painter.add(rounded_image_shape_r(
                             fitted,
                             tex_id,
                             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            frame_radius,
                         ));
                     }
                     TexState::Pending => {
@@ -1622,6 +1624,28 @@ fn interact_cell(
     resp
 }
 
+/// 缩略图圆角（`M5-TB-10`）：极小尺寸收窄，避免 22–64 px 的格子看起来像胶囊。
+///
+/// * ≥ 96 px：保持产品事实的 8 px（`Metrics::THUMB_RADIUS`）；
+/// * 22–64 px：按边长线性收到 2–5 px（22 → 2，64 → 5）；
+/// * 中间 64–96 px：沿用 64 档的上限，避免靠近 96 时突然跳回 8。
+///
+/// 纯函数：绘制路径与「微缩图集档」共用它，单测可锁定「小格不是胶囊」。
+pub fn thumb_radius_for(cell_px: f32) -> f32 {
+    let cell = cell_px.max(1.0);
+    if cell >= 96.0 {
+        return Metrics::THUMB_RADIUS;
+    }
+    if cell <= 22.0 {
+        return 2.0;
+    }
+    // 22 → 2.0，64 → 5.0，之后保持 5.0（到 96 才回到 8）
+    let t = ((cell - 22.0) / (64.0 - 22.0)).clamp(0.0, 1.0);
+    let r = 2.0 + t * 3.0;
+    // 圆角不能超过格子的 1/4，否则小格会变成椭圆。
+    r.min(cell / 4.0).max(1.0)
+}
+
 /// 构造一张「带圆角的贴图矩形」，正常纹理档与微缩图集档**共用**。
 ///
 /// M4.2 `M42-UI-02`：把此前图集档用的直角 `painter.image` 收编到同一通路，
@@ -1632,9 +1656,19 @@ fn interact_cell(
 ///
 /// 抽成纯函数是为了让「圆角」成为可单测锁定的**结构性不变量**：
 /// 只要两条绘制路径都经过这里，任何一路都回退不了 `painter.image` 直角。
+#[cfg(test)]
 fn rounded_image_shape(rect: Rect, tex_id: egui::TextureId, uv: Rect) -> egui::epaint::RectShape {
-    egui::epaint::RectShape::filled(rect, Metrics::THUMB_RADIUS, Color32::WHITE)
-        .with_texture(tex_id, uv)
+    rounded_image_shape_r(rect, tex_id, uv, Metrics::THUMB_RADIUS)
+}
+
+/// 同上，但圆角由调用方给（`M5-TB-10`：极小尺寸按 [`thumb_radius_for`] 收窄）。
+fn rounded_image_shape_r(
+    rect: Rect,
+    tex_id: egui::TextureId,
+    uv: Rect,
+    radius: f32,
+) -> egui::epaint::RectShape {
+    egui::epaint::RectShape::filled(rect, radius, Color32::WHITE).with_texture(tex_id, uv)
 }
 
 /// M4.2 M42-UI-01：星标角标的位置与半径（右上，避开左上角选中角标）。
@@ -1669,10 +1703,12 @@ fn draw_from_atlas(
     let Some(tex) = atlas.texture_of(slot.page) else {
         return false;
     };
-    painter.add(rounded_image_shape(
+    // M5-TB-10：图集档只服务 ≤48 px 的极小格，圆角随边长收窄。
+    painter.add(rounded_image_shape_r(
         rect,
         tex.id(),
         Rect::from_min_max(slot.uv[0], slot.uv[1]),
+        thumb_radius_for(rect.width()),
     ));
     true
 }
@@ -1779,10 +1815,14 @@ pub fn empty_reason(search: &str, filter: Option<&picasa_db::PhotoFilter>) -> Em
     }
 }
 
-/// 空图库第二行。M3.1 起工具栏上的「添加文件夹」按钮已移除，
-/// 入口是顶栏「…」→「添加文件夹…」（与左栏空态同一条路径）。
+/// 空图库第二行（M5-SH-04）：指向**顶栏导入按钮**。
+///
+/// M5-MN-01 删掉了更多菜单里的「添加文件夹…」，所以旧文案
+/// 「点顶栏「…」→「添加文件夹…」」会指向一个不存在的菜单项。
+/// 添加关注文件夹的事实入口是顶栏「导入」（以及索引进度空态 / 设置壳里的
+/// 同源入口），三者都调同一个 `add_folder`。
 const EMPTY_GRID_HINT: &str =
-    "点顶栏「…」→「添加文件夹…」，选一个放照片的目录（只读，不改你的文件）";
+    "点顶栏「导入」添加照片文件夹，选一个放照片的目录（只读，不会修改你的文件）";
 
 const NO_MATCH_TITLE: &str = "没有符合条件的照片";
 const NO_MATCH_HINT: &str = "当前搜索或筛选没有结果";
@@ -1929,14 +1969,19 @@ mod tests {
             .collect()
     }
 
+    /// `M5-SH-04`：空网格第二行指向顶栏「导入」，不再指向已删除的
+    /// 「… → 添加文件夹…」。
     #[test]
-    fn empty_grid_hint_points_at_more_menu_not_removed_toolbar_button() {
+    fn m5_empty_grid_hint_points_at_topbar_import() {
         let (title, hint) = empty_grid_lines(EmptyReason::Library);
         assert_eq!(title, "这里还没有照片");
-        assert!(hint.contains("顶栏"));
-        assert!(hint.contains("「…」"));
-        assert!(hint.contains("添加文件夹…"));
+        assert!(hint.contains("顶栏"), "{hint}");
+        assert!(hint.contains("「导入」"), "{hint}");
+        assert!(!hint.contains("「…」"), "不许再指更多菜单：{hint}");
+        assert!(!hint.contains("添加文件夹"), "不许再写「添加文件夹…」：{hint}");
         assert!(!hint.contains("点上方"));
+        // 只描述选目录这个动作，不是对整个应用的全称承诺。
+        assert!(hint.contains("只读"), "{hint}");
     }
 
     #[test]
@@ -2537,8 +2582,8 @@ mod tests {
     /// 守的是「一屏更密」这组常量，别被后续调参悄悄改回去。
     #[test]
     fn m41_default_density_constants() {
+        // M5-TB-10 / §11 #1：默认边长**保持产品事实 96**（原型 144 未采纳）。
         assert_eq!(picasa_core::DEFAULT_CELL_PX, 96.0);
-        assert!(picasa_core::zoom::LOG_STEPS.contains(&picasa_core::DEFAULT_CELL_PX));
         assert_eq!(Metrics::FILENAME_H, 9.0);
         assert_eq!(Metrics::FILENAME_GAP, 0.5);
         assert_eq!(Metrics::FILENAME_FONT_SIZE, 11.0);
@@ -2596,6 +2641,46 @@ mod tests {
         // 贴图确实挂上了（否则只是个圆角白块，等于把图弄丢了）
         let brush = shape.brush.expect("圆角贴图必须带 texture brush");
         assert_eq!(brush.uv, uv);
+    }
+
+    /// `M5-TB-10`：极小尺寸（约 22–64 px）收紧缩略图圆角，避免看起来像胶囊；
+    /// 正常尺寸仍是产品事实的 8 px。
+    #[test]
+    fn m5_small_thumbnails_tighten_the_corner_radius() {
+        assert_eq!(thumb_radius_for(96.0), Metrics::THUMB_RADIUS);
+        assert_eq!(thumb_radius_for(256.0), Metrics::THUMB_RADIUS);
+        assert_eq!(thumb_radius_for(512.0), Metrics::THUMB_RADIUS);
+        // 22 px 图集格：圆角收到 2 px，且不超过边长的 1/4
+        let r22 = thumb_radius_for(22.0);
+        assert!(r22 <= 2.5, "22 px 的圆角要小：{r22}");
+        assert!(r22 <= 22.0 / 4.0 + 0.001);
+        let r48 = thumb_radius_for(48.0);
+        assert!(r48 > r22, "48 px 应略大于 22 px：{r48}");
+        assert!(r48 < Metrics::THUMB_RADIUS, "但小于正常尺寸：{r48}");
+        let r64 = thumb_radius_for(64.0);
+        assert!(r64 < Metrics::THUMB_RADIUS, "{r64}");
+        // 单调不减：尺寸越大圆角越大，不能出现反向跳变
+        let mut prev = 0.0;
+        for px in 22..=96 {
+            let r = thumb_radius_for(px as f32);
+            assert!(r >= prev, "{px} px 的圆角比更小的格还小：{r} < {prev}");
+            prev = r;
+        }
+        // 极小格的圆角绝不等于边长的一半（那会变成胶囊 / 椭圆）
+        for px in [22.0, 32.0, 48.0, 64.0] {
+            assert!(thumb_radius_for(px) < px / 2.0);
+        }
+    }
+
+    /// `M5-TB-10`：图集档与正常档都按同一个圆角函数走，
+    /// 极小格不再固定 8 px。
+    #[test]
+    fn m5_atlas_small_cell_radius_is_not_the_normal_eight() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(32.0, 32.0));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        let shape = rounded_image_shape_r(rect, egui::TextureId::default(), uv, thumb_radius_for(32.0));
+        assert_eq!(shape.corner_radius.nw, thumb_radius_for(32.0).round() as u8);
+        assert!(shape.corner_radius.nw < 8, "32 px 图集格不该用 8 px 圆角");
     }
 
     /// `M42-UI-01` AC-03：星标角标在右上、与左上选中角标不重叠；22px 微缩

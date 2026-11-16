@@ -63,8 +63,8 @@ pub use verify::{
 pub use paths::AppPaths;
 pub use watch_mgr::{RootWatchConfig, WatchManager, WatchOut};
 pub use zoom::{
-    CELL_MAX_PX, CELL_MIN_PX, DEFAULT_CELL_PX, SNAP_POINTS, TexTier, ZoomState, at_log_bound,
-    snap_to_point, step_log, tier_for, uses_atlas,
+    CELL_MAX_PX, CELL_MIN_PX, DEFAULT_CELL_PX, KEYBOARD_STEP_PX, SNAP_POINTS, TexTier, ZoomState,
+    at_linear_bound, at_log_bound, snap_to_point, step_linear, step_log, tier_for, uses_atlas,
 };
 pub use prefs::Preferences;
 pub use root_intake::RootIntake;
