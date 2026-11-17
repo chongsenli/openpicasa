@@ -22,6 +22,7 @@
 pub mod app;
 pub mod atlas;
 pub mod capture;
+pub mod copy_text;
 pub mod diagnostics;
 pub mod grid;
 pub mod icons;
@@ -38,6 +39,7 @@ pub mod textures;
 pub mod theme;
 pub mod toolbar;
 pub mod topbar;
+pub mod trash_ui;
 pub mod viewer;
 
 pub use app::OpenPicasaApp;

@@ -31,6 +31,7 @@ pub mod scanner;
 pub mod texbudget;
 pub mod thumbs;
 pub mod trash;
+pub mod trash_plan;
 pub mod verify;
 pub mod watch_mgr;
 pub mod zoom;
@@ -61,6 +62,7 @@ pub use verify::{
     VERIFY_FULL_INTERVAL_POLLING_H, full_interval_hours,
 };
 pub use paths::AppPaths;
+pub use trash_plan::{TrashScope, confirm_body, library_scope, viewer_scope};
 pub use watch_mgr::{RootWatchConfig, WatchManager, WatchOut};
 pub use zoom::{
     CELL_MAX_PX, CELL_MIN_PX, DEFAULT_CELL_PX, KEYBOARD_STEP_PX, SNAP_POINTS, TexTier, ZoomState,

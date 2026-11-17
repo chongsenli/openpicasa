@@ -164,6 +164,14 @@ pub fn collect(ctx: &Context, in_viewer: bool) -> Vec<KeyAction> {
             if cmd && i.key_pressed(Key::Enter) {
                 out.push(KeyAction::Reveal);
             }
+            // `M5-VW-15` / `M5-KB-14`：查看器里的 Delete / Backspace 同样走废纸篓确认。
+            //
+            // 这一支原先**漏了**——`apply_viewer_key` 里有处理，但收集阶段没往
+            // `out` 里塞，于是查看器按 Delete 毫无反应（能力形同不存在）。
+            // 焦点在输入框时 `collect` 在函数开头就整体返回空，所以这里不需要再判。
+            if i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace) {
+                out.push(KeyAction::Delete);
+            }
             let _ = shift;
         }
     });

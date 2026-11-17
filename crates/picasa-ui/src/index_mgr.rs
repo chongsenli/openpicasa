@@ -163,7 +163,7 @@ impl Confirm {
         match self {
             Self::None => "",
             Self::RebuildRoot { .. } => "确认全量重建",
-            Self::DeleteIndex { .. } => "确认删除索引",
+            Self::DeleteIndex { .. } => crate::copy_text::PURGE_ROOT_TITLE,
             Self::ClearThumbs => "确认清理缩略图",
             Self::ClearRunLog => "确认清空运行日志",
             Self::ClearTaskHistory => "确认清空任务历史",
@@ -1259,7 +1259,12 @@ fn confirm_dialog(ctx: &Context, state: &mut IndexMgrUi, actions: &mut Vec<MgrAc
                 if cancel_btn.clicked() {
                     state.confirm = Confirm::None;
                 }
-                if ui.button("确认").clicked() {
+                let confirm_label = match confirm {
+                    // ① 单根彻底删除：按钮字「确认」（`M5-IDX-06` ①）。
+                    Confirm::DeleteIndex { .. } => crate::copy_text::PURGE_ROOT_BUTTON,
+                    _ => "确认",
+                };
+                if ui.button(confirm_label).clicked() {
                     match confirm {
                         Confirm::RebuildRoot { id, .. } => actions.push(MgrAction::RebuildRoot(id)),
                         Confirm::DeleteIndex { id, .. } => {

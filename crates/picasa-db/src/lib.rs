@@ -40,7 +40,7 @@ pub use types::{
 };
 pub use import_sources::{
     ImportBatchRow, ImportSourceRow, import_batch_photo_ids, prune_orphan_import_sources,
-    record_import, remove_import_source,
+    import_source_removal_scope, record_import, remove_import_source,
 };
 pub use task_intent::{TaskIntent, TaskScopeKind};
 pub use m4::{

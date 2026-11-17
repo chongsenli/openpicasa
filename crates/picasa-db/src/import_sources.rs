@@ -244,10 +244,25 @@ pub fn record_import(
 /// 2. 再清来源/批次/成员与「仅从分组隐藏」的偏好键。
 ///
 /// 只读写自有 DB，**从不触碰原文件、不建/删任何目录**（红线 R-M43-01）。
+/// 「从导入的索引中移除」的**作用范围**：将被清索引的根，以及这些根下的照片数。
+///
+/// 确认框正文里的张数与真正被清的集合都只读这一个函数（`M5-SB-15` /
+/// `AC-FS-CONFIRM`）。早先确认框写的是「批次成员去重数」，而执行时清的是
+/// 这些根的整棵子树索引——两者在「同一张照片被别的根共享」或「批次没记全」时
+/// 就会分叉，于是又回到「确认 N 张、实际动 M 张」。现在两边同源。
+pub fn import_source_removal_scope(db: &Db, source_id: i64) -> crate::Result<(Vec<i64>, u64)> {
+    let ids = db.imported_root_ids(source_id)?;
+    let mut photos = 0u64;
+    for id in &ids {
+        photos += db.photo_count_for_root(*id).unwrap_or(0).max(0) as u64;
+    }
+    Ok((ids, photos))
+}
+
 pub fn remove_import_source(db: &Db, source_id: i64) -> crate::Result<(u64, u64)> {
     let mut photos = 0u64;
     let mut thumbs = 0u64;
-    for root_id in db.imported_root_ids(source_id)? {
+    for root_id in import_source_removal_scope(db, source_id)?.0 {
         let (p, t) = db.clear_index_for_root(root_id)?;
         photos += p;
         thumbs += t;

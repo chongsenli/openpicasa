@@ -1548,16 +1548,44 @@ impl Library {
 
     // ------------------------------------------------------------------ 动作
 
-    /// 删除到废纸篓（F2-08）。**只对当前选择生效，需 UI 先确认。**
+    /// 当前范围下「即将被移到废纸篓」的那组照片 id（图库规则：就是选择集）。
+    ///
+    /// 供 UI 在**弹确认框那一刻**固化成 [`crate::TrashScope`]：确认张数与执行集合
+    /// 之后都只认这一个快照，不再各自去读 `selection`（`M5-FS-01` / `M5-KB-14`）。
+    pub fn selection_ids(&self) -> Vec<i64> {
+        let mut ids: Vec<i64> = self.selection.iter().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// 删除到废纸篓（F2-08）。**执行集合由调用方固定并传入，需 UI 先确认。**
+    ///
+    /// 参数是确认时固化的 `ids`（不是「当前 selection」）：这样「用户确认了几张」
+    /// 与「实际移动几张」在结构上不可能分叉。UI 侧执行前必须再比对一次当前范围，
+    /// 不一致就作废确认（见 [`crate::TrashScope::matches`]）。
     ///
     /// 返回 (成功数, 失败原因列表)。
-    pub fn trash_selected(&mut self) -> (usize, Vec<String>) {
-        let targets: Vec<PhotoRow> = self
-            .photos
-            .iter()
-            .filter(|p| self.selection.contains(&p.id))
-            .cloned()
-            .collect();
+    pub fn trash_ids(&mut self, ids: &[i64]) -> (usize, Vec<String>) {
+        // 确认时的集合可能包含**不在当前视图**里的照片（查看器里换过视图、
+        // 或分页还没补齐）。所以先在内存里找，找不到再按 id 查库——绝不因为
+        // 「这行没画出来」就少移动一张，那会让确认张数与执行集合再次分叉。
+        let mut targets: Vec<PhotoRow> = Vec::with_capacity(ids.len());
+        let mut missing: Vec<i64> = Vec::new();
+        for id in ids {
+            match self.photos.iter().find(|p| p.id == *id) {
+                Some(row) => targets.push(row.clone()),
+                None => missing.push(*id),
+            }
+        }
+        if !missing.is_empty()
+            && let Ok(db) = self.db()
+        {
+            for id in missing {
+                if let Ok(Some(row)) = db.photo(id) {
+                    targets.push(row);
+                }
+            }
+        }
         let mut ok = 0;
         let mut errors = Vec::new();
         for row in targets {
@@ -1572,7 +1600,9 @@ impl Library {
             }
         }
         if ok > 0 {
-            self.selection.clear();
+            for id in ids {
+                self.selection.remove(id);
+            }
             let _ = self.reload_tree();
             let _ = self.reload_photos();
             self.toast = Some((format!("已移到废纸篓 {ok} 张"), 3.0));

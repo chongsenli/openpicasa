@@ -15,7 +15,7 @@ use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, pos2, vec2};
 use picasa_core::thumbs::JobKind;
 use picasa_core::{
     AppPaths, CoreEvent, DimsService, IndexBoard, IndexService, Library, ThumbJob, ThumbService,
-    View,
+    TrashScope, View, library_scope, viewer_scope,
 };
 use picasa_db::{PhotoRow, SortKey};
 
@@ -199,7 +199,17 @@ pub struct OpenPicasaApp {
     reload_dirty: bool,
     /// 上次真正完成重载的时刻，配合 `reload_dirty` 做节流
     last_reload: Instant,
-    confirm_trash: Option<usize>,
+    /// 当前打开着的「移到废纸篓」确认（`None` = 没弹）。
+    ///
+    /// 存的是**确认那一刻固化的执行集合**，不是张数：确认文案、执行集合、
+    /// 范围变化判定三处都读这一份，才不会有「确认 1 张、移动 9 张」（M5-FS-01）。
+    confirm_trash: Option<TrashScope>,
+    /// 这个确认是在查看器里打开的（决定「当前范围」该按哪条规则重算）。
+    ///
+    /// 必须在打开那一刻记下来：egui 的 Window 不是模态，弹着确认时用户仍可能
+    /// 按 Esc 退出查看器。若按「现在在不在查看器」去算，就会拿图库的选择集
+    /// 去比查看器的确认集合，两个规则一混，张数又会对不上。
+    confirm_trash_in_viewer: bool,
     /// 诊断页（F 加固）是否打开
     diagnostics_open: bool,
     /// 诊断页数据（打开或动作后重取，不每帧算 `SUM(LENGTH(BLOB))`）
@@ -427,6 +437,7 @@ impl OpenPicasaApp {
             reload_dirty: false,
             last_reload: Instant::now(),
             confirm_trash: None,
+            confirm_trash_in_viewer: false,
             diagnostics_open: false,
             diag_data: crate::diagnostics::DiagData::default(),
             diag_dirty: false,
@@ -2386,6 +2397,23 @@ impl OpenPicasaApp {
         self.refresh_view_header();
     }
 
+    /// 此刻真实可执行的范围（与打开确认时用的是同一套规则）。
+    ///
+    /// 只读快照，没有任何副作用；确认框每帧拿它跟已确认的范围比对。
+    fn current_trash_scope(&self) -> TrashScope {
+        let sel = self.lib.selection_ids();
+        if self.confirm_trash_in_viewer {
+            let visible = self
+                .viewer
+                .as_ref()
+                .and_then(|v| self.lib.photos.get(v.index))
+                .map(|p| p.id);
+            viewer_scope(&sel, visible)
+        } else {
+            library_scope(&sel)
+        }
+    }
+
     // -------------------------------------------------------------- 键盘
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
@@ -2447,9 +2475,12 @@ impl OpenPicasaApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
             }
             KeyAction::Reveal => self.reveal_selected(),
+            // M5-KB-14：有选中才弹确认；张数 = 执行集合 = 这个快照。
             KeyAction::Delete => {
-                if !self.lib.selection.is_empty() {
-                    self.confirm_trash = Some(self.lib.selection.len());
+                let scope = library_scope(&self.lib.selection_ids());
+                if !scope.is_empty() {
+                    self.confirm_trash = Some(scope);
+                    self.confirm_trash_in_viewer = false;
                 }
             }
             KeyAction::OpenViewer => {
@@ -2598,10 +2629,15 @@ impl OpenPicasaApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
             }
             KeyAction::Reveal => self.reveal_selected(),
+            // M5-VW-15：确认张数与执行集合必须一致。选择集非空 → 整个选择集
+            // （张数是它的真实大小，不是恒为 1）；选择集为空 → 只处理当前可见这一张。
             KeyAction::Delete => {
-                if let Some(row) = self.lib.photos.get(v.index) {
-                    let _ = row;
-                    self.confirm_trash = Some(1);
+                let visible = self.lib.photos.get(v.index).map(|p| p.id);
+                let sel = self.lib.selection_ids();
+                let scope = viewer_scope(&sel, visible);
+                if !scope.is_empty() {
+                    self.confirm_trash = Some(scope);
+                    self.confirm_trash_in_viewer = true;
                 }
             }
             _ => {}
@@ -3553,13 +3589,15 @@ impl OpenPicasaApp {
                         let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
                     }
+                    // M5-MN-05 / AC-ABOUT：不再是「只读不改原文件」那种全称承诺
+                    // （它与显式「移到废纸篓」会移动原图直接矛盾）。改成分两件事说清：
+                    // ① 索引上的组织动作只写独立索引，不向照片目录写辅助文件、不移动原图；
+                    // ② 用户显式「移到废纸篓」会把原图移到系统废纸篓。
+                    // 最终字句是 §11 #8，本轮只用这组准确含义，不另立品牌口号。
                     crate::topbar::TopbarAction::More(MoreAction::About) => {
                         self.lib.toast = Some((
-                            format!(
-                                "OpenPicasa {} · 本地照片库（只读不改原文件）",
-                                env!("CARGO_PKG_VERSION")
-                            ),
-                            3.0,
+                            crate::copy_text::about_text(env!("CARGO_PKG_VERSION")),
+                            7.0,
                         ));
                     }
                     // M4-BUG-01：菜单动作在 draw_overlays 消费，不能落进 `_ => {}`。
@@ -3871,12 +3909,16 @@ impl OpenPicasaApp {
                                             self.board.forget(&path);
                                             self.viewer = None;
                                             self.restore_scroll = Some(0.0);
-                                            self.lib.toast =
-                                                Some(("已关闭。可在「诊断」里恢复".into(), 3.0));
+                                            // M5-SB-12 / M5-XX-07：恢复入口在索引管理
+                                            // 「排除项」，不再指向不可达的诊断窗。
+                                            self.lib.toast = Some((
+                                                crate::copy_text::CLOSE_FOLDER_TOAST.into(),
+                                                5.0,
+                                            ));
                                         }
                                         Ok(false) => {
                                             self.lib.toast =
-                                                Some(("根目录不能这样关闭".into(), 3.0));
+                                                Some((crate::copy_text::CLOSE_ROOT_REFUSED_TOAST.into(), 3.0));
                                         }
                                         Err(e) => {
                                             tracing::warn!(error = %e, "关闭子目录失败");
@@ -4255,37 +4297,102 @@ impl OpenPicasaApp {
             }
         }
 
-        // 删除二次确认（R-1 的唯一例外，文案必须写清「可在系统里还原」）
-        if let Some(n) = self.confirm_trash {
-            let mut open = true;
-            egui::Window::new("移到废纸篓？")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-                .open(&mut open)
-                .show(&ctx, |ui| {
-                    ui.label(format!(
-                        "将把 {n} 张照片移到系统废纸篓。\n\n可以在 Finder 的废纸篓里还原，我们不会直接删除文件。"
-                    ));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("取消").clicked() {
-                            self.confirm_trash = None;
-                        }
-                        if ui.button("移到废纸篓").clicked() {
-                            let (ok, errors) = self.lib.trash_selected();
-                            self.confirm_trash = None;
-                            self.tray_rows_dirty = true;
-                            self.restore_scroll = None;
-                            if !errors.is_empty() {
-                                self.lib.toast =
-                                    Some((format!("{ok} 张成功，{} 张失败：{}", errors.len(), errors[0]), 6.0));
-                            }
-                        }
-                    });
-                });
-            if !open {
+        // 「移到废纸篓？」二次确认（`M5-FS-01` / `M5-VW-15` / `M5-KB-14`）。
+        //
+        // 唯一会移动原文件的用户动作。三条不变量由 `trash_ui::decide` 保证：
+        // 1. 正文张数 = 已确认集合的大小 = 真正执行的集合；
+        // 2. 打开期间范围一变就作废，用新范围重新确认（不拿旧张数执行新集合）；
+        // 3. 取消 / Escape / 关闭窗口零执行（不动文件、不改索引）。
+        if let Some(confirmed) = self.confirm_trash.clone() {
+            let current = self.current_trash_scope();
+            // 先按「用户还没动作」过一遍决策表：范围变了就在画之前作废重画。
+            let mut decision = crate::trash_ui::decide(
+                crate::trash_ui::UserAction::None,
+                &confirmed,
+                &current,
+            );
+            if let crate::trash_ui::Decision::Close = decision {
                 self.confirm_trash = None;
+            }
+            let mut open = true;
+            let mut action = crate::trash_ui::UserAction::None;
+            let shown = match &decision {
+                crate::trash_ui::Decision::Rearm(next) => next.clone(),
+                _ => confirmed.clone(),
+            };
+            if self.confirm_trash.is_some() {
+                egui::Window::new(picasa_core::trash_plan::TRASH_TITLE)
+                    .id(egui::Id::unique("trash-confirm"))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                    .open(&mut open)
+                    .show(&ctx, |ui| {
+                        ui.label(picasa_core::trash_plan::confirm_body(shown.len()));
+                        ui.add_space(8.0);
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            action = crate::trash_ui::UserAction::Dismiss;
+                        }
+                        ui.horizontal(|ui| {
+                            // 默认焦点在「取消」：回车 / 空格落在取消上，
+                            // 移动原文件必须再主动点一次（`M5-FS-01`）。
+                            let cancel_btn =
+                                ui.button(picasa_core::trash_plan::TRASH_CANCEL);
+                            cancel_btn.request_focus();
+                            if cancel_btn.clicked() {
+                                action = crate::trash_ui::UserAction::Cancel;
+                            }
+                            if ui
+                                .button(picasa_core::trash_plan::TRASH_ACTION)
+                                .clicked()
+                            {
+                                action = crate::trash_ui::UserAction::Confirm;
+                            }
+                        });
+                    });
+            }
+            if !open && action == crate::trash_ui::UserAction::None {
+                action = crate::trash_ui::UserAction::Dismiss;
+            }
+            if action != crate::trash_ui::UserAction::None {
+                // 动作发生时的真实范围可能又变了，重新取一次再进决策表。
+                //
+                // 比的是**用户当初确认的那一组**（`confirmed`），不是这一帧
+                // 顺手重画的 `shown`：若范围就在这一帧变、用户又恰好点了确认，
+                // 旧集合仍然不成立，必须作废重确认，不能因为「重画了」就算数。
+                let now = self.current_trash_scope();
+                decision = crate::trash_ui::decide(action, &confirmed, &now);
+                match decision {
+                    crate::trash_ui::Decision::Execute(ids) => {
+                        self.confirm_trash = None;
+                        let (ok, errors) = self.lib.trash_ids(&ids);
+                        self.tray_rows_dirty = true;
+                        self.restore_scroll = None;
+                        if !errors.is_empty() {
+                            self.lib.toast = Some((
+                                format!(
+                                    "{ok} 张成功，{} 张失败：{}",
+                                    errors.len(),
+                                    errors[0]
+                                ),
+                                6.0,
+                            ));
+                        }
+                    }
+                    crate::trash_ui::Decision::Rearm(next) => {
+                        self.confirm_trash = Some(next);
+                        self.lib.toast = Some((
+                            picasa_core::trash_plan::SCOPE_CHANGED.into(),
+                            4.0,
+                        ));
+                    }
+                    crate::trash_ui::Decision::Close => self.confirm_trash = None,
+                    crate::trash_ui::Decision::Keep => {}
+                }
+            } else if let crate::trash_ui::Decision::Rearm(next) = decision {
+                self.confirm_trash = Some(next);
+                self.lib.toast =
+                    Some((picasa_core::trash_plan::SCOPE_CHANGED.into(), 4.0));
             }
         }
 
@@ -4470,7 +4577,9 @@ impl OpenPicasaApp {
         let photos = self.mgmt.all_photos;
         let mut go = false;
         let mut cancel = false;
-        egui::Window::new("删除索引")
+        // ② 全库删除索引：标题「删除索引」、按钮字也是「删除索引」，
+        // 与 ① 单根「确认删除索引 / 确认」明确不同（`M5-IDX-06`）。
+        egui::Window::new(crate::copy_text::PURGE_ALL_TITLE)
             .id(egui::Id::unique("delete-index-confirm"))
             .collapsible(false)
             .resizable(false)
@@ -4505,7 +4614,10 @@ impl OpenPicasaApp {
                     if cancel_btn.clicked() {
                         cancel = true;
                     }
-                    if ui.button("删除索引").clicked() {
+                    if ui
+                        .button(crate::copy_text::PURGE_ALL_BUTTON)
+                        .clicked()
+                    {
                         go = true;
                     }
                 });
@@ -4529,6 +4641,9 @@ impl OpenPicasaApp {
     /// 默认落在「取消」上。**只删索引与缩略图**，标记走身份骨架保留，
     /// 磁盘上的照片与原目录一概不动（R-M43-01 / R-M43-02）。
     fn draw_import_source_confirm(&mut self, ctx: &egui::Context, source_id: i64) {
+        // 张数与路径都取自**真正会被清的那个集合**（`import_source_removal_scope`）：
+        // 与 `remove_import_source` 执行时用的是同一个函数，不存在两套口径。
+        // 数量未知就写「待计算」，绝不拿一个别的计数充数。
         let (name, photos, paths) = self
             .lib
             .db()
@@ -4539,16 +4654,23 @@ impl OpenPicasaApp {
                     .flatten()
                     .map(|s| s.name)
                     .unwrap_or_else(|| "导入的索引".to_string());
-                let photos = db.import_source_photo_count(source_id).unwrap_or(0);
-                let paths: Vec<String> = db
-                    .imported_roots(source_id)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(_, p, _, _)| p)
-                    .collect();
+                let (roots, count) = picasa_db::import_source_removal_scope(&db, source_id)
+                    .map(|(roots, n)| (Some(roots), Some(n)))
+                    .unwrap_or_default();
+                let paths: Vec<String> = roots
+                    .as_ref()
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(|id| db.root(*id).ok().flatten().map(|r| r.path))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let photos = count
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "待计算".to_string());
                 (name, photos, paths)
             })
-            .unwrap_or_else(|_| ("导入的索引".to_string(), 0, Vec::new()));
+            .unwrap_or_else(|_| ("导入的索引".to_string(), "待计算".to_string(), Vec::new()));
         let mut go = false;
         let mut cancel = false;
         egui::Window::new("从导入的索引中移除")
@@ -4560,7 +4682,7 @@ impl OpenPicasaApp {
                 ui.set_width(420.0);
                 ui.label(
                     RichText::new(format!(
-                        "范围：导入来源「{name}」下的全部文件夹。\n照片数：{photos} 张"
+                        "范围：导入来源「{name}」下的全部文件夹。\n照片数：{photos} 张（这些文件夹下已建索引的全部照片）"
                     ))
                     .size(12.5)
                     .color(self.theme.text_primary),
