@@ -246,10 +246,14 @@ impl VolumeProbe for SystemProbe {
 #[cfg(unix)]
 fn probe_network_fs(path: &Path) -> bool {
     const NETWORK_FS: &[&str] = &[
-        "smbfs", "afpfs", "nfs", "nfs4", "webdav", "cifs", "fuse", "fuseblk", "osxfuse",
-        "macfuse", "sshfs", "davfs",
+        "smbfs", "afpfs", "nfs", "nfs4", "webdav", "cifs", "fuse", "fuseblk", "osxfuse", "macfuse",
+        "sshfs", "davfs",
     ];
-    let Ok(out) = std::process::Command::new("df").arg("-P").arg(path).output() else {
+    let Ok(out) = std::process::Command::new("df")
+        .arg("-P")
+        .arg(path)
+        .output()
+    else {
         return false;
     };
     let text = String::from_utf8_lossy(&out.stdout);
@@ -425,10 +429,10 @@ impl Debouncer {
         }
         let mut due: Vec<PathBuf> = Vec::new();
         for (dir, p) in &self.pending {
-            let quiet = now.saturating_duration_since(p.last)
-                >= Duration::from_millis(WATCH_DEBOUNCE_MS);
-            let overdue = now.saturating_duration_since(p.first)
-                >= Duration::from_millis(WATCH_MAX_DEFER_MS);
+            let quiet =
+                now.saturating_duration_since(p.last) >= Duration::from_millis(WATCH_DEBOUNCE_MS);
+            let overdue =
+                now.saturating_duration_since(p.first) >= Duration::from_millis(WATCH_MAX_DEFER_MS);
             if quiet || overdue {
                 due.push(dir.clone());
             }
@@ -468,6 +472,31 @@ impl Debouncer {
 
 // ---------------------------------------------------------------- 运行中的监视
 
+/// 这条事件是否代表「目录内容可能变了」，值得投递一次刷新。
+///
+/// 只有**改动类**事件算数：
+/// * `Create` / `Remove` / `Modify`（数据、改名、权限等元数据）—— 目录快照可能过期；
+/// * `Any` —— 后端无法给出更精确类型时的兜底，不能丢；
+/// * `Access`（OPEN / CLOSE / READ）与 `Other` —— **不算**；
+/// * `Modify(Metadata(AccessTime))` —— **不算**：读文件本身就会刷新 atime，
+///   把它当变化同样会自激。
+///
+/// `Access` 必须排除的理由见 `WatchHandle::install` 里的注释：本应用自己读照片
+/// 生成缩略图就会产生大量 Access 事件，把它们当「变化」会形成刷新自我反馈。
+pub(crate) fn event_is_change(kind: &notify::EventKind) -> bool {
+    use notify::EventKind;
+    use notify::event::{MetadataKind, ModifyKind};
+    match kind {
+        EventKind::Create(_) | EventKind::Remove(_) => true,
+        // 只读访问刷新 atime 也是「元数据变化」，但它不是用户的改动。
+        EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)) => false,
+        EventKind::Modify(_) => true,
+        // 未知精确类型：宁可多刷一次，也不能漏掉真实变化。
+        EventKind::Any => true,
+        EventKind::Access(_) | EventKind::Other => false,
+    }
+}
+
 /// 一个根的监视句柄（`07` WATCH-01/05 的生命周期靠 RAII 守：drop 即卸载）。
 pub struct WatchHandle {
     /// `Active` 时持有 OS 句柄；`Polling` / `Off` 时为 `None`
@@ -497,6 +526,20 @@ impl WatchHandle {
         let q = queue.clone();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let Ok(ev) = res else { return };
+            // ⚠️ M5-R1 closeout：只认「改动了什么」的事件，**忽略访问类事件**。
+            //
+            // Linux inotify 默认会把 OPEN / CLOSE_NOWRITE / ATTRIB（读文件会刷新
+            // atime）都报上来，而本应用自己生成缩略图时就要读每一个文件。若不过滤，
+            // 每读一张就产生一条事件 → 去抖后一个目录级 Refresh → `enqueue_refresh`
+            // 开新批次并把该路径任务的 completed/discovered 清零，于是：
+            // 缩略图读文件 → 刷新任务 → 计数归零 → 再读文件……几百个批次的自我反馈。
+            // macOS FSEvents 没有这么细的读事件，所以只在 Linux 上暴露。
+            //
+            // `Any` 必须保留：notify 在「精确事件未知」时用它兜底（部分后端 / 平台），
+            // 丢掉它会让真正的变化静默失效。
+            if !event_is_change(&ev.kind) {
+                return;
+            }
             for p in ev.paths {
                 // 事件给的是「文件」或「目录」：统一换算到目录级
                 let dir = if p.is_dir() {
@@ -635,20 +678,19 @@ pub struct LegacyWatchHandle {
 impl LegacyWatchHandle {
     pub fn spawn(roots: Vec<PathBuf>, tx: Sender<crate::scanner::CoreEvent>) -> Option<Self> {
         let (raw_tx, raw_rx) = std::sync::mpsc::channel::<PathBuf>();
-        let mut watcher =
-            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                if let Ok(ev) = res {
-                    for p in ev.paths {
-                        let dir = if p.is_dir() {
-                            p
-                        } else {
-                            p.parent().map(|d| d.to_path_buf()).unwrap_or(p)
-                        };
-                        let _ = raw_tx.send(dir);
-                    }
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(ev) = res {
+                for p in ev.paths {
+                    let dir = if p.is_dir() {
+                        p
+                    } else {
+                        p.parent().map(|d| d.to_path_buf()).unwrap_or(p)
+                    };
+                    let _ = raw_tx.send(dir);
                 }
-            })
-            .ok()?;
+            }
+        })
+        .ok()?;
         for root in &roots {
             if let Err(e) = watcher.watch(root, RecursiveMode::Recursive) {
                 tracing::warn!(root = %root.display(), error = %e, "无法监视该目录");
@@ -805,11 +847,7 @@ mod tests {
         }
         let out = d.drain_due(t(800));
         assert_eq!(out, Some(DebounceOut::RootStorm));
-        assert_eq!(
-            d.pending_len(),
-            0,
-            "风暴后待投递必须清空（根级刷新已覆盖）"
-        );
+        assert_eq!(d.pending_len(), 0, "风暴后待投递必须清空（根级刷新已覆盖）");
     }
 
     #[test]
@@ -828,7 +866,10 @@ mod tests {
         // R-M3-7：其余四条必须可见。
         for reason in [
             PollReason::NetworkVolume,
-            PollReason::InotifyLimit { need: 900, have: 800 },
+            PollReason::InotifyLimit {
+                need: 900,
+                have: 800,
+            },
             PollReason::NoPermission,
             PollReason::BackendError("boom".into()),
         ] {
@@ -1020,6 +1061,90 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         panic!("5 秒内没有收到文件变化事件");
+    }
+
+    /// M5-R1 closeout：**读文件不得触发刷新**。
+    ///
+    /// Linux inotify 会把 OPEN / CLOSE_NOWRITE / ATTRIB（读文件刷新 atime）报上来，
+    /// 而本应用自己生成缩略图时就要读每一个文件。若把这些 Access 事件当成「变化」，
+    /// 就会形成「读图 → 刷新 → 任务计数清零 → 再读图」的自我反馈（实测几百个批次）。
+    /// 这里把分类钉死：只有改动类事件算数。
+    #[test]
+    fn access_events_are_not_changes() {
+        use notify::EventKind;
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, ModifyKind, RemoveKind,
+        };
+
+        // 读 / 打开 / 关闭 —— 本应用自己读图就会产生，**不算变化**。
+        for k in [
+            EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Any),
+            EventKind::Access(AccessKind::Other),
+        ] {
+            assert!(!event_is_change(&k), "Access 不得触发刷新：{k:?}");
+        }
+
+        // 真正的改动必须保留。
+        for k in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Create(CreateKind::Folder),
+            EventKind::Remove(RemoveKind::File),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Both)),
+            EventKind::Modify(ModifyKind::Metadata(
+                notify::event::MetadataKind::Permissions,
+            )),
+            EventKind::Any,
+        ] {
+            assert!(event_is_change(&k), "改动必须触发刷新：{k:?}");
+        }
+
+        // 只读访问会刷新 atime：它也不是用户改动，不能当刷新理由。
+        assert!(!event_is_change(&EventKind::Modify(ModifyKind::Metadata(
+            notify::event::MetadataKind::AccessTime
+        ))));
+
+        // `Other` 是「知道有事件但表达不了」：宁可漏一次刷新也不自激，
+        // 因为它的来源不可控（部分后端会用它报告读相关状态）。
+        assert!(!event_is_change(&EventKind::Other));
+    }
+
+    /// 端到端：**读文件**不得产生目录级刷新（写入仍要产生）。
+    ///
+    /// 这条用例是上面纯逻辑的可执行版本：它真的去读临时目录里的图片，
+    /// 再等一个去抖窗口，确认队列里没有自己的读事件。
+    #[test]
+    fn reading_files_does_not_enqueue_a_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = probe(false, None, true);
+        let state = decide_state(true, 1, tmp.path(), &p, 300);
+        if !state.is_active() {
+            return; // 环境不支持实时监视
+        }
+        let Some(h) = WatchHandle::install(tmp.path(), state, WATCH_EVENT_CHAN) else {
+            return;
+        };
+        let file = tmp.path().join("photo.jpg");
+        std::fs::write(&file, b"jpeg-bytes").unwrap();
+        // 先把「创建」事件排空（它本来就该有）。
+        std::thread::sleep(Duration::from_millis(400));
+        let _ = h.drain_raw();
+
+        // 反复读这个文件（模拟生成缩略图时的解码读）。
+        for _ in 0..20 {
+            let _ = std::fs::read(&file);
+        }
+        std::thread::sleep(Duration::from_millis(700));
+        let after = h.drain_raw();
+        assert!(
+            after.dirs.is_empty(),
+            "读文件不该产生刷新（inotify 的 OPEN/ACCESS 必须被过滤）：{:?}",
+            after.dirs
+        );
     }
 
     #[test]

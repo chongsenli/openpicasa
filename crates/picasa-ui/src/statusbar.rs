@@ -15,8 +15,10 @@
 //! ## 只读运行状态的文案口径
 //!
 //! * 索引任务运行中：`已处理 N 张 · 已用 mm:ss`（[`running_status_text`]）。
-//!   N 是**分项之和**的已完成数；**没有分母、没有百分比、没有 ETA**——
-//!   `TaskView.elapsed_text` 明确写了「不许加 ETA」。
+//!   N 取 `IndexSnapshot::processed_running()`：扫描阶段是已入库张数，生成阶段
+//!   是「已出图 + 已判失败」的张数——**和真实后台处理同源**，不会因为生成缩略图
+//!   而长期停在 0。**没有分母、没有百分比、没有 ETA**——`TaskView.elapsed_text`
+//!   明确写了「不许加 ETA」。
 //! * 导入 / 导出运行中：短句沿用 [`crate::index_mgr::progress_short_label`]
 //!   （阶段 + 已处理 N / M）。这是**条目口径**，与照片张数分开说。
 //! * 两者同时进行：索引短句在前、IO 短句在后，中间用 `·` 分隔，仍是一行状态。
@@ -149,15 +151,15 @@ pub fn show(
 /// * 没有运行中的索引任务 → `None`（空闲态底栏左侧允许为空）。
 pub fn running_status_text(snap: &IndexSnapshot, elapsed_secs: Option<u64>) -> Option<String> {
     // 只看还在跑的任务：已完成 / 失败的旧任务不该在底栏常驻。
-    let running: Vec<&picasa_core::TaskSnapshot> = snap
-        .tasks
-        .iter()
-        .filter(|t| t.state.is_running())
-        .collect();
+    let running: Vec<&picasa_core::TaskSnapshot> =
+        snap.tasks.iter().filter(|t| t.state.is_running()).collect();
     if running.is_empty() {
         return None;
     }
-    let done: u64 = running.iter().map(|t| t.completed).sum();
+    // 数字必须与「真实后台处理」同源：直接用快照上的 `processed_running()`，
+    // 不在 UI 里自己累加（否则各处计数迟早差 1）。扫描阶段它随入库增长、
+    // 生成阶段随出图增长，同一批次内只增不减。
+    let done = snap.processed_running();
     Some(match elapsed_secs.map(format_mmss) {
         Some(t) => format!("已处理 {done} 张 · 已用 {t}"),
         None => format!("已处理 {done} 张"),
@@ -234,10 +236,9 @@ fn draw_zoom_slider(
     );
 
     // 实时像素文案：跟着滑块值走，不四舍五入到档位。
-    let px = zoom_px.round().clamp(
-        picasa_core::CELL_MIN_PX,
-        picasa_core::CELL_MAX_PX,
-    ) as i32;
+    let px = zoom_px
+        .round()
+        .clamp(picasa_core::CELL_MIN_PX, picasa_core::CELL_MAX_PX) as i32;
     painter.text(
         px_label.center(),
         Align2::CENTER_CENTER,
@@ -305,7 +306,11 @@ mod tests {
             discovered,
             completed,
             failed: 0,
-            percent: if state == IndexState::Scanning { None } else { Some(0) },
+            percent: if state == IndexState::Scanning {
+                None
+            } else {
+                Some(0)
+            },
             reason: None,
             last_update: 0.0,
             failures: Vec::new(),
@@ -321,8 +326,7 @@ mod tests {
             tasks: vec![task(IndexState::Thumbnailing, 37, 120)],
             ..Default::default()
         };
-        let text =
-            running_status_text(&snap, Some(65)).expect("运行中要有只读状态");
+        let text = running_status_text(&snap, Some(65)).expect("运行中要有只读状态");
         assert!(text.contains("已处理 37 张"), "{text}");
         assert!(text.contains("已用 01:05"), "已用时长要 mm:ss：{text}");
         for banned in ["/", "%", "％", "预计", "剩余", "ETA", "比"] {
@@ -334,6 +338,95 @@ mod tests {
         let text = running_status_text(&snap, Some(9)).unwrap();
         assert!(text.contains("已处理 5 张"), "{text}");
         assert!(!text.contains('/'), "{text}");
+    }
+
+    /// `M5-R1-closeout`：有真实后台进展时 N 不得停在 0。
+    ///
+    /// 回归的是 `bigrun-3.png` 的现场：库里有几百张、缩略图在生成，
+    /// 底栏却一直写「已处理 0 张」。现在 N 取运行中任务的
+    /// `completed + failed`（真正处理完的张数），每补一张就涨。
+    /// 仍然**没有分母**：生成阶段的 `discovered` 不进文案。
+    #[test]
+    fn m5_running_count_tracks_real_progress_and_never_sticks_at_zero() {
+        // ① 生成阶段：出图 37 / 已发现 400。文案是 37，不是 400（400 是分母）。
+        let mut snap = IndexSnapshot {
+            batch: 1,
+            tasks: vec![task(IndexState::Thumbnailing, 37, 400)],
+            ..Default::default()
+        };
+        let text = running_status_text(&snap, Some(20)).unwrap();
+        assert!(text.contains("已处理 37 张"), "出图数要进文案：{text}");
+        assert!(!text.contains("400"), "已发现数不得出现在底栏：{text}");
+
+        // ② 失败也要算「已处理」：30 张出图 + 5 张坏图。
+        let mut t = task(IndexState::Thumbnailing, 30, 400);
+        t.failed = 5;
+        snap.tasks = vec![t];
+        assert!(
+            running_status_text(&snap, None)
+                .unwrap()
+                .contains("已处理 35 张")
+        );
+
+        // ③ 真实进展会推动文案：同一任务逐张补完，N 必须跟着涨。
+        let mut snap = IndexSnapshot {
+            batch: 7,
+            tasks: vec![task(IndexState::Thumbnailing, 0, 400)],
+            ..Default::default()
+        };
+        assert_eq!(
+            running_status_text(&snap, Some(1)).unwrap(),
+            "已处理 0 张 · 已用 00:01",
+            "起点确实是 0（刚进生成阶段，一张都还没出）"
+        );
+        for n in 1..=3u64 {
+            snap.tasks[0].completed = n;
+            let text = running_status_text(&snap, Some(1 + n)).unwrap();
+            assert!(
+                text.contains(&format!("已处理 {n} 张")),
+                "第 {n} 张出图后 N 要动：{text}"
+            );
+        }
+        assert!(
+            !running_status_text(&snap, Some(4))
+                .unwrap()
+                .contains("已处理 0 张"),
+            "有真实进展就不会停在 0 —— 这是本轮修复的验收点"
+        );
+
+        // ④ 扫描阶段：入库张数也算进展（分母未冻结，不是分母）。
+        let scan = IndexSnapshot {
+            batch: 8,
+            tasks: vec![task(IndexState::Scanning, 0, 120)],
+            ..Default::default()
+        };
+        assert!(
+            running_status_text(&scan, Some(3))
+                .unwrap()
+                .contains("已处理 120 张")
+        );
+    }
+
+    /// 多任务时按分项之和汇总，且仍不含分母 / 百分比 / ETA。
+    #[test]
+    fn m5_running_count_sums_running_tasks_only() {
+        let done = task(IndexState::Completed, 50, 50);
+        let mut snap = IndexSnapshot {
+            batch: 2,
+            tasks: vec![
+                task(IndexState::Thumbnailing, 5, 20),
+                task(IndexState::Thumbnailing, 3, 10),
+                done,
+            ],
+            ..Default::default()
+        };
+        snap.tasks[0].path = "/a".into();
+        snap.tasks[1].path = "/b".into();
+        let text = running_status_text(&snap, Some(5)).unwrap();
+        assert!(text.contains("已处理 8 张"), "只汇总运行中的 5+3：{text}");
+        for banned in ["/", "%", "％", "预计", "剩余", "ETA"] {
+            assert!(!text.contains(banned), "只读状态不许出现 {banned}：{text}");
+        }
     }
 
     /// 空闲 / 终态：底栏左侧不常驻索引文案。

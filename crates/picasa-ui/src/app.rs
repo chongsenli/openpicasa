@@ -4790,11 +4790,19 @@ impl OpenPicasaApp {
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Pictures")));
         // 原生 NSOpenPanel：TCC 授权的唯一正规入口（F10-25 / R-3）。
         // Linux 冒烟走同一条 `rfd` 路径；没选到路径时不能静默返回。
-        let Some(dir) = crate::macos::pick_folder(start.as_deref()) else {
-            let (msg, ttl) = crate::macos::pick_folder_none_toast();
-            tracing::info!(msg, "选择文件夹未返回路径");
-            self.lib.toast = Some((msg.to_string(), ttl));
-            return;
+        //
+        // M5 closeout：必须区分「用户取消」与「本环境没弹出选择器」。
+        // 后者是能力缺失，不能伪装成用户操作；也不能用 toast 顶替选目录功能——
+        // 所以这里只是**如实报告原因**，绝不自动添加任何目录。
+        let outcome = crate::macos::pick_folder_outcome(start.as_deref());
+        let dir = match outcome {
+            crate::macos::PickFolderOutcome::Picked(dir) => dir,
+            other => {
+                let (msg, ttl) = crate::macos::pick_folder_none_toast_for(&other);
+                tracing::warn!(%msg, "选择文件夹未返回路径");
+                self.lib.toast = Some((msg, ttl));
+                return;
+            }
         };
         // `IDX-01` 入口三件事：可读性、同路径复用、父子重叠。
         // 先探可读性——加进去只会得到一棵空树和一条看不懂的失败任务。

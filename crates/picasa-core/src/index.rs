@@ -191,6 +191,42 @@ impl IndexSnapshot {
         self.tasks.iter().any(|t| t.state.is_running())
     }
 
+    /// 底栏「已处理 N 张」的**唯一口径**：运行中任务真正处理完的照片数之和。
+    ///
+    /// ## 口径（按阶段分开，因为 `discovered` 的含义会变）
+    ///
+    /// * **扫描阶段**：`discovered` 是「已入库的照片数」，分母尚未冻结，
+    ///   不存在泄露总数的风险；就地把新图补完时 `completed` 也在长，取两者的
+    ///   `max` 即可，绝不会停在 0。
+    /// * **生成阶段**：`discovered` 已经是本批次的分母，**不能**写进「已处理 N 张」
+    ///   （那等于把「共多少张」摊在底栏上，M5 明令禁止分母 / 百分比 / ETA）。
+    ///   这里只用 `completed + failed`：每补一张图或判一张坏图就长一格。
+    ///
+    /// ## 为什么以前会长期停在 0
+    ///
+    /// 不是这个加法的问题：Linux inotify 把「读文件」也报成事件，应用自己生成
+    /// 缩略图时读每个文件都会触发刷新 → `begin_batch` 把该路径的 `completed`
+    /// 清零，计数被自己的读操作反复打回 0。根因在
+    /// [`crate::watcher::event_is_change`]（Access / atime 事件已过滤），
+    /// 本函数只负责给出正确口径。任务收尾后不再计入（`M5-IDX-01` 空闲不常驻）。
+    pub fn processed_running(&self) -> u64 {
+        self.tasks
+            .iter()
+            .filter(|t| t.state.is_running())
+            .map(|t| {
+                let finished = t.completed.saturating_add(t.failed);
+                if t.state == IndexState::Scanning {
+                    // 扫描阶段每落库一张照片就是一次真实处理，且此时还没有
+                    // 「总数」这个概念（分母未冻结），不存在泄露分母的问题。
+                    t.discovered.max(finished)
+                } else {
+                    // 生成阶段 `discovered` 已经是分母：只用真正处理完的张数。
+                    finished
+                }
+            })
+            .sum()
+    }
+
     /// 汇总 `(已完成, 已发现, 失败)`。**分项之和**，不是另算一遍。
     pub fn totals(&self) -> (u64, u64, u64) {
         self.tasks.iter().fold((0, 0, 0), |(c, d, f), t| {
@@ -1069,6 +1105,67 @@ mod tests {
         // 分项之和 = 汇总
         let sum_c: u64 = s.tasks.iter().map(|t| t.completed).sum();
         assert_eq!(s.totals().0, sum_c);
+    }
+
+    /// M5-R1 closeout：底栏「已处理 N 张」的计数源。
+    ///
+    /// 回归的是真实缺陷：库里有 400 张、缩略图在生成，底栏却长期显示 0。
+    #[test]
+    fn processed_running_counts_real_progress_and_ignores_idle_tasks() {
+        let b = IndexBoard::new();
+        assert_eq!(b.snapshot().processed_running(), 0, "空闲必须是 0");
+
+        // 扫描阶段：就地补图（walk_and_store 里就是这么做的），每出一张
+        // completed 就长一格，N 不会停在 0。
+        b.begin_batch(&["/p/a".into()]);
+        b.mark_scanning("/p/a");
+        for _ in 0..37 {
+            b.note_thumb_ok("/p/a");
+        }
+        assert_eq!(
+            b.snapshot().processed_running(),
+            37,
+            "有真实后台进展时 N 不能停在 0"
+        );
+        // 扫描阶段已入库 400 张也算处理过（此时分母尚未冻结）。
+        b.note_discovered("/p/a", 400);
+        assert_eq!(b.snapshot().processed_running(), 400);
+
+        // 生成阶段：分母 400、出图 400 → 400。**不是**把 discovered 当已处理。
+        let b2 = IndexBoard::new();
+        b2.begin_batch(&["/q".into()]);
+        b2.freeze_denominator("/q", 400, 400);
+        assert_eq!(b2.snapshot().processed_running(), 400);
+
+        // 生成阶段：只有发现、一张都没出图时 N 是 0，绝不把分母当已处理。
+        let b3 = IndexBoard::new();
+        b3.begin_batch(&["/r".into()]);
+        b3.freeze_denominator("/r", 400, 0);
+        assert_eq!(
+            b3.snapshot().processed_running(),
+            0,
+            "生成阶段的 discovered 是分母，不能冒充已处理数"
+        );
+
+        // 失败也占「已处理」：30 张出图 + 2 张失败 = 32。
+        let b4 = IndexBoard::new();
+        b4.begin_batch(&["/s".into()]);
+        b4.freeze_denominator("/s", 40, 30);
+        for id in 1..=2 {
+            b4.note_thumb_failed(
+                "/s",
+                FailureItem {
+                    photo_id: id,
+                    name: format!("{id}.jpg"),
+                    reason: "损坏".into(),
+                },
+            );
+        }
+        assert_eq!(b4.snapshot().processed_running(), 32);
+
+        // 收尾（终态）后不再常驻底栏。
+        b4.finish("/s");
+        assert_eq!(b4.snapshot().processed_running(), 0, "终态不该再计数");
     }
 
     #[test]

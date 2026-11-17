@@ -337,8 +337,7 @@ impl ZoomState {
         }
         // 还在结算窗口里：继续等
         if let Some(t) = self.last_change
-            && now.saturating_duration_since(t)
-                < std::time::Duration::from_millis(ZOOM_SETTLE_MS)
+            && now.saturating_duration_since(t) < std::time::Duration::from_millis(ZOOM_SETTLE_MS)
         {
             return None;
         }
@@ -385,11 +384,19 @@ impl ZoomState {
         if naive > self.tier {
             // 想升：必须真的越过边界 + 回滞
             let boundary = bounds[self.tier.index()];
-            if physical >= boundary + h { naive } else { self.tier }
+            if physical >= boundary + h {
+                naive
+            } else {
+                self.tier
+            }
         } else if naive < self.tier {
             // 想降：必须真的低于边界 - 回滞
             let boundary = bounds[naive.index()];
-            if physical <= boundary - h { naive } else { self.tier }
+            if physical <= boundary - h {
+                naive
+            } else {
+                self.tier
+            }
         } else {
             self.tier
         }
@@ -431,8 +438,8 @@ impl ZoomState {
 
     /// 滚轮缩放（`07-A` ZOOM-03）。返回新的 `cell_px`。
     pub fn wheel(&mut self, delta_steps: f32) -> f32 {
-        let next = (self.cell_px + delta_steps * WHEEL_ZOOM_STEP_PX)
-            .clamp(CELL_MIN_PX, CELL_MAX_PX);
+        let next =
+            (self.cell_px + delta_steps * WHEEL_ZOOM_STEP_PX).clamp(CELL_MIN_PX, CELL_MAX_PX);
         if (next - self.cell_px).abs() > f32::EPSILON {
             self.cell_px = next;
             self.last_change = Some(std::time::Instant::now());
@@ -508,7 +515,11 @@ mod tests {
         // 1× 屏上 512 逻辑 = 512 物理，T0 刚好覆盖整个滑块范围 → 只用 T0，永不升档。
         // 只有 Retina（dpi ≥ 2）才会用到 T1。
         for px in [22.0, 48.0, 128.0, 256.0, 400.0, 512.0] {
-            assert_eq!(tier_for(px, 1.0), TexTier::T0, "{px} 逻辑 px 在 1× 屏上是 T0");
+            assert_eq!(
+                tier_for(px, 1.0),
+                TexTier::T0,
+                "{px} 逻辑 px 在 1× 屏上是 T0"
+            );
         }
     }
 
@@ -608,7 +619,11 @@ mod tests {
         assert_eq!(snap_to_point(48.0), 48.0);
         assert_eq!(snap_to_point(52.0), 48.0, "在 ±6 内要吸附");
         assert_eq!(snap_to_point(53.0), 48.0, "53 距 48 只有 5 px，要吸附");
-        assert_eq!(snap_to_point(55.0), 55.0, "55 距 48 有 7 px，超出 ±6 不吸附");
+        assert_eq!(
+            snap_to_point(55.0),
+            55.0,
+            "55 距 48 有 7 px，超出 ±6 不吸附"
+        );
         // 256 附近同理
         assert_eq!(snap_to_point(260.0), 256.0);
         assert_eq!(snap_to_point(265.0), 265.0);
@@ -788,5 +803,51 @@ mod tests {
         z.set_cell_px(f32::NAN, t(50));
         assert_eq!(z.cell_px(), 311.0);
     }
-}
 
+    /// `M5-R1-closeout`：**512 端必须真的设得到**，并且写入 preferences。
+    ///
+    /// 上一轮取证 `m5-thumb-512.png` 画面仍是 22 px，不能当有效证据。
+    /// 这里用纯逻辑把「滑块拖到 512 / 键盘从 96 一路 +」两条路径都测到：
+    /// 值、夹紧、落库口径三者一致，不再依赖任何桌面脚本。
+    #[test]
+    fn slider_reaches_512_and_persists_it() {
+        let mut z = ZoomState::new(DEFAULT_CELL_PX);
+        // ① 滑块直接拖到上限（`egui::Slider::integer()` 给出的就是整数）
+        assert!(z.set_cell_px(CELL_MAX_PX, t(0)));
+        assert_eq!(z.cell_px(), 512.0);
+        // ② 落库口径：`to_setting()` 就是 preferences 里写的那个整数
+        assert_eq!(z.to_setting(), 512);
+        // ③ 重启恢复：从 preferences 读回来仍是 512，不夹回 96 也不吸到刻度点
+        assert_eq!(ZoomState::from_setting(Some(512.0)).cell_px(), 512.0);
+        assert_eq!(ZoomState::from_setting(Some(512.0)).to_setting(), 512);
+
+        // ④ 键盘从 96 一路加也停在上限
+        let mut z = ZoomState::new(DEFAULT_CELL_PX);
+        let mut v = z.cell_px();
+        let mut steps = 0;
+        while !at_linear_bound(v, 1) {
+            v = step_linear(v, 1, KEYBOARD_STEP_PX);
+            steps += 1;
+            assert!(steps < 100, "步进没收敛，端点判定有问题");
+        }
+        assert_eq!(v, 512.0, "键盘加到头就是 512");
+        assert_eq!(steps, 26, "96 → 512 是 26 个 16 px 台阶（96+26×16=512）");
+        assert!(z.set_cell_px(v, t(1)));
+        assert_eq!(z.to_setting(), 512);
+        // 到端点后 `at_linear_bound` 为真，调用方据此不再写库。
+        assert!(at_linear_bound(z.cell_px(), 1));
+    }
+
+    /// `M5-R1-closeout`：`⌘0` 必须精确回到 96（产品事实，不随 §11 #1 改）。
+    #[test]
+    fn reset_returns_to_product_default_96() {
+        let mut z = ZoomState::new(400.0);
+        assert_eq!(z.reset(), 96.0);
+        assert_eq!(z.cell_px(), DEFAULT_CELL_PX);
+        assert_eq!(z.to_setting(), 96);
+        // 从 512 回 96 也一样
+        let mut z = ZoomState::new(512.0);
+        z.reset();
+        assert_eq!(z.to_setting(), 96);
+    }
+}
