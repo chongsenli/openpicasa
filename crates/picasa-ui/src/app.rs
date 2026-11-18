@@ -3659,10 +3659,14 @@ impl OpenPicasaApp {
                 && ctx.input(|i| i.pointer.any_click())
             {
                 let pos = ctx.input(|i| i.pointer.interact_pos());
+                // M5-R3 缺陷修复：「点空白关闭」的命中区取菜单**实际**矩形。
+                // 以前写死 `220×260`：菜单真宽 598 px 时，点右半边菜单项会被它
+                // 当成「点空白」抢关；菜单变窄后固定高度又会盖住下方空白。
+                let menu_rect = crate::topbar::more_menu_rect(&ctx).unwrap_or_else(|| {
+                    Rect::from_min_size(self.more_menu_pos, vec2(220.0, 260.0))
+                });
                 if let Some(p) = pos
-                    // M5：菜单多了「设置… / 索引管理…」两项，命中区跟着加高，
-                    // 否则点最下面两项时会被这句「点空白关闭」抢先关掉。
-                    && !Rect::from_min_size(self.more_menu_pos, vec2(220.0, 260.0)).contains(p)
+                    && !menu_rect.contains(p)
                 {
                     self.more_menu_open = false;
                 }

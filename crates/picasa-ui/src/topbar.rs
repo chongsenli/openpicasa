@@ -742,6 +742,52 @@ pub fn more_menu_items(
     ]
 }
 
+/// 「更多」菜单的目标外框宽度（原型同菜单约 220 px）。
+///
+/// M5-R3 缺陷修复：这是**菜单自己的**宽度，不读 `ui.available_width()`——
+/// 弹层不该跟着窗口/父容器剩余宽度走（旧实现被 `Area` 首帧的
+/// `spacing.default_area_size` 600 px 撑成了 598 px 宽的白条）。
+pub const MORE_MENU_WIDTH: f32 = 220.0;
+
+/// 菜单 `Frame` 的内边距（四边，与绘制处 `Margin::same(6)` 同源）。
+const MORE_MENU_INNER_MARGIN: f32 = 6.0;
+
+/// 菜单一行的行高。
+const MORE_MENU_ROW_H: f32 = 24.0;
+
+/// `Area` 的固定 id：不随调用点嵌套层数变化，也便于测试/命中区回读实际矩形。
+fn more_menu_area_id() -> egui::Id {
+    egui::Id::unique("picasa.topbar-more-menu")
+}
+
+/// 已绘制「更多」菜单的实际矩形（未打开时 `None`）。
+///
+/// 供 `app.rs` 的「点空白处关闭」命中区使用：命中区必须等于菜单真实大小，
+/// 不能写死一个比菜单窄的常量矩形。
+pub fn more_menu_rect(ctx: &egui::Context) -> Option<Rect> {
+    ctx.memory(|m| m.area_rect(more_menu_area_id()))
+}
+
+/// 按当前字体下**最长菜单项**算内容宽度；外框另加 [`MORE_MENU_INNER_MARGIN`]。
+///
+/// 下界是 [`MORE_MENU_WIDTH`] 对应的内容宽度（菜单观感不因文案短而发抖），
+/// 上界由真实字形决定（字体缺失/回退变宽时宁可略宽，也不截断
+/// 「方格显示文件名」「索引管理…」「关于 OpenPicasa」）。
+fn more_menu_content_width(ui: &Ui, items: &[(String, bool, MoreAction)]) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let pad_x = ui.spacing().button_padding.x;
+    let longest = items
+        .iter()
+        .map(|(label, _, _)| {
+            ui.painter()
+                .layout_no_wrap(label.clone(), font.clone(), Color32::PLACEHOLDER)
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    (longest + 2.0 * pad_x).max(MORE_MENU_WIDTH - 2.0 * MORE_MENU_INNER_MARGIN)
+}
+
 /// 「…」弹出菜单：真实功能项（含子文件夹 / 文件名 / 设置 / 索引管理 / 全屏 / 关于）。
 pub fn more_menu(
     ui: &mut Ui,
@@ -752,7 +798,9 @@ pub fn more_menu(
     show_filename: bool,
 ) -> Vec<TopbarAction> {
     let mut actions = Vec::new();
-    egui::Area::new(ui.scope_id().with("topbar-more-menu"))
+    let items = more_menu_items(recurse_on, recurse_available, show_filename);
+    let content_w = more_menu_content_width(ui, &items);
+    egui::Area::new(more_menu_area_id())
         .fixed_pos(at)
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
@@ -767,17 +815,17 @@ pub fn more_menu(
                     spread: 0,
                     color: Color32::from_black_alpha(if theme.dark { 150 } else { 40 }),
                 })
-                .inner_margin(egui::Margin::same(6))
+                .inner_margin(egui::Margin::same(MORE_MENU_INNER_MARGIN as i8))
                 .show(ui, |ui| {
-                    ui.set_min_width(210.0);
-                    for (label, enabled, action) in
-                        more_menu_items(recurse_on, recurse_available, show_filename)
-                    {
+                    // 固定内容宽度：按钮用 `available_width()` 时拿到的是这个值，
+                    // 而不是 `Area` 首帧兜底的 600 px。
+                    ui.set_width(content_w);
+                    for (label, enabled, action) in items {
                         let btn = ui.add_enabled(
                             enabled,
                             egui::Button::new(label)
                                 .frame(false)
-                                .min_size(vec2(ui.available_width(), 24.0)),
+                                .min_size(vec2(ui.available_width(), MORE_MENU_ROW_H)),
                         );
                         // 设置… / 索引管理… 是 M5 新增的两条入口，快捷键写在悬停提示里，
                         // 不额外占菜单宽度（v1.4 截图里显示在右侧）。
@@ -968,6 +1016,213 @@ mod m41_tests {
         assert!(!recurse.1, "非文件夹语境应置灰");
         let items = more_menu_items(true, true, false);
         assert_eq!(items[0].0, "✓ 只看本文件夹", "开着时以勾选说明当前语义");
+    }
+
+    // ---- M5-R3 缺陷修复：更多菜单宽度 -------------------------------------------------
+
+    /// 无窗口后端跑一帧 egui（宽高即窗口逻辑尺寸），返回本帧绘制结果。
+    fn run_frame(
+        ctx: &egui::Context,
+        appearance: picasa_core::Appearance,
+        size: egui::Vec2,
+        mut menu: impl FnMut(&mut Ui, &Theme),
+    ) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+            max_texture_side: Some(2048),
+            ..Default::default()
+        };
+        let theme = Theme::for_appearance(appearance);
+        ctx.run_ui(input, |ui| {
+            menu(ui, &theme);
+        })
+    }
+
+    /// 打开菜单并返回 (菜单实际矩形, 本帧所有文本)。
+    ///
+    /// 菜单是 `Area`：首帧是 sizing pass（不可见、尺寸是占位值），所以跑 3 帧
+    /// 再回读，拿到的是稳定后的真实矩形。
+    fn open_menu(
+        appearance: picasa_core::Appearance,
+        size: egui::Vec2,
+        recurse_on: bool,
+        recurse_available: bool,
+        show_filename: bool,
+    ) -> (Rect, Vec<(String, f32, usize)>) {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, appearance);
+        let mut last = None;
+        for _ in 0..3 {
+            let out = run_frame(&ctx, appearance, size, |ui, theme| {
+                let _ = more_menu(
+                    ui,
+                    pos2(681.0, 100.0),
+                    theme,
+                    recurse_on,
+                    recurse_available,
+                    show_filename,
+                );
+            });
+            let mut texts = Vec::new();
+            collect_texts(&out.shapes, &mut texts);
+            last = Some((more_menu_rect(&ctx).expect("菜单已画出"), texts));
+            out.drop_without_applying_deltas();
+        }
+        let (rect, texts) = last.unwrap();
+        (rect, texts)
+    }
+
+    fn collect_texts(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<(String, f32, usize)>) {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, f32, usize)>) {
+            match shape {
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, out);
+                    }
+                }
+                egui::Shape::Text(t) => out.push((
+                    t.galley.job.text.clone(),
+                    t.galley.rect.width(),
+                    t.galley.rows.len(),
+                )),
+                _ => {}
+            }
+        }
+        for c in shapes {
+            walk(&c.shape, out);
+        }
+    }
+
+    /// `M5-MN-01` 回归：菜单面板宽度必须贴合内容，不能跟着窗口剩余宽度走。
+    ///
+    /// 旧实现：`Area` 无宽度约束 + 按钮 `min_size(available_width, ..)`，首帧
+    /// 尺寸取自 egui 的 `spacing.default_area_size`（600 px），于是 1400 宽的
+    /// 窗口里菜单面板是 598 px 的白条（见 M5-R3 截图）。修复后应 ≈220 px。
+    #[test]
+    fn m5_more_menu_width_is_content_sized_not_window_width() {
+        for appearance in [
+            picasa_core::Appearance::Light,
+            picasa_core::Appearance::Dark,
+        ] {
+            let mut widths = Vec::new();
+            for size in [
+                vec2(1400.0, 900.0),
+                vec2(900.0, 600.0),
+                vec2(1920.0, 1080.0),
+            ] {
+                let (rect, _) = open_menu(appearance, size, false, true, true);
+                assert!(
+                    rect.width() < 300.0,
+                    "{appearance:?} @ {size:?}：菜单仍被拉到 {} px（上限 300）",
+                    rect.width()
+                );
+                assert!(
+                    rect.width() >= MORE_MENU_WIDTH,
+                    "{appearance:?} @ {size:?}：菜单 {} px 窄于设计宽度 {MORE_MENU_WIDTH}",
+                    rect.width()
+                );
+                widths.push(rect.width());
+            }
+            // 三种窗口宽度下菜单宽度必须一致（与窗口剩余宽度无关）。
+            let first = widths[0];
+            for w in &widths[1..] {
+                assert!(
+                    (w - first).abs() < 0.5,
+                    "{appearance:?}：窗口变化后菜单宽度跟着变了：{widths:?}"
+                );
+            }
+        }
+    }
+
+    /// 菜单至少放得下现有最长项：所有按钮文字都单行、不截断、不超出内容区。
+    #[test]
+    fn m5_more_menu_fits_every_existing_item() {
+        for appearance in [
+            picasa_core::Appearance::Light,
+            picasa_core::Appearance::Dark,
+        ] {
+            let (rect, texts) = open_menu(appearance, vec2(1400.0, 900.0), false, true, true);
+            let labels: Vec<String> = more_menu_items(false, true, true)
+                .into_iter()
+                .map(|(l, _, _)| l)
+                .collect();
+            for label in &labels {
+                let hit = texts
+                    .iter()
+                    .find(|(t, _, _)| t == label)
+                    .unwrap_or_else(|| {
+                        panic!("{appearance:?}：菜单里没画出「{label}」：{texts:?}")
+                    });
+                assert_eq!(hit.2, 1, "{appearance:?}：「{label}」被折成多行");
+                // 文本宽度 + 左右内边距（6 边框 + 8 按钮内边距）必须容得下。
+                assert!(
+                    hit.1 + 2.0 * (MORE_MENU_INNER_MARGIN + 8.0) <= rect.width() + 0.5,
+                    "{appearance:?}：「{label}」文字 {} px 放不进 {} px 的菜单",
+                    hit.1,
+                    rect.width()
+                );
+            }
+        }
+    }
+
+    /// 亮暗两套主题打开的是**同一套**菜单项（宽度与文案都不随主题变）。
+    #[test]
+    fn m5_more_menu_items_are_identical_in_light_and_dark() {
+        let (light_rect, light_texts) = open_menu(
+            picasa_core::Appearance::Light,
+            vec2(1400.0, 900.0),
+            true,
+            true,
+            true,
+        );
+        let (dark_rect, dark_texts) = open_menu(
+            picasa_core::Appearance::Dark,
+            vec2(1400.0, 900.0),
+            true,
+            true,
+            true,
+        );
+        assert!(
+            (light_rect.width() - dark_rect.width()).abs() < 0.5,
+            "亮/暗菜单宽度不一致：{} vs {}",
+            light_rect.width(),
+            dark_rect.width()
+        );
+        let mut light: Vec<String> = light_texts.into_iter().map(|(t, _, _)| t).collect();
+        let mut dark: Vec<String> = dark_texts.into_iter().map(|(t, _, _)| t).collect();
+        light.sort();
+        dark.sort();
+        assert_eq!(light, dark, "亮/暗菜单项不一致");
+        for expected in more_menu_items(true, true, true) {
+            assert!(
+                light.contains(&expected.0),
+                "菜单缺少「{}」：{light:?}",
+                expected.0
+            );
+        }
+    }
+
+    /// 「点空白关闭」的命中区 = 菜单实际矩形（不是写死的 220×260）。
+    #[test]
+    fn m5_more_menu_hit_rect_is_the_real_menu_rect() {
+        assert!(
+            more_menu_rect(&egui::Context::default()).is_none(),
+            "没打开菜单时不该有命中矩形"
+        );
+        let (rect, _) = open_menu(
+            picasa_core::Appearance::Light,
+            vec2(1400.0, 900.0),
+            false,
+            true,
+            true,
+        );
+        assert!(
+            rect.width() < 300.0 && rect.height() > 100.0,
+            "菜单矩形异常：{rect:?}"
+        );
+        // 菜单右半边的按钮区域必须落在命中区内，否则点它会被「点空白」抢关。
+        let right_side = pos2(rect.right() - 8.0, rect.center().y);
+        assert!(rect.contains(right_side), "菜单右侧不在命中区：{rect:?}");
     }
 
     /// `M41-UI-01`：双态判定的默认值（无选中）应让两个按钮都不进选中态。
