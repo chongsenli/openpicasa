@@ -84,6 +84,7 @@ pub fn show(
     );
     let _ = ui.allocate_space(rect.size());
     let painter = ui.painter_at(rect);
+    // M5 §5.4：底栏 = 窗口色 + 顶缘发丝线；padding ≈ 0 12px 0 14px。
     painter.rect_filled(rect, 0.0, theme.chrome_bg);
     painter.line_segment(
         [rect.left_top(), rect.right_top()],
@@ -249,13 +250,26 @@ fn draw_zoom_slider(
 
     // 滑块本体：在 `slider_rect` 里嵌一个子 Ui，避免影响状态栏的整行分配。
     let mut value = zoom_px.clamp(picasa_core::CELL_MIN_PX, picasa_core::CELL_MAX_PX) as i32;
-    let slider_ui = ui.new_child(
+    // 滑块轨道 / 把手颜色来自主题：亮色轨道 #ebebec、把手强调蓝；暗色轨道 #1c1c1c、
+    // 把手强调青。egui 的 slider 从 `widgets.inactive.bg_fill`（轨道）与
+    // `widgets.inactive.bg_fill`（把手）取色，这里在局部样式里覆盖，不改全局。
+    let mut slider_ui = ui.new_child(
         egui::UiBuilder::new()
             .id_salt("statusbar-zoom-slider")
             .max_rect(slider_rect),
     );
-    let mut slider_ui = slider_ui;
     slider_ui.style_mut().spacing.slider_width = SLIDER_W - 8.0;
+    {
+        let v = &mut slider_ui.style_mut().visuals.widgets;
+        v.inactive.bg_fill = theme.track_bg;
+        v.inactive.corner_radius = egui::CornerRadius::same(255);
+        v.hovered.bg_fill = theme.track_bg;
+        v.hovered.corner_radius = egui::CornerRadius::same(255);
+        v.active.bg_fill = theme.track_bg;
+        v.active.corner_radius = egui::CornerRadius::same(255);
+    }
+    slider_ui.style_mut().visuals.selection.bg_fill = theme.selected;
+    slider_ui.style_mut().visuals.handle_shape = egui::style::HandleShape::Circle;
     let resp = slider_ui.add(
         egui::Slider::new(
             &mut value,

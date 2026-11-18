@@ -339,8 +339,6 @@ pub struct OpenPicasaApp {
 
 impl OpenPicasaApp {
     pub fn new(cc: &eframe::CreationContext<'_>, paths: AppPaths) -> Self {
-        crate::theme::apply(&cc.egui_ctx);
-
         let lib = match Library::open(paths.clone()) {
             Ok(l) => l,
             Err(e) => {
@@ -364,15 +362,20 @@ impl OpenPicasaApp {
         // 回填和索引共用一把 DB 锁与同一块进度板：它自己会看板子决定要不要让路
         let dims = DimsService::new(lib.db.clone(), board.clone());
 
+        // M5-R3：启动时按偏好应用外观（默认亮色）。样式在 `lib` 被移进结构体前装好，
+        // 第一帧就已经是正确主题。
+        crate::theme::apply(&cc.egui_ctx, lib.prefs.appearance);
         // 读滑块设置要在 `lib` 被移进结构体之前（它是全局一份，不随视图变）
         let zoom_setting = load_zoom_setting(&lib);
+        // 主题必须与刚应用的样式一致，否则 `sync_theme` 会在第一帧重建一次字体。
+        let start_appearance = lib.prefs.appearance;
         // IDX-22 ⑧：后台计数线程自己开连接，所以只要路径，不要 `Db`（它非 Send）。
         let db_file = paths.db_file();
 
         let mut app = Self {
             lib,
             paths,
-            theme: Theme::picasa(),
+            theme: Theme::for_appearance(start_appearance),
             cache: TextureCache::new(),
             grid_layout: grid::GridCache::new(),
             service,
@@ -2718,6 +2721,22 @@ impl OpenPicasaApp {
 
     // -------------------------------------------------------------- 绘制
 
+    /// M5-R3：把当前偏好里的外观应用到 egui 全局样式与字体。
+    ///
+    /// 只在**外观真的变了**时重建样式（字体加载是低频动作，不能每帧做）。
+    /// 显式调用 `set_theme`，因此切换不依赖系统深色模式——固定 Linux/Xvfb
+    /// 主题下也能切换两套主题。
+    fn sync_theme(&mut self, ctx: &egui::Context) {
+        let target = self.lib.prefs.appearance;
+        if self.theme.appearance == target {
+            return;
+        }
+        crate::theme::apply(ctx, target);
+        self.theme = Theme::for_appearance(target);
+        // 纹理本身与主题无关，但缩略图落影 / 圆角在绘制时读取主题，下一帧自然生效。
+        ctx.request_repaint();
+    }
+
     fn draw_library(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let theme = self.theme;
@@ -3043,19 +3062,19 @@ impl OpenPicasaApp {
         // 修订 docs/09 §7.3「标题区在左栏」——左栏只保留文件树与托盘）
         egui::Panel::top("view-header-panel")
             .exact_size(Metrics::VIEW_HEADER_H)
-            .frame(egui::Frame::new().fill(theme.grid_bg))
+            .frame(egui::Frame::new().fill(theme.chrome_bg))
             .show(ui, |ui| {
                 let rect = ui.max_rect();
                 let painter = ui.painter_at(rect);
                 painter.text(
-                    pos2(rect.left() + Metrics::GRID_PAD, rect.top() + 12.0),
+                    pos2(rect.left() + 10.0 + Metrics::GRID_PAD, rect.top() + 12.0),
                     egui::Align2::LEFT_CENTER,
                     &self.view_header_title,
                     egui::FontId::new(15.0, egui::FontFamily::Proportional),
                     theme.text_primary,
                 );
                 painter.text(
-                    pos2(rect.left() + Metrics::GRID_PAD, rect.bottom() - 12.0),
+                    pos2(rect.left() + 10.0 + Metrics::GRID_PAD, rect.bottom() - 12.0),
                     egui::Align2::LEFT_CENTER,
                     &self.view_header_subtitle,
                     egui::FontId::new(11.0, egui::FontFamily::Proportional),
@@ -3064,8 +3083,19 @@ impl OpenPicasaApp {
             });
 
         // ④ 中央栅格
+        // M5 §5.1：主内容井 = 浅灰窗体上的圆角卡片（亮：白井；暗：暗房内井）。
+        // 用面板内边距把卡片从窗口边拉开；栅格自己在圆角卡片上铺底。
         egui::CentralPanel::no_frame()
-            .frame(egui::Frame::new().fill(theme.grid_bg))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.chrome_bg)
+                    .inner_margin(egui::Margin {
+                        left: 10,
+                        right: 12,
+                        top: 0,
+                        bottom: 8,
+                    }),
+            )
             .show(ui, |ui| {
                 let db_arc = self.lib.db.clone();
                 let db = db_arc.lock().expect("db 锁");
@@ -3493,7 +3523,12 @@ impl OpenPicasaApp {
         // 都落到既有能力上——前者与更多菜单「索引管理…」同一个 `open_at`，
         // 后者与顶栏导入**同一个** `add_folder`（M5-IM-01，不写第二套）。
         if self.settings_open {
-            if let Some(action) = crate::settings::show(&ctx, &theme, &mut self.settings_open) {
+            if let Some(action) = crate::settings::show(
+                &ctx,
+                &theme,
+                self.lib.prefs.appearance,
+                &mut self.settings_open,
+            ) {
                 match action {
                     crate::settings::SettingsAction::OpenIndexManager => {
                         // 先刷快照再开窗：这一帧的「存储与诊断」不能拿默认全 0。
@@ -3508,6 +3543,14 @@ impl OpenPicasaApp {
                         // 与顶栏「导入」同一函数：系统选目录 + 同一套 intake 规则。
                         self.add_folder();
                     }
+                    crate::settings::SettingsAction::SetAppearance(appearance) => {
+                        // M5-R3：验收用临时开关 → 写既有 preferences，重启保持。
+                        // §11 #4「正式入口位置」仍未定稿，这里只是让两套主题可验收。
+                        self.lib.prefs.appearance = appearance;
+                        self.lib.mark_prefs_dirty();
+                        self.sync_theme(&ctx);
+                        ctx.request_repaint();
+                    }
                 }
                 ctx.request_repaint();
             }
@@ -3518,6 +3561,7 @@ impl OpenPicasaApp {
             if let Some(action) = toolbar::sort_menu(
                 ui,
                 self.sort_menu_pos,
+                &theme,
                 self.lib.sort,
                 self.lib.thumbs_first,
             ) {
@@ -3559,6 +3603,7 @@ impl OpenPicasaApp {
             let actions = toolbar::more_menu(
                 ui,
                 self.more_menu_pos,
+                &theme,
                 self.lib.recurse,
                 self.lib.recurse_available(),
                 self.grid_show_filename,
@@ -3776,6 +3821,7 @@ impl OpenPicasaApp {
             let (action, _tag_out) = toolbar::filter_menu(
                 ui,
                 self.filter_menu_pos,
+                &theme,
                 &current,
                 &mut self.filter_draft_tag,
             );
@@ -3823,10 +3869,10 @@ impl OpenPicasaApp {
                 .order(egui::Order::Foreground)
                 .show(&ctx, |ui| {
                     egui::Frame::new()
-                        .fill(Color32::WHITE)
-                        .stroke(egui::Stroke::new(1.0, Color32::from_gray(0xC0)))
-                        .corner_radius(3.0)
-                        .inner_margin(egui::Margin::same(4))
+                        .fill(theme.menu_bg)
+                        .stroke(egui::Stroke::new(1.0, theme.hairline))
+                        .corner_radius(theme.radius_btn + 2.0)
+                        .inner_margin(egui::Margin::same(6))
                         .show(ui, |ui| {
                             ui.set_min_width(200.0);
                             if ui
@@ -4056,16 +4102,16 @@ impl OpenPicasaApp {
                 .order(egui::Order::Foreground)
                 .show(&ctx, |ui| {
                     egui::Frame::new()
-                        .fill(Color32::WHITE)
-                        .stroke(egui::Stroke::new(1.0, Color32::from_gray(0xC0)))
-                        .corner_radius(3.0)
-                        .inner_margin(egui::Margin::same(4))
+                        .fill(theme.menu_bg)
+                        .stroke(egui::Stroke::new(1.0, theme.hairline))
+                        .corner_radius(theme.radius_btn + 2.0)
+                        .inner_margin(egui::Margin::same(6))
                         .show(ui, |ui| {
                             ui.set_min_width(230.0);
                             ui.label(
                                 egui::RichText::new(format!("「{name}」"))
                                     .size(11.0)
-                                    .color(Color32::from_gray(0x70)),
+                                    .color(theme.text_secondary),
                             );
                             if ui
                                 .add(egui::Button::new("仅从分组隐藏").frame(false))
@@ -4085,7 +4131,7 @@ impl OpenPicasaApp {
                             ui.label(
                                 egui::RichText::new("只删索引与缩略图；收藏/标签/说明/相册保留，原图不动")
                                     .size(10.0)
-                                    .color(Color32::from_gray(0x88)),
+                                    .color(theme.text_disabled),
                             );
                         });
                 });
@@ -4126,10 +4172,10 @@ impl OpenPicasaApp {
                 .order(egui::Order::Foreground)
                 .show(&ctx, |ui| {
                     egui::Frame::new()
-                        .fill(Color32::WHITE)
-                        .stroke(egui::Stroke::new(1.0, Color32::from_gray(0xC0)))
-                        .corner_radius(3.0)
-                        .inner_margin(egui::Margin::same(4))
+                        .fill(theme.menu_bg)
+                        .stroke(egui::Stroke::new(1.0, theme.hairline))
+                        .corner_radius(theme.radius_btn + 2.0)
+                        .inner_margin(egui::Margin::same(6))
                         .show(ui, |ui| {
                             ui.set_min_width(210.0);
                             if ui
@@ -4479,8 +4525,8 @@ impl OpenPicasaApp {
                 .order(egui::Order::Foreground)
                 .show(&ctx, |ui| {
                     egui::Frame::new()
-                        .fill(Color32::from_rgb(0xC0, 0x39, 0x2B))
-                        .corner_radius(4.0)
+                        .fill(theme.danger)
+                        .corner_radius(theme.radius_btn)
                         .inner_margin(egui::Margin::symmetric(12, 6))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -5065,7 +5111,7 @@ fn load_zoom_setting(lib: &Library) -> Option<f32> {
 impl eframe::App for OpenPicasaApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.theme = Theme::picasa();
+        self.sync_theme(&ctx);
 
         // M3.1：macOS 上把红绿灯嵌进自绘顶栏（与 `with_fullsize_content_view`
         // 配套）。AppKit 每次窗口布局都会重置按钮位置，所以**每帧**都要调；

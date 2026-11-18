@@ -9,6 +9,36 @@ use std::path::{Path, PathBuf};
 
 const PREFS_VERSION: u32 = 1;
 
+/// 界面外观（M5-R3 §5 的 A / B 两套主题）。
+///
+/// **默认亮色（方案 A 清场）**：产品既有默认是浅色，M5 不把默认改成跟系统
+/// 或暗色（§11 #4 未裁定）。这个枚举只描述「用哪套 token」，不描述入口位置——
+/// 入口放在设置页只是**验收用临时开关**，不是对 §11 #4 的定稿。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// 方案 A：清场（亮色）。
+    #[default]
+    Light,
+    /// 方案 B：暗房（暗色）。
+    Dark,
+}
+
+impl Appearance {
+    /// 是否暗色主题。纯函数，便于 UI 与测试共用。
+    pub fn is_dark(self) -> bool {
+        matches!(self, Self::Dark)
+    }
+
+    /// 偏好里存的值（`"light"` / `"dark"`，与 serde 输出一致）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -47,6 +77,10 @@ pub struct Preferences {
     pub tags_sort: TagsSort,
     /// M4.3 IDX-22 ⑥：是否在左栏列出 0 计数的标签。默认隐藏。
     pub show_zero_tags: bool,
+    /// M5-R3：界面外观（A 清场 / B 暗房）。默认亮色。
+    ///
+    /// 仅由设置页的**临时验收开关**写入；§11 #4「正式入口放在哪里」仍未定稿。
+    pub appearance: Appearance,
     /// 栅格排序时把「已经有缩略图」的照片排在前面（用户要求）。
     ///
     /// 打开时两桶各自按当前排序键排：先整桶有图、再整桶没图。
@@ -73,6 +107,7 @@ impl Default for Preferences {
             view_mode: ViewMode::default(),
             tags_sort: TagsSort::default(),
             show_zero_tags: false,
+            appearance: Appearance::Light,
             thumbs_first: true,
         }
     }
@@ -180,6 +215,37 @@ mod tests {
         assert_eq!(prefs.sidebar_width, 220.0);
         // 坏文件保留，便于排查
         assert!(p.preferences_file().exists());
+    }
+
+    /// M5-R3：外观默认亮色，显式切暗色后**重启仍保持**（走真实的 JSON 落盘）。
+    #[test]
+    fn m5_r3_appearance_round_trips_and_defaults_to_light() {
+        let (_d, p) = temp_paths();
+
+        // 1) 没写过偏好 → 默认亮色。
+        let fresh = Preferences::load(&p);
+        assert_eq!(fresh.appearance, Appearance::Light);
+        assert_eq!(fresh.appearance.as_str(), "light");
+        assert!(!fresh.appearance.is_dark());
+
+        // 2) 切到暗色并落盘 → 重新加载仍是暗色。
+        let mut prefs = Preferences::default();
+        prefs.appearance = Appearance::Dark;
+        prefs.save(&p).unwrap();
+        let back = Preferences::load(&p);
+        assert_eq!(back.appearance, Appearance::Dark);
+        assert!(back.appearance.is_dark());
+        assert_eq!(back.appearance.as_str(), "dark");
+
+        // 3) 旧偏好文件没有 `appearance` 字段时按默认（亮色）读，不报错。
+        let json = std::fs::read_to_string(p.preferences_file()).unwrap();
+        let without = json
+            .lines()
+            .filter(|l| !l.contains("appearance"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(p.preferences_file(), without).unwrap();
+        assert_eq!(Preferences::load(&p).appearance, Appearance::Light);
     }
 
     #[test]

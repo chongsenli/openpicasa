@@ -338,8 +338,7 @@ pub fn show(
                         }
                         if ui
                             .button(
-                                RichText::new("确认重建？")
-                                    .color(Color32::from_rgb(0xB0, 0x30, 0x20)),
+                                RichText::new("确认重建？").color(theme.danger),
                             )
                             .on_hover_text(rebuild_reason())
                             .clicked()
@@ -548,7 +547,7 @@ fn render_perf_section(ui: &mut Ui, perf: &PerfSnapshot, theme: &Theme) {
             .color(if perf.constants_locked {
                 theme.text_secondary
             } else {
-                Color32::from_rgb(0xB0, 0x30, 0x20)
+                theme.danger
             }),
     );
     for (name, value) in LOCKED_CONST_LINES {
@@ -599,11 +598,8 @@ fn grid_row(ui: &mut Ui, theme: &Theme, label: &str, value: &str) {
 }
 
 fn muted(ui: &mut Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .size(11.0)
-            .color(Color32::from_gray(0x88)),
-    );
+    // 诊断窗口也吃主题：不写死浅色灰，暗色下仍可读。
+    ui.label(RichText::new(text).size(11.0).weak());
 }
 
 /// 失败记录行的人类可读折行（供日志与测试复用）。

@@ -228,13 +228,14 @@ pub fn show(
                 }
                 match group {
                     "图库" => {
-                        section_title(ui, "图库", ctx.favorites_collapsed, &mut actions);
+                        section_title(ui, ctx.theme, "图库", ctx.favorites_collapsed, &mut actions);
                         if !ctx.favorites_collapsed {
                             favorites(ui, lib, &*ctx, &mut actions);
                         }
                     }
                     "标签" => m4_group(
                         ui,
+                        ctx.theme,
                         "标签",
                         ctx.tags_collapsed,
                         ctx.tags.to_vec(),
@@ -251,6 +252,7 @@ pub fn show(
                     ),
                     "相册" => m4_group(
                         ui,
+                        ctx.theme,
                         "相册",
                         ctx.albums_collapsed,
                         ctx.albums.to_vec(),
@@ -262,7 +264,7 @@ pub fn show(
                         None,
                     ),
                     "文件夹" => {
-                        section_title(ui, "文件夹", ctx.folders_collapsed, &mut actions);
+                        section_title(ui, ctx.theme, "文件夹", ctx.folders_collapsed, &mut actions);
                         if !ctx.folders_collapsed {
                             folder_tree(ui, lib, &*ctx, &mut actions);
                         }
@@ -274,7 +276,13 @@ pub fn show(
             // ---- IDX-21 / M5-IA-01：导入的索引（仅当有来源时，紧挨「文件夹」之后）----
             if !ctx.import_groups.is_empty() {
                 ui.add_space(6.0);
-                section_title(ui, "导入的索引", ctx.imported_collapsed, &mut actions);
+                section_title(
+                    ui,
+                    ctx.theme,
+                    "导入的索引",
+                    ctx.imported_collapsed,
+                    &mut actions,
+                );
                 if !ctx.imported_collapsed {
                     imported_index(ui, lib, &*ctx, &mut actions);
                 }
@@ -285,18 +293,25 @@ pub fn show(
 }
 
 /// 分组标题：灰色小字（截图的「相簿」样式），整行可点 = 折叠。
-fn section_title(ui: &mut Ui, title: &str, collapsed: bool, actions: &mut Vec<SidebarAction>) {
+fn section_title(
+    ui: &mut Ui,
+    theme: &Theme,
+    title: &str,
+    collapsed: bool,
+    actions: &mut Vec<SidebarAction>,
+) {
     let (rect, resp) = ui.allocate_exact_size(
         vec2(ui.available_width(), Metrics::SIDEBAR_SECTION_H),
         Sense::click(),
     );
     let painter = ui.painter_at(rect);
-    let color = Theme::picasa().sidebar_section_text;
+    let color = theme.sidebar_section_text;
     painter.text(
         pos2(rect.left() + 14.0, rect.center().y),
         Align2::LEFT_CENTER,
         title,
-        FontId::new(11.0, egui::FontFamily::Proportional),
+        // M5 §5.2：暗色分组标题 11px、字距加宽、弱化色。
+        FontId::new(if theme.dark { 11.0 } else { 12.5 }, egui::FontFamily::Proportional),
         color,
     );
     // 折叠指示：右端小箭头（截图分组默认展开、悬停才现箭头；这里常显更可用）
@@ -332,6 +347,7 @@ fn section_title(ui: &mut Ui, title: &str, collapsed: bool, actions: &mut Vec<Si
 #[allow(clippy::too_many_arguments)]
 fn m4_group(
     ui: &mut Ui,
+    theme: &Theme,
     title: &str,
     collapsed: bool,
     items: Vec<(String, i64)>,
@@ -353,12 +369,12 @@ fn m4_group(
         return;
     }
     let painter = ui.painter_at(rect);
-    let color = Theme::picasa().sidebar_section_text;
+    let color = theme.sidebar_section_text;
     painter.text(
         pos2(rect.left() + 14.0, rect.center().y),
         Align2::LEFT_CENTER,
         title,
-        FontId::new(11.0, egui::FontFamily::Proportional),
+        FontId::new(if theme.dark { 11.0 } else { 12.5 }, egui::FontFamily::Proportional),
         color,
     );
     // 右端「＋」新建
@@ -421,12 +437,18 @@ fn m4_group(
         let selected = is_tag && active == Some(name.as_str());
         let hovered = row_resp.hovered();
         if selected {
-            // 选中态用「灰蓝」而不是高亮蓝：侧栏底色是暖灰，高亮蓝会跳。
-            ui.painter_at(r)
-                .rect_filled(r.shrink2(vec2(4.0, 1.0)), 4.0, Theme::picasa().sidebar_selected_inactive);
+            // M5：选中行 = 主题的选中片（亮白卡 / 暗 #232323），行圆角跟主题。
+            ui.painter_at(r).rect_filled(
+                r.shrink2(vec2(4.0, 1.0)),
+                theme.radius_btn,
+                theme.sidebar_selected,
+            );
         } else if hovered {
-            ui.painter_at(r)
-                .rect_filled(r.shrink2(vec2(4.0, 1.0)), 4.0, Theme::picasa().sidebar_hover);
+            ui.painter_at(r).rect_filled(
+                r.shrink2(vec2(4.0, 1.0)),
+                theme.radius_btn,
+                theme.sidebar_hover,
+            );
         }
         let p = ui.painter_at(r);
         // 名称最长占「整行宽 - 左侧缩进 - 右侧计数位（约 34px）」，按字符截断，
@@ -441,7 +463,11 @@ fn m4_group(
             Align2::LEFT_CENTER,
             &shown,
             FontId::new(12.5, egui::FontFamily::Proportional),
-            Theme::picasa().tree_text,
+            if selected {
+                theme.row_selected_text
+            } else {
+                theme.tree_text
+            },
         );
         // P1「本视图 N」：全库计数在右，本视图计数紧挨着它左边、用更淡的颜色。
         // 只在非全库视图下画；两个数字相同就没有信息量。
@@ -458,7 +484,7 @@ fn m4_group(
             Align2::RIGHT_CENTER,
             count.to_string(),
             FontId::new(11.0, egui::FontFamily::Proportional),
-            Theme::picasa().text_secondary,
+            theme.text_secondary,
         );
         if let Some(n) = in_view_count {
             p.text(
@@ -466,7 +492,7 @@ fn m4_group(
                 Align2::RIGHT_CENTER,
                 format!("·{n}"),
                 FontId::new(10.5, egui::FontFamily::Proportional),
-                Theme::picasa().text_disabled,
+                theme.text_disabled,
             );
         }
         let row_resp = if shown != name {
@@ -611,14 +637,16 @@ fn fav_row(
     let pill = rect.shrink2(vec2(6.0, 1.0));
     let icon_color = theme.toolbar_icon;
     if active {
-        painter.rect_filled(pill, 6.0, theme.sidebar_hover);
+        painter.rect_filled(pill, theme.radius_btn, theme.sidebar_selected);
     } else if resp.hovered() && enabled {
-        painter.rect_filled(pill, 6.0, theme.sidebar_hover.gamma_multiply(0.6));
+        painter.rect_filled(pill, theme.radius_btn, theme.sidebar_hover);
     }
-    let text_color = if enabled {
-        theme.text_primary
-    } else {
+    let text_color = if !enabled {
         theme.text_disabled
+    } else if active {
+        theme.row_selected_text
+    } else {
+        theme.text_primary
     };
     let icon_rect =
         Rect::from_center_size(pos2(rect.left() + 22.0, rect.center().y), vec2(16.0, 16.0));
@@ -696,11 +724,7 @@ fn imported_index(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mu
         }
         let painter = ui.painter_at(rect);
         if resp.hovered() {
-            painter.rect_filled(
-                rect.shrink2(vec2(6.0, 1.0)),
-                6.0,
-                t.sidebar_hover.gamma_multiply(0.6),
-            );
+            painter.rect_filled(rect.shrink2(vec2(6.0, 1.0)), t.radius_btn, t.sidebar_hover);
         }
         let icon_color = if g.offline {
             t.toolbar_icon.gamma_multiply(0.45)
@@ -810,9 +834,9 @@ fn render_tree_rows(
                 let pill = rect.shrink2(vec2(6.0, 1.0));
                 let indent = 8.0 + row.depth as f32 * Metrics::SIDEBAR_INDENT;
                 if active {
-                    painter.rect_filled(pill, 6.0, t.sidebar_hover);
+                    painter.rect_filled(pill, t.radius_btn, t.sidebar_selected);
                 } else if resp.hovered() {
-                    painter.rect_filled(pill, 6.0, t.sidebar_hover.gamma_multiply(0.6));
+                    painter.rect_filled(pill, t.radius_btn, t.sidebar_hover);
                 }
 
                 // A 样式树线：每个祖先层级一条细竖线，当前行用一段短横线接到折叠箭头/图标槽。
@@ -907,6 +931,8 @@ fn render_tree_rows(
                 let text_x = icon_x + 16.0 + 7.0;
                 let text_color = if imported && marks.offline {
                     t.text_secondary.gamma_multiply(0.8)
+                } else if active {
+                    t.row_selected_text
                 } else {
                     t.text_primary
                 };
@@ -1069,7 +1095,7 @@ fn tray(ui: &mut Ui, lib: &Library, ctx: &mut SidebarCtx<'_>, actions: &mut Vec<
             break;
         }
         let cell = Rect::from_min_size(pos2(x, body.top()), vec2(side, side));
-        painter.rect_filled(cell, 4.0, Color32::WHITE);
+        painter.rect_filled(cell, t.radius_btn.min(6.0), t.chip_bg);
         let state = ctx
             .cache
             .get(ui.ctx(), ctx.db, ctx.service, row, &mut budget);

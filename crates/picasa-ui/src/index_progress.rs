@@ -261,9 +261,9 @@ impl IndexProgressUi {
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(theme.overlay_bg)
-                    .stroke(Stroke::new(1.0, theme.separator))
-                    .corner_radius(3.0)
-                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .stroke(Stroke::new(1.0, theme.hairline))
+                    .corner_radius(theme.radius_btn + 2.0)
+                    .inner_margin(egui::Margin::symmetric(12, 9))
                     .show(ui, |ui| {
                         ui.set_width(TOAST_W - 20.0);
                         ui.horizontal(|ui| {
@@ -791,7 +791,7 @@ fn progress_bar(ui: &mut Ui, frac: Option<f32>, theme: &Theme, time: f64) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, 6.0), Sense::hover());
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, 3.0, Color32::from_gray(0xD8));
+    p.rect_filled(rect, 3.0, theme.track_bg);
     match frac {
         Some(f) => {
             let f = f.clamp(0.0, 1.0);

@@ -1,343 +1,510 @@
-//! 配色与尺寸常量——**界面还原度的单点配置**（02 §8.3.1 / §8.2.4）。
+//! M5 视觉 token：**方案 A 清场（亮）** 与 **方案 B 暗房（暗）** 两套完整主题。
 //!
-//! ## 为什么全部集中在一个文件
+//! ## 事实来源
 //!
-//! 01 §11.5.6 的 44 项界面还原清单里，有 24 项标着 `⚠️待核对`——它们全都是**数值**
-//! （尺寸、间距、HEX）。等 PM 用原版 3.9 的真实截图取色/量像素之后，只需要改这里，
-//! 不用碰任何布局算法。**这是把「待回填」的技术成本降到最低的方式。**
+//! 数值来自 `M5-需求说明书-v0.1` §5.1 / §5.2 的 token 表（与原型
+//! `css/app.css` 的 CSS 变量一致）。这里做的是 **Rust / egui 的等价转译**：
+//! 颜色、圆角、描边、字体栈、星标色都是设计 token，不是搬运 CSS。
 //!
-//! 每个常量后面都标了它对应的 U 编号，回填时按编号对照 01 文档即可。
+//! ## 为什么是一个 `Theme::for_appearance` 而不是两个散落的常量表
 //!
-//! ## 现值是怎么来的（诚实说明）
+//! 每个字段都同时被两套主题赋值，编译器会强制两套都写全；任何一处漏填都
+//! 无法通过 `cargo check`。界面只认 [`Theme`]，不直接读 `Color32::WHITE`
+//! 之类的字面量（少数「照片底片白」除外，见各绘制点注释）。
 //!
-//! 下面带 `TODO(U-xx)` 的值是 02 §8.3.1 的**目测近似值**，**不是**取色结果。
-//! 它们足以让界面「看起来像 Picasa」，但**不能作为验收依据**——
-//! 验收必须用真实截图量出来的数字（01 §11.5.6 的处置规则）。
+//! ## §11 #4 不在这里裁定
+//!
+//! 主题**入口**（设置页 / 更多菜单 / 跟随系统）仍未定稿。设置页里的
+//! 「外观（入口位置未定稿，仅用于验收）」只是让验收能在固定 Linux/Xvfb
+//! 环境里切换两套主题的临时开关，不代表产品已经决定入口位置。
 
-use eframe::egui::{self, Color32, FontFamily, FontId, TextStyle};
+use std::sync::Arc;
 
+use eframe::egui::{self, Color32, FontData, FontFamily, FontId, TextStyle};
+use picasa_core::Appearance;
+
+/// 两套主题共用的设计 token（按主题取值不同）。
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
-    // ---- 背景与分区（U-43 的四个关键色之一：①②④）----
-    /// ① 工具栏 / 状态栏底色
+    /// 当前主题对应的外观枚举（持久化用）。
+    pub appearance: Appearance,
+    /// 是否暗色（方案 B）。
+    pub dark: bool,
+
+    // ---- 页面 / 窗口 / 内容井 ----
+    /// 窗口外「清场」衬底（`--bg-page`）：亮 `#C8C8CC`，暗 `#050505`。
+    pub page_bg: Color32,
+    /// 窗口底色（`--win`）：亮 `#f5f5f5`，暗 `#151515`。
     pub chrome_bg: Color32,
-    /// ② 栅格背景（比工具栏更浅）
+    /// 内容井卡片（包住主区的圆角面）：亮 = 近白；暗 = `#1c1c1c` 卡面。
+    pub well_bg: Color32,
+    /// 主内容井（井内实际画照片的面）：亮 = 近白；暗 = `#151515` 暗房。
     pub grid_bg: Color32,
-    /// ④ 日期分组头灰条
-    pub header_bg: Color32,
-    /// 左栏背景（比工具栏略深一点点，形成分区）
+    /// 卡片 / 菜单 / 浮层底色（`--card`）：亮 `#fff`，暗 `#1c1c1c`。
+    pub menu_bg: Color32,
+    /// 左栏底色（与窗口同色，用发丝线分区）。
     pub sidebar_bg: Color32,
+    /// 日期分组头条底色（M5 起与内容井同色，不画灰条）。
+    pub header_bg: Color32,
 
     // ---- 线条 ----
-    /// 分区之间的 1px 分隔线（**不是投影**，U-02）
+    /// 分区发丝线（`--line`）：亮 6% 黑，暗近黑。
     pub separator: Color32,
-    /// 缩略图外框（U-24：1px 浅灰描边，让白底照片也有边界）
+    /// 控件发丝边（比 [`Self::separator`] 更淡，用于输入框 / 胶囊）。
+    pub hairline: Color32,
+    /// 缩略图外框（占位格）。
     pub cell_border: Color32,
 
-    // ---- 交互态 ----
-    /// ③ 选中蓝
+    // ---- 强调 / 交互 ----
+    /// 强调色：亮 `#0485f7`，暗 `#00dfe1`。
     pub selected: Color32,
-    /// 左栏选中行背景（U-16）
+    /// 强调文字色：亮 `#0373d6`，暗 `#00dfe1`。
+    pub accent_ink: Color32,
+    /// 强调柔底：亮 `#e6f1fe`，暗 `#00dfe114`。
+    pub accent_soft: Color32,
+    /// 收藏星：亮 `#f5b942`，暗按 B 视觉用强调色 `#00dfe1`（M5-GR-07）。
+    pub star: Color32,
+    /// 左栏选中行底色：亮 = 白卡片，暗 = `#232323`。
     pub sidebar_selected: Color32,
-    /// 失去焦点后仍保留的浅色（U-16）
+    /// 选中行文字：亮 = ink，暗 = 白。
+    pub row_selected_text: Color32,
+    /// 失焦后仍保留的浅色（沿用强调柔底）。
     pub sidebar_selected_inactive: Color32,
+    /// 悬停底色：亮 `#ebebec`，暗 `#232323`。
+    pub sidebar_hover: Color32,
+    /// 栅格悬停 / 控件悬停（与侧栏同一个 hover token）。
     pub cell_hover: Color32,
+    /// 滑轨 / 芯片底色：亮 `#ebebec`，暗 `#1c1c1c`。
+    pub track_bg: Color32,
+    /// 芯片底：亮 `#f4f4f5`，暗 `#232323`。
+    pub chip_bg: Color32,
 
     // ---- 文字 ----
     pub text_primary: Color32,
     pub text_secondary: Color32,
     pub text_disabled: Color32,
     pub header_text: Color32,
-    /// 状态栏文字（U-35 估 11px，灰色）
     pub status_text: Color32,
+    pub tree_text: Color32,
 
-    // ---- 查看器 ----
-    /// U-39：深灰/近黑，**不是纯黑**（纯黑照片仍要能看出边界）
+    // ---- 查看器（R4 不在本轮范围；保留既有 `viewer_bg` 语义）----
     pub viewer_bg: Color32,
     pub viewer_chrome: Color32,
     pub viewer_text: Color32,
 
-    // ---- 索引进度（M2，`docs/04`）----
-    /// 进度条与"进行中"指示（沿用选中蓝，不另造一个蓝）
+    // ---- 状态色 ----
+    /// 索引进度（= 强调色，不另造一个蓝）。
     pub progress: Color32,
-    /// 警示（部分失败 / 失败角标），暖色
+    /// 警示（部分失败 / 离线根）。
     pub warn: Color32,
-    /// 不可访问 / 硬错误
+    /// 危险：亮 `#e11d48`，暗 `#fb7185`（暗底上提高明度）。
     pub danger: Color32,
-    /// 已完成状态点
+    /// 成功：亮 `#16a34a`，暗 `#34d399`。
     pub ok: Color32,
-    /// 浮层底色（比工具栏更亮，形成"压在内容上"的层级）
+    /// 浮层底色（卡片底）。
     pub overlay_bg: Color32,
-    /// 占位格底色（灰底 +「待生成」，`04` §3.2.1）
+    /// 占位格底色。
     pub placeholder_bg: Color32,
 
-    // ---- 树 / 组头（量自 09-library-zh-full.png，见 ui-baseline.toml）----
-    /// 树行文字与计数（Picasa 用 #4D4D4D，计数与标签同色）
-    pub tree_text: Color32,
-    /// 组头渐变顶 / 底与 1px 边框
+    // ---- 树 / 组头（保留字段；M5 起观感见各绘制点）----
     pub header_top: Color32,
     pub header_bottom: Color32,
     pub header_border: Color32,
-    /// 组头折叠钮的 Picasa 绿
     pub disclosure_green: Color32,
 
-    // ---- M3.1：macOS「照片」风格（量自参考截图 2400×1440 ÷2）----
-    /// 顶栏底色（截图上没有独立顶栏底，就是窗口白）
+    // ---- 顶栏 ----
+    /// 顶栏底色 = 窗口色。
     pub toolbar_bg: Color32,
-    /// 顶栏底边发丝线（半透明灰）
+    /// 顶栏底缘发丝线。
     pub toolbar_border: Color32,
-    /// 分段控件胶囊底（灰白）
+    /// 分段控件 / 排布胶囊的槽底。
     pub seg_bg: Color32,
-    /// 分段控件选中片白底
+    /// 分段控件选中片：亮 = 白，暗 = `#2a2a2a`。
     pub seg_active: Color32,
-    /// 顶栏图标主色（近黑）
+    /// 顶栏线性图标色：亮 = ink，暗 = `#d4d4d4`。
     pub toolbar_icon: Color32,
-    /// 左栏分组标题（"相簿"/"固定"，灰色小字）
+    /// 左栏分组标题：亮 = faint，暗 = `#7c7c7c`。
     pub sidebar_section_text: Color32,
-    /// 左栏悬停底色（浅灰）
-    pub sidebar_hover: Color32,
-    /// 排布胶囊选中片（§7.2 像素校准：定稿效果图选中态**偏橙**的淡橙圆）
+    /// 排布胶囊选中片（M5 起 = 强调柔底，不再用旧淡橙）。
     pub seg_active_orange: Color32,
-    /// 白圆钮 / 白胶囊的软阴影（毛玻璃观感的来源）
-    pub control_shadow: egui::Shadow,
-    /// M4.1 v1.8：紧贴控件底边的「接触阴影」——白底白钮容易糊在一起，
-    /// 光靠一层大模糊阴影不够，再压一道更紧更暗的近阴影把边界托出来。
-    pub control_contact_shadow: egui::Shadow,
-    /// M4.1 v1.8：白控件的发丝边（1px），与接触阴影配合解决「和背景重合」。
-    pub control_hairline: Color32,
-    /// 方格缩略图的软阴影（效果图：圆角 + 极淡落影，无描边）
+
+    // ---- 阴影（只有一层极淡的缩略图落影；不再有白圆按钮软阴影）----
     pub thumb_shadow: egui::Shadow,
 
+    // ---- 圆角 token ----
+    /// 卡片 / 内容井：亮 26，暗 22。
+    pub radius_card: f32,
+    /// 缩略图：亮 16，暗 10。
+    pub radius_thumb: f32,
+    /// 按钮 / 行 / 芯片：亮 10，暗 8。
+    pub radius_btn: f32,
+
+    // ---- 选中环（0 0 0 2px 内环 + 0 0 0 4px 外环）----
+    /// 内环：亮 `#fff`，暗 `#151515`。
+    pub ring_inner: Color32,
+    /// 外环：亮 `#0485f7`，暗 `#00dfe1`。
+    pub ring_outer: Color32,
+
+    // ---- 视觉参考（**不驱动** `sidebar_width` 偏好逻辑）----
+    /// 侧栏参考宽：亮 228，暗 216。仅用于截图对照说明，不改用户拖出来的宽度。
+    pub sidebar_ref_w: f32,
+    /// 暗色标题是否用 11px 字距加宽大写。
+    pub title_uppercase: bool,
+}
+
+/// 亮色方案 A：清场。
+pub const LIGHT: ThemeSpec = ThemeSpec {
+    dark: false,
+    page: 0xC8C8CC,
+    win: 0xf5f5f5,
+    well: 0xffffff,
+    card: 0xffffff,
+    ink: 0x18181b,
+    muted: 0x71717a,
+    faint: 0xa1a1aa,
+    accent: 0x0485f7,
+    accent_ink: 0x0373d6,
+    accent_soft: 0xe6f1fe,
+    card_chip: 0xf4f4f5,
+    track: 0xebebec,
+    hover: 0xebebec,
+    star: 0xf5b942,
+    danger: 0xe11d48,
+    ok: 0x16a34a,
+    radius_card: 26.0,
+    radius_thumb: 16.0,
+    radius_btn: 10.0,
+    sidebar_ref_w: 228.0,
+};
+
+/// 暗色方案 B：暗房。
+pub const DARK: ThemeSpec = ThemeSpec {
+    dark: true,
+    page: 0x050505,
+    win: 0x151515,
+    well: 0x151515,
+    card: 0x1c1c1c,
+    ink: 0xf2f2f2,
+    muted: 0x9a9a9a,
+    faint: 0x7c7c7c,
+    accent: 0x00dfe1,
+    accent_ink: 0x00dfe1,
+    accent_soft: 0x00000000, // 带 alpha 的柔底单独处理（`#00dfe114`）
+    card_chip: 0x232323,
+    track: 0x1c1c1c,
+    hover: 0x232323,
+    star: 0x00dfe1,
+    danger: 0xfb7185,
+    ok: 0x34d399,
+    radius_card: 22.0,
+    radius_thumb: 10.0,
+    radius_btn: 8.0,
+    sidebar_ref_w: 216.0,
+};
+
+/// 一套主题的原始 token（HEX 值），由 [`Theme::for_appearance`] 展开。
+#[derive(Clone, Copy, Debug)]
+pub struct ThemeSpec {
+    pub dark: bool,
+    pub page: u32,
+    pub win: u32,
+    pub well: u32,
+    pub card: u32,
+    pub ink: u32,
+    pub muted: u32,
+    pub faint: u32,
+    pub accent: u32,
+    pub accent_ink: u32,
+    pub accent_soft: u32,
+    pub card_chip: u32,
+    pub track: u32,
+    pub hover: u32,
+    pub star: u32,
+    pub danger: u32,
+    pub ok: u32,
+    pub radius_card: f32,
+    pub radius_thumb: f32,
+    pub radius_btn: f32,
+    pub sidebar_ref_w: f32,
+}
+
+impl ThemeSpec {
+    pub fn appearance(&self) -> Appearance {
+        if self.dark {
+            Appearance::Dark
+        } else {
+            Appearance::Light
+        }
+    }
+}
+
+fn rgb(hex: u32) -> Color32 {
+    Color32::from_rgb(
+        ((hex >> 16) & 0xFF) as u8,
+        ((hex >> 8) & 0xFF) as u8,
+        (hex & 0xFF) as u8,
+    )
 }
 
 impl Theme {
-    /// Picasa 是浅色界面。这里**不跟随系统深色模式**——
-    /// 界面还原度是第一优先级（01 §11.5.5），跟随系统会直接破坏「像不像」。
-    pub fn picasa() -> Self {
+    /// 亮色方案 A（清场）。产品默认。
+    pub fn light() -> Self {
+        Self::from_spec(&LIGHT)
+    }
+
+    /// 暗色方案 B（暗房）。
+    pub fn dark() -> Self {
+        Self::from_spec(&DARK)
+    }
+
+    /// M5-R3：按偏好返回主题。**默认亮色**（`Appearance::Light`）。
+    pub fn for_appearance(appearance: Appearance) -> Self {
+        match appearance {
+            Appearance::Light => Self::light(),
+            Appearance::Dark => Self::dark(),
+        }
+    }
+
+    fn from_spec(s: &ThemeSpec) -> Self {
+        let dark = s.appearance().is_dark();
+        // 暗色强调柔底 `#00dfe114`：alpha = 0x14。
+        let accent_soft = if dark {
+            Color32::from_rgba_premultiplied(0x00, 0xdf, 0xe1, 0x14)
+        } else {
+            rgb(s.accent_soft)
+        };
+        let hairline = if dark {
+            Color32::from_rgba_premultiplied(255, 255, 255, 0x14)
+        } else {
+            Color32::from_rgba_premultiplied(0, 0, 0, 0x12)
+        };
+        let separator = if dark {
+            Color32::from_rgb(0x00, 0x00, 0x00)
+        } else {
+            Color32::from_rgba_premultiplied(0, 0, 0, 0x10)
+        };
         Self {
-            // TODO(U-43-①): 待取色。目测 ≈ #F0F0F0
-            chrome_bg: Color32::from_rgb(0xF0, 0xF0, 0xF0),
-            // M3.1：栅格背景 = 窗口白（截图的内容区就是白底）
-            grid_bg: Color32::WHITE,
-            // TODO(U-43-④): 待取色。目测 ≈ #D6D6D6
-            header_bg: Color32::from_rgb(0xD8, 0xD8, 0xD8),
-            // M3.1：侧栏底（截图半透灰的实色近似，比窗口白深一档）
-            sidebar_bg: Color32::from_rgb(0xF5, 0xF4, 0xF2),
-
-            separator: Color32::from_rgb(0xC8, 0xC8, 0xC8),
-            cell_border: Color32::from_rgb(0xCF, 0xCF, 0xCF),
-
-            // TODO(U-43-③): 待取色。目测 ≈ #4A90D9
-            selected: Color32::from_rgb(0x4A, 0x90, 0xD9),
-            // 树选中行：量自 09-library-zh-full.png（131,167,189）——钢青蓝，**纯色无渐变**，
-            // 上面配白字。之前目测的 #3875D7 偏亮偏饱和，量出来才知道是灰蓝。
-            sidebar_selected: Color32::from_rgb(0x83, 0xA7, 0xBD),
-            sidebar_selected_inactive: Color32::from_rgb(0xD6, 0xE4, 0xF7),
-            cell_hover: Color32::from_rgb(0xDC, 0xE6, 0xF2),
-
-            // 树文字/计数：量自参考图（最深像素 77,77,77）——Picasa 的计数「(1)」
-            // **与标签同色**，不是更浅的灰；只是字号更小。
-            tree_text: Color32::from_rgb(0x4D, 0x4D, 0x4D),
-            // 组头（「人物 (1)」那种带边框的白盒）：
-            // 底是 (241,243,246)→(220,221,225) 的竖直渐变，上下各 1px (155,155,155) 边框；
-            // 左端折叠钮是 Picasa 绿 (10,144,0)。
-            header_top: Color32::from_rgb(0xF1, 0xF3, 0xF6),
-            header_bottom: Color32::from_rgb(0xDC, 0xDD, 0xE1),
-            header_border: Color32::from_rgb(0x9B, 0x9B, 0x9B),
-            disclosure_green: Color32::from_rgb(0x0A, 0x90, 0x00),
-
-            text_primary: Color32::from_rgb(0x20, 0x20, 0x20),
-            text_secondary: Color32::from_rgb(0x66, 0x66, 0x66),
-            text_disabled: Color32::from_rgb(0xAA, 0xAA, 0xAA),
-            header_text: Color32::from_rgb(0x33, 0x33, 0x33),
-            status_text: Color32::from_rgb(0x5A, 0x5A, 0x5A),
-
+            appearance: s.appearance(),
+            dark,
+            page_bg: rgb(s.page),
+            chrome_bg: rgb(s.win),
+            well_bg: if dark { rgb(s.card) } else { rgb(s.well) },
+            grid_bg: rgb(s.well),
+            menu_bg: rgb(s.card),
+            sidebar_bg: rgb(s.win),
+            header_bg: rgb(s.well),
+            separator,
+            hairline,
+            cell_border: if dark {
+                Color32::from_rgba_premultiplied(255, 255, 255, 0x1f)
+            } else {
+                Color32::from_rgba_premultiplied(0, 0, 0, 0x1f)
+            },
+            selected: rgb(s.accent),
+            accent_ink: rgb(s.accent_ink),
+            accent_soft,
+            star: rgb(s.star),
+            sidebar_selected: if dark { rgb(s.hover) } else { rgb(s.card) },
+            row_selected_text: if dark {
+                Color32::WHITE
+            } else {
+                rgb(s.ink)
+            },
+            sidebar_selected_inactive: accent_soft,
+            sidebar_hover: rgb(s.hover),
+            cell_hover: rgb(s.hover),
+            track_bg: rgb(s.track),
+            chip_bg: rgb(s.card_chip),
+            text_primary: rgb(s.ink),
+            text_secondary: rgb(s.muted),
+            text_disabled: rgb(s.faint),
+            header_text: if dark { rgb(s.muted) } else { rgb(s.ink) },
+            status_text: rgb(s.muted),
+            tree_text: if dark { rgb(0xb8) } else { rgb(0x3f3f46) },
             viewer_bg: Color32::from_rgb(0x1A, 0x1A, 0x1A),
             viewer_chrome: Color32::from_rgb(0x2B, 0x2B, 0x2B),
             viewer_text: Color32::from_rgb(0xE8, 0xE8, 0xE8),
-
-            progress: Color32::from_rgb(0x4A, 0x90, 0xD9),
-            warn: Color32::from_rgb(0xC8, 0x86, 0x1E),
-            danger: Color32::from_rgb(0xC0, 0x39, 0x2B),
-            ok: Color32::from_rgb(0x3E, 0x8E, 0x3E),
-            overlay_bg: Color32::from_rgb(0xFB, 0xFB, 0xFB),
-            placeholder_bg: Color32::from_rgb(0xE4, 0xE4, 0xE4),
-
-            // M3.1（量自参考截图）：窗口白、发丝线、灰白胶囊
-            toolbar_bg: Color32::WHITE,
-            toolbar_border: Color32::from_rgba_premultiplied(0, 0, 0, 26),
-            seg_bg: Color32::from_rgb(0xEB, 0xE9, 0xE5),
-            seg_active: Color32::WHITE,
-            toolbar_icon: Color32::from_rgb(0x2A, 0x2A, 0x2A),
-            sidebar_section_text: Color32::from_rgb(0x8A, 0x8A, 0x8A),
-            sidebar_hover: Color32::from_rgb(0xE9, 0xE7, 0xE3),
-            // 量自定稿效果图（openpicasa-3row-final.jpg 选中片采样 ≈ 251,226,213）
-            seg_active_orange: Color32::from_rgb(0xFB, 0xE2, 0xD5),
-            // M4.1 v1.8：用户反馈「按钮和背景有点重合」→ 加深外阴影。
-            // 原来是 offset[0,1]/blur3/alpha36，白底白钮几乎看不出边界。
-            control_shadow: egui::Shadow {
-                offset: [0, 2],
-                blur: 6,
-                spread: 0,
-                color: Color32::from_black_alpha(64),
+            progress: rgb(s.accent),
+            warn: if dark {
+                Color32::from_rgb(0xFB, 0xBF, 0x24)
+            } else {
+                Color32::from_rgb(0xC8, 0x86, 0x1E)
             },
-            // 更紧更暗的近阴影：贴着底边压一圈，让白圆钮「浮」在白底上
-            control_contact_shadow: egui::Shadow {
-                offset: [0, 1],
-                blur: 2,
-                spread: 0,
-                color: Color32::from_black_alpha(48),
+            danger: rgb(s.danger),
+            ok: rgb(s.ok),
+            overlay_bg: rgb(s.card),
+            placeholder_bg: if dark { rgb(0x23) } else { rgb(0xE4) },
+            header_top: rgb(s.well),
+            header_bottom: rgb(s.well),
+            header_border: separator,
+            disclosure_green: rgb(s.accent),
+            toolbar_bg: rgb(s.win),
+            toolbar_border: if dark {
+                Color32::from_rgba_premultiplied(255, 255, 255, 0x12)
+            } else {
+                Color32::from_rgba_premultiplied(0, 0, 0, 0x14)
             },
-            // 1px 发丝边（极淡，不是描边式边框，不破坏 M4 白圆底观感）
-            control_hairline: Color32::from_black_alpha(22),
+            seg_bg: rgb(s.track),
+            seg_active: if dark { rgb(0x2a) } else { Color32::WHITE },
+            toolbar_icon: if dark {
+                Color32::from_rgb(0xD4, 0xD4, 0xD4)
+            } else {
+                rgb(s.ink)
+            },
+            sidebar_section_text: rgb(s.faint),
+            seg_active_orange: accent_soft,
             thumb_shadow: egui::Shadow {
                 offset: [0, 1],
-                blur: 4,
+                blur: if dark { 2 } else { 4 },
                 spread: 0,
-                color: Color32::from_black_alpha(30),
+                color: Color32::from_black_alpha(if dark { 90 } else { 30 }),
             },
+            radius_card: s.radius_card,
+            radius_thumb: s.radius_thumb,
+            radius_btn: s.radius_btn,
+            ring_inner: if dark {
+                Color32::from_rgb(0x15, 0x15, 0x15)
+            } else {
+                Color32::WHITE
+            },
+            ring_outer: rgb(s.accent),
+            sidebar_ref_w: s.sidebar_ref_w,
+            title_uppercase: dark,
         }
     }
+
+    /// 顶栏图标按钮在某个状态下应有的**实色底**。
+    ///
+    /// M5 §5.3：不能再是「一排白圆钮」。默认 = 透明（线性图标直接落在顶栏上），
+    /// 悬停 = hover 底，选中 = 强调柔底。函数化便于单测锁定这条禁止项。
+    pub fn topbar_icon_fill(&self, hovered: bool, selected: bool) -> Color32 {
+        if selected {
+            self.accent_soft
+        } else if hovered {
+            self.sidebar_hover
+        } else {
+            Color32::TRANSPARENT
+        }
+    }
+
+    /// 缩略图圆角：M5-TB-10 的极小尺寸收窄规则 × 本主题的圆角 token。
+    pub fn thumb_radius_for(&self, cell_px: f32) -> f32 {
+        let cell = cell_px.max(1.0);
+        if cell >= 96.0 {
+            return self.radius_thumb;
+        }
+        if cell <= 22.0 {
+            return 2.0_f32.min(self.radius_thumb);
+        }
+        let t = (cell - 22.0) / (96.0 - 22.0);
+        (2.0 + t * (self.radius_thumb - 2.0)).min(self.radius_thumb)
+    }
+
+    /// 字体栈（用于文档 / 测试；实际加载见 [`install_fonts`]）。
+    pub fn font_stack(&self) -> &'static [&'static str] {
+        if self.dark {
+            &["Geist", "Inter", "Noto Sans CJK SC", "PingFang SC"]
+        } else {
+            &[
+                "Inter",
+                "Noto Sans CJK SC",
+                "PingFang SC",
+                "Hiragino Sans GB",
+                "Microsoft YaHei",
+            ]
+        }
+    }
+}
+
+/// 16 进制 `#rrggbb`（测试与文档用）。
+pub fn hex(c: Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
 }
 
 /// 尺寸常量。全部标了 U 编号，回填时一一对应。
 pub struct Metrics;
 
 impl Metrics {
-    /// 顶部两段式（量自 09-library-zh-full.png x=650 逐行扫描）：
-    /// 标题栏(y0..19)是 OS 的，我们不画；**菜单栏** 21px + 1px 分隔 + **工具行** 38px。
-    /// 总高 = 21 + 1 + 38 = 60（旧的 68「图标上文下」版式已废弃，PM 2026-11-01 拍板照抄参考图）。
+    /// 顶部两段式：保留旧 XP 常量（不再使用，避免下游断编译）。
     pub const MENUBAR_H: f32 = 21.0;
     pub const TOOLROW_H: f32 = 38.0;
     pub const TOOLBAR_H: f32 = 60.0;
-    /// 菜单栏：白→淡蓝渐变的三个采样点（y22 #FEFEFF / y30 #D4DBEE / y39 #E1E6F6）
     pub const MENUBAR_TOP: Color32 = Color32::from_rgb(0xFE, 0xFE, 0xFF);
     pub const MENUBAR_MID: Color32 = Color32::from_rgb(0xD4, 0xDB, 0xEE);
     pub const MENUBAR_BOT: Color32 = Color32::from_rgb(0xE1, 0xE6, 0xF6);
-    /// 菜单栏底边 1px（y40）与工具行底边 1px（y80）
     pub const MENUBAR_BORDER: Color32 = Color32::from_rgb(0xB6, 0xBC, 0xCC);
     pub const TOOLROW_BORDER: Color32 = Color32::from_rgb(0xBA, 0xBA, 0xBA);
-    /// 工具行底色（y41..79）
     pub const TOOLROW_BG: Color32 = Color32::from_rgb(0xE8, 0xE8, 0xE8);
-    /// 搜索框边框（x=1250 处 #7F9DB9 蓝灰边 + 白芯，XP 经典风格）
     pub const SEARCH_BORDER: Color32 = Color32::from_rgb(0x7F, 0x9D, 0xB9);
-    /// 工具栏里一个按钮的宽度（图标在上、文案在下）
     pub const TOOL_BTN_W: f32 = 58.0;
-    /// 工具栏按钮的图标边长
     pub const TOOL_ICON: f32 = 22.0;
-    /// U-08：分组之间的竖线两侧留白
     pub const TOOL_GROUP_PAD: f32 = 8.0;
 
-    /// U-33：状态栏高度。目测 22~26，取 24。
-    pub const STATUS_H: f32 = 24.0;
-    /// U-03：左栏默认宽度。目测 200~240，取 220。
+    pub const STATUS_H: f32 = 32.0;
     pub const SIDEBAR_W: f32 = 220.0;
     pub const SIDEBAR_MIN: f32 = 160.0;
     pub const SIDEBAR_MAX: f32 = 420.0;
 
-    /// 左栏行高：量自 09-library-zh-full.png —— 相邻文件夹图标行顶距恒为 **22px**。
     pub const ROW_H: f32 = 22.0;
-    /// U-14：每级缩进。目测 12~16，取 14。
-    /// ⚠️ 参考图里所有可见文件夹都在同一层级，**量不出**每级缩进；沿用 14，
-    /// 已登记进 `ui-baseline.toml` 的「本图不可测」清单。
     pub const INDENT: f32 = 14.0;
-    /// 组头行高：量自参考图 —— 「人物 (1)」白盒上下边框外沿 82..102，高 21px，取 22 对齐行高。
     pub const SECTION_H: f32 = 22.0;
 
-    /// U-36/U-37：左栏底部照片托盘（收起高度 / 展开高度）
     pub const TRAY_COLLAPSED_H: f32 = 22.0;
     pub const TRAY_EXPANDED_H: f32 = 92.0;
-    /// 托盘里一个缩略图方块的边长
     pub const TRAY_THUMB: f32 = 56.0;
 
-    /// U-21：三档单元格边长（与 `picasa_core::library::CELL_SIZES` 必须一致）
+    /// U-21：三档单元格边长（与 `picasa_core::library::CELL_SIZES` 必须一致）。
     pub const CELL_SIZES: [f32; 3] = [85.0, 144.0, 200.0];
 
-    // ---- M3.1：macOS「照片」风格顶栏（量自参考截图 2400×1440 ÷2）----
-    /// 顶栏总高：§7 像素校准改双行——上行面包屑、下行工具钮（量自
-    /// openpicasa-3row-final.jpg：面包屑中线 ≈22、按钮中线 ≈73，整条 ≈96）。
+    // ---- M3.1 顶栏 ----
     pub const TOPBAR_H: f32 = 96.0;
-    /// 顶栏上行（红绿灯 + 双语境面包屑）的高度。
     pub const TOPBAR_LINE1_H: f32 = 40.0;
-    /// 顶栏图标（圆形热区）直径：截图 ≈40（取 38 沿用旧值，视觉重量一致）。
     pub const TOPBAR_ICON_D: f32 = 38.0;
-    /// 左栏默认宽度：截图 432px ÷ 2 = 216（连同最小/最大一起放宽）。
+    /// 左栏默认宽度。M5-R3 视觉参考 228（亮）/ 216（暗）；**宽度偏好逻辑不变**，
+    /// 这里保持既有默认 216，不借主题改用户拖出来的宽度。
     pub const SIDEBAR_DEFAULT_W: f32 = 216.0;
-    /// 左栏行高（§7.3 A 样式文件树：更密的行高，不是 Photos 大行高列表）。
-    pub const SIDEBAR_ROW_H: f32 = 26.0;
-    /// 左栏行缩进每级步长（A 样式的树线宽度）。
+    pub const SIDEBAR_ROW_H: f32 = 28.0;
     pub const SIDEBAR_INDENT: f32 = 14.0;
-    /// 左栏分组标题（"图库"/"文件夹"）行高。
-    pub const SIDEBAR_SECTION_H: f32 = 24.0;
-    /// 中区左侧标题区高度（M32-UI-04 v1.2 起弃用：标题迁到主区顶部）。
+    pub const SIDEBAR_SECTION_H: f32 = 26.0;
     pub const SIDEBAR_HEADER_H: f32 = 58.0;
-    /// 主区顶部标题行高度（M32-UI-04：语境标题 + `N 张 · 拍摄年月` 两行左对齐）。
     pub const VIEW_HEADER_H: f32 = 52.0;
-    /// 分段控件高度：截图 72px ÷ 2 = 36。
     pub const SEG_H: f32 = 36.0;
-    /// −/+ 胶囊高：与分段控件同高。
-    pub const ZOOM_PILL_H: f32 = 36.0;
-    /// U-22：单元格间距（水平/垂直同一个值，**不是均分剩余空间**）。
-    /// 像素校准：量自定稿效果图 —— 相邻缩略图左沿间距 ≈16（旧值 10 偏挤）。
+    pub const ZOOM_PILL_H: f32 = 32.0;
     pub const CELL_GAP: f32 = 16.0;
-    /// U-23：栅格四周留白。像素校准：侧栏边到首列缩略图 ≈32-38，取 32。
     pub const GRID_PAD: f32 = 32.0;
-    /// U-30：日期分组头高度
-    pub const GROUP_HEADER_H: f32 = 26.0;
-    /// U-26：文件名行高。
-    ///
-    /// M4.1 `M41-UI-03`：18 → **9**，把「照片名称与照片的视觉距离」减半
-    /// （配合 [`Self::FILENAME_GAP`] 由 1.0 → 0.5）。
+    pub const GROUP_HEADER_H: f32 = 30.0;
     pub const FILENAME_H: f32 = 9.0;
-    /// M4.1：方格布局里「图片底边 → 文件名行」的间距（[`GridLayout::filename_rect`]）。
     pub const FILENAME_GAP: f32 = 0.5;
-    /// U-26：文件名字号。
-    ///
-    /// M4.1 `M41-UI-03`（P-M41-06）：行高降到 9 后 12.5px 会被裁，降到 **11.0**
-    /// 并改用 `Align2::CENTER_TOP` 绘制，避免 9px 行高裁字。
     pub const FILENAME_FONT_SIZE: f32 = 11.0;
 
-    /// 方格缩略图圆角半径（量自定稿效果图 ≈8）。
-    /// M4.1 `M41-UI-02`：改为**三种布局统一使用**（瀑布流此前是 0.0 直角）。
+    /// 方格缩略图圆角（M4 产品事实的 8 px；M5 主题 token 见 [`Theme::radius_thumb`]）。
+    /// 保留这个常量是因为 `grid::thumb_radius_for` 的微缩图集档行为不随主题变化。
     pub const THUMB_RADIUS: f32 = 8.0;
 
-    /// M4.1 `M41-UI-10`：鼠标按下后移动超过此阈值才进入框选（否则算普通单击）。
     pub const DRAG_THRESHOLD: f32 = 4.0;
-    /// M4.1：框选矩形填充 / 描边。
     pub const MARQUEE_FILL_ALPHA: f32 = 0.12;
     pub const MARQUEE_STROKE_W: f32 = 1.0;
 
-    /// 滚动条宽度（U-20：细滚动条，不占内容宽度）
     pub const SCROLLBAR: f32 = 8.0;
 
-    /// 每帧最多上传几张缩略图纹理（02 §8.2.5 的「纹理上传 < 4ms」预算）。
-    /// JPEG 解码 + 上传一张 512px 约 1.2ms，3 张 ≈ 3.6ms，正好卡在预算内。
     pub const TEX_UPLOAD_PER_FRAME: usize = 3;
-    /// 纹理缓存上限（张）。512×384×4 ≈ 786KB/张 → 120 张 ≈ 92MB。
     pub const TEX_CACHE_CAP: usize = 120;
 }
 
-/// 字号层级（U-44 的「四档」）。用比例而非磅值对齐原版观感。
-pub fn text_styles() -> Vec<(TextStyle, FontId)> {
+/// 字号层级。M5 正文 13px / 行高 1.4（字号由 egui 的字体度量决定行高，
+/// 这里只给四档字号；暗色小标题 11px）。
+pub fn text_styles(dark: bool) -> Vec<(TextStyle, FontId)> {
     vec![
-        // 分区标题（左栏「文件夹」「收藏」）
         (
             TextStyle::Heading,
-            FontId::new(11.5, FontFamily::Proportional),
+            FontId::new(if dark { 11.0 } else { 12.5 }, FontFamily::Proportional),
         ),
-        // 正文（左栏条目、按钮文案）
-        (TextStyle::Body, FontId::new(12.5, FontFamily::Proportional)),
-        // 按钮文案
+        (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
         (
             TextStyle::Button,
-            FontId::new(12.0, FontFamily::Proportional),
+            FontId::new(12.5, FontFamily::Proportional),
         ),
-        // 状态栏 / 文件名（小一号）
-        (
-            TextStyle::Small,
-            FontId::new(11.0, FontFamily::Proportional),
-        ),
-        // 等宽（调试信息）
+        (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
         (
             TextStyle::Monospace,
             FontId::new(11.0, FontFamily::Monospace),
@@ -345,37 +512,39 @@ pub fn text_styles() -> Vec<(TextStyle, FontId)> {
     ]
 }
 
-/// 把 egui 的全局样式调成 Picasa 的观感。
-pub fn apply(ctx: &egui::Context) {
-    let theme = Theme::picasa();
-    install_cjk_fallback(ctx);
+/// 把 egui 的全局样式与字体换成指定主题（A / B 各一套完整外观）。
+///
+/// 切换主题时**再调一次**即可：样式与字体都是幂等的重建，不依赖系统外观
+/// （Linux / Xvfb 上系统主题固定也不影响两套主题的验收）。
+pub fn apply(ctx: &egui::Context, appearance: Appearance) {
+    let theme = Theme::for_appearance(appearance);
+    install_fonts(ctx, appearance);
 
-    // 🔒 锁定浅色（2026-11-01 用户报告「索引管理里按钮文字与按钮颜色接近，无法识别」）：
-    // egui 默认**跟随系统**主题偏好，GNOME 深色模式下 egui 走 dark 调色板——
-    // 控件底色变成深灰，而我们下面的 window_fill / 文字色仍按 Picasa 浅色系硬编码，
-    // 结果就是深灰按钮上叠深灰文字。Picasa 是浅色应用（查看器是暗的，但那是
-    // `viewer_bg` 手绘的，不走 egui 控件），所以这里直接钉死 Light。
-    ctx.set_theme(egui::Theme::Light);
+    // 钉死 egui 的控件调色板，不跟随系统深色。
+    ctx.set_theme(if theme.dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    });
 
     ctx.all_styles_mut(|style| {
-        for (style_kind, font_id) in text_styles() {
+        for (style_kind, font_id) in text_styles(theme.dark) {
             style.text_styles.insert(style_kind, font_id);
         }
 
-        // 紧凑：Picasa 的密度明显高于 macOS 默认控件
-        style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-        style.spacing.button_padding = egui::vec2(6.0, 2.0);
-        style.spacing.window_margin = egui::Margin::same(6);
-        style.spacing.menu_margin = egui::Margin::same(4);
+        style.spacing.item_spacing = egui::vec2(7.0, 5.0);
+        style.spacing.button_padding = egui::vec2(8.0, 3.0);
+        style.spacing.window_margin = egui::Margin::same(8);
+        style.spacing.menu_margin = egui::Margin::same(5);
+        style.spacing.slider_width = 96.0;
 
-        // 圆角：Picasa 时代几乎没有圆角，全部压到 2px
-        style.visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(2);
-        style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(2);
-        style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(2);
-        style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(2);
+        let radius = egui::CornerRadius::same(theme.radius_btn.round().clamp(0.0, 255.0) as u8);
+        style.visuals.widgets.noninteractive.corner_radius = radius;
+        style.visuals.widgets.inactive.corner_radius = radius;
+        style.visuals.widgets.hovered.corner_radius = radius;
+        style.visuals.widgets.active.corner_radius = radius;
 
-        // 控件配色**显式**给出，不依赖 egui 默认调色板（同上：防止主题跟随把
-        // 底色/前景色拆到两个世界里）。量值来源见 `docs/ui-baseline/ui-baseline.toml`。
+        style.visuals.dark_mode = theme.dark;
         for w in [
             &mut style.visuals.widgets.inactive,
             &mut style.visuals.widgets.hovered,
@@ -383,105 +552,285 @@ pub fn apply(ctx: &egui::Context) {
         ] {
             w.fg_stroke = egui::Stroke::new(1.0, theme.text_primary);
         }
-        // 非交互文字（分组标签等）用次级灰
         style.visuals.widgets.noninteractive.fg_stroke =
             egui::Stroke::new(1.0, theme.text_secondary);
-        // 按钮：近白底 + 灰边，压在 #F0F0F0 的窗口底上可辨（参考图「分享」按钮同款）
-        style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(0xFB, 0xFB, 0xFB);
-        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme.separator);
+        style.visuals.widgets.inactive.bg_fill = theme.track_bg;
+        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme.hairline);
+        style.visuals.widgets.inactive.weak_bg_fill = theme.chip_bg;
+        style.visuals.widgets.hovered.bg_fill = theme.sidebar_hover;
+        style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, theme.hairline);
+        style.visuals.widgets.hovered.weak_bg_fill = theme.chip_bg;
+        style.visuals.widgets.active.bg_fill = theme.accent_soft;
+        style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, theme.selected);
+        style.visuals.widgets.active.weak_bg_fill = theme.accent_soft;
 
-        style.visuals.window_fill = theme.chrome_bg;
+        style.visuals.window_fill = theme.menu_bg;
         style.visuals.panel_fill = theme.chrome_bg;
-        style.visuals.extreme_bg_color = Color32::WHITE;
+        style.visuals.extreme_bg_color = theme.chip_bg;
+        style.visuals.text_edit_bg_color = Some(theme.menu_bg);
+        style.visuals.code_bg_color = theme.chip_bg;
+        style.visuals.faint_bg_color = theme.chip_bg;
         style.visuals.override_text_color = Some(theme.text_primary);
         style.visuals.selection.bg_fill = theme.selected;
-        style.visuals.selection.stroke = egui::Stroke::new(1.0, Color32::WHITE);
-        style.visuals.widgets.hovered.bg_fill = theme.cell_hover;
-        style.visuals.widgets.active.bg_fill = theme.cell_hover;
+        style.visuals.selection.stroke = egui::Stroke::new(1.0, theme.ring_inner);
+        style.visuals.hyperlink_color = theme.accent_ink;
+        style.visuals.warn_fg_color = theme.warn;
+        style.visuals.error_fg_color = theme.danger;
+        style.visuals.window_corner_radius =
+            egui::CornerRadius::same(theme.radius_btn.round() as u8 + 2);
+        style.visuals.menu_corner_radius =
+            egui::CornerRadius::same(theme.radius_btn.round() as u8 + 2);
+        style.visuals.window_stroke = egui::Stroke::new(1.0, theme.hairline);
+        style.visuals.window_shadow = egui::Shadow {
+            offset: [0, 8],
+            blur: 28,
+            spread: 0,
+            color: Color32::from_black_alpha(if theme.dark { 140 } else { 40 }),
+        };
+        style.visuals.popup_shadow = egui::Shadow {
+            offset: [0, 6],
+            blur: 20,
+            spread: 0,
+            color: Color32::from_black_alpha(if theme.dark { 150 } else { 40 }),
+        };
 
-        // 滚动条：细、半透明、悬停加粗（U-20）
         style.spacing.scroll.bar_width = Metrics::SCROLLBAR;
         style.spacing.scroll.floating = false;
     });
 }
 
-/// 安装中日韩字体回退（2026-11-02 用户报告：界面中文全部乱码）。
-///
-/// ## 为什么不用 `system_fonts` feature
-///
-/// 那个 feature 在本机（macOS 26）上会让 egui 的系统字体枚举卡死主线程
-/// （见根 `Cargo.toml` 里 eframe features 的注释）。所以这里**手动**加载一个
-/// 已知路径的系统 CJK 字体，绕开枚举，也不走 CoreText fallback 探测。
-///
-/// ## 为什么选 Hiragino Sans GB 而不是 PingFang
-///
-/// 都在 `/System/Library/Fonts` 下、所有 macOS 自带；PingFang.ttc 的第一个 face
-/// 就是中文主 face，而 Hiragino Sans GB.ttc 第一个 face 覆盖拉丁、后面 face 才是
-/// 中文字形——作为 **fallback**（`FontPriority::Lowest`）后者更合适：
-/// 拉丁字符继续用 egui 内置字体（保持现有观感与度量），只有内置字体缺的字形
-/// （全部汉字）才落到 Hiragino 上。
-///
-/// 加载失败静默跳过：缺字体的后果只是中文乱码（可诊断），不该让应用打不开。
-fn install_cjk_fallback(ctx: &egui::Context) {
-    const CANDIDATES: &[&str] = &[
-        // macOS 自带（第一个含简体中文字形的系统字体，23 MB，比 PingFang 小）
+/// 字体文件候选（按主题的主字体 + 共用的 CJK 回退）。
+fn font_file_candidates(appearance: Appearance) -> (&'static [&'static str], &'static [&'static str]) {
+    let primary: &'static [&'static str] = if appearance.is_dark() {
+        &[
+            "/usr/share/fonts/truetype/sand-box/google/Geist/Geist-VariableFont_wght.ttf",
+            "/usr/share/fonts/opentype/geist/Geist-Regular.otf",
+            "/System/Library/Fonts/Geist.ttf",
+        ]
+    } else {
+        &[
+            "/usr/share/fonts/truetype/sand-box/google/Inter/Inter-VariableFont_opsz,wght.ttf",
+            "/usr/share/fonts/truetype/inter/Inter-Regular.ttf",
+            "/System/Library/Fonts/Inter.ttf",
+        ]
+    };
+    let cjk: &'static [&'static str] = &[
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
-        // 备选：Windows / 其他发行方式下可能存在的路径
-        "C:/Windows/Fonts/msyh.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     ];
-    for path in CANDIDATES {
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
+    (primary, cjk)
+}
+
+fn read_first(candidates: &'static [&'static str]) -> Option<(&'static str, Vec<u8>)> {
+    for path in candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            return Some((path, bytes));
+        }
+    }
+    None
+}
+
+/// 安装主题字体：主字体（Inter / Geist）+ 中文回退。
+///
+/// 系统没有主字体时**静默回退**到 egui 内置字体（中文仍由 CJK 回退保证），
+/// 不因为缺一个拉丁字体把整套主题做废。字体加载失败只降低观感，不影响功能。
+fn install_fonts(ctx: &egui::Context, appearance: Appearance) {
+    let mut fonts = egui::FontDefinitions::default();
+    let (primary_candidates, cjk_candidates) = font_file_candidates(appearance);
+
+    if let Some((path, bytes)) = read_first(primary_candidates) {
+        tracing::info!(path, "已加载主题主字体");
+        fonts
+            .font_data
+            .insert("op_ui".to_owned(), Arc::new(FontData::from_owned(bytes)));
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .insert(0, "op_ui".to_owned());
+    } else {
+        tracing::warn!(
+            appearance = appearance.as_str(),
+            "未找到主题主字体，拉丁字形回退到 egui 内置字体"
+        );
+    }
+
+    if let Some((path, bytes)) = read_first(cjk_candidates) {
         tracing::info!(path, bytes = bytes.len(), "已加载 CJK 回退字体");
-        // M32-UI-13：汉字与拉丁/数字混排时**顶端对齐**。
-        // 汉字是 em-box 字形（面积极大，几乎顶满 em），而 egui 内置拉丁字体的
-        // 大写字母只占 em 的约 70%；同一行里汉字的视觉顶边明显高于英文大写字母、
-        // 数字。`y_offset_factor` 为正 = 字形下移（占字号的比值），
-        // 下移 0.30 ≈ 把汉字顶边拉到与拉丁数字顶端平齐（0.10/0.16/0.22 试过仍偏高，加大）；
-        // 它只影响绘制、不影响布局测量，行高与基线逻辑不变。
+        // 汉字与拉丁混排时顶端对齐（M32-UI-13 的既有校准）。
         let tweak = egui::epaint::text::FontTweak {
             y_offset_factor: 0.30,
             ..Default::default()
         };
-        ctx.add_font(egui::FontInsert::new(
-            "cjk_fallback",
-            egui::FontData::from_owned(bytes).tweak(tweak),
-            vec![
-                egui::InsertFontFamily {
-                    family: egui::FontFamily::Proportional,
-                    priority: egui::FontPriority::Lowest,
-                },
-                egui::InsertFontFamily {
-                    family: egui::FontFamily::Monospace,
-                    priority: egui::FontPriority::Lowest,
-                },
-            ],
-        ));
-        return;
+        fonts.font_data.insert(
+            "cjk_fallback".to_owned(),
+            Arc::new(FontData::from_owned(bytes).tweak(tweak)),
+        );
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("cjk_fallback".to_owned());
+        }
+    } else {
+        tracing::warn!("未找到可用的 CJK 回退字体，中文可能显示为方框");
     }
-    tracing::warn!("未找到可用的 CJK 回退字体，中文可能显示为方框");
+
+    ctx.set_fonts(fonts);
 }
 
 #[cfg(test)]
-mod m41_v18_tests {
-    use super::Theme;
+mod tests {
+    use super::*;
+    use picasa_core::{Appearance, CELL_MAX_PX, CELL_MIN_PX, DEFAULT_CELL_PX, ZoomState};
 
-    /// v1.8：白底白钮「脱底」三件套的常量必须真的比 M4 基线更明显，
-    /// 防止后续调参悄悄调回 offset[0,1]/blur3/alpha36 导致又和背景重合。
+    fn c(hex: &str) -> Color32 {
+        let h = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap();
+        rgb(h)
+    }
+
+    /// §5.1：亮色关键 token 必须与说明书表格逐项一致。
     #[test]
-    fn control_chrome_is_stronger_than_m4_baseline() {
-        let t = Theme::picasa();
-        // 外阴影：M4 是 offset[0,1] blur3 alpha36
-        assert!(t.control_shadow.blur > 3, "外阴影应比 M4 的 blur3 更散");
-        assert!(t.control_shadow.color.a() > 36, "外阴影应比 M4 的 alpha36 更深");
-        assert!(t.control_shadow.offset[1] >= 2, "外阴影下移量应加大");
-        // 接触阴影：更紧（blur 更小）但存在
-        assert!(t.control_contact_shadow.blur < t.control_shadow.blur);
-        assert!(t.control_contact_shadow.color.a() > 0);
-        // 发丝边是极淡的半透明，不是实黑框
-        assert!(t.control_hairline.a() > 0 && t.control_hairline.a() < 60);
+    fn m5_r3_light_tokens_match_spec_table() {
+        let t = Theme::light();
+        assert_eq!(hex(t.page_bg), "#c8c8cc", "页面背景 --bg-page");
+        assert_eq!(hex(t.chrome_bg), "#f5f5f5", "窗口 --win");
+        assert_eq!(hex(t.grid_bg), "#ffffff", "主内容井是近白卡片");
+        assert_eq!(hex(t.text_primary), "#18181b", "--ink");
+        assert_eq!(hex(t.text_secondary), "#71717a", "--muted");
+        assert_eq!(hex(t.text_disabled), "#a1a1aa", "--faint");
+        assert_eq!(hex(t.selected), "#0485f7", "--accent");
+        assert_eq!(hex(t.accent_ink), "#0373d6", "--accent-ink");
+        assert_eq!(hex(t.accent_soft), "#e6f1fe", "--accent-soft");
+        assert_eq!(hex(t.menu_bg), "#ffffff", "卡片 --card");
+        assert_eq!(hex(t.track_bg), "#ebebec", "滑轨 --track");
+        assert_eq!(hex(t.chip_bg), "#f4f4f5", "芯片 --chip");
+        assert_eq!(hex(t.star), "#f5b942", "亮色收藏星");
+        assert_eq!(hex(t.danger), "#e11d48", "危险");
+        assert_eq!(hex(t.ok), "#16a34a", "成功");
+        assert_eq!(t.radius_card, 26.0, "卡片圆角");
+        assert_eq!(t.radius_thumb, 16.0, "缩略图圆角");
+        assert_eq!(t.radius_btn, 10.0, "按钮圆角");
+        assert_eq!(hex(t.ring_inner), "#ffffff", "选中环内圈");
+        assert_eq!(hex(t.ring_outer), "#0485f7", "选中环外圈");
+        assert_eq!(t.sidebar_ref_w, 228.0, "侧栏参考宽");
+        assert!(!t.dark);
+        assert_eq!(t.appearance, Appearance::Light);
+    }
+
+    /// §5.2：暗色关键 token 必须与说明书表格逐项一致（不是 egui 系统 Dark 近似）。
+    #[test]
+    fn m5_r3_dark_tokens_match_spec_table() {
+        let t = Theme::dark();
+        assert_eq!(hex(t.page_bg), "#050505", "页面");
+        assert_eq!(hex(t.chrome_bg), "#151515", "窗口");
+        assert_eq!(hex(t.text_primary), "#f2f2f2", "主文字");
+        assert_eq!(hex(t.text_secondary), "#9a9a9a", "次文字");
+        assert_eq!(hex(t.text_disabled), "#7c7c7c", "弱文字");
+        assert_eq!(hex(t.selected), "#00dfe1", "强调");
+        assert_eq!(hex(t.accent_ink), "#00dfe1", "强调文字");
+        assert_eq!(
+            (t.accent_soft.r(), t.accent_soft.g(), t.accent_soft.b(), t.accent_soft.a()),
+            (0x00, 0xdf, 0xe1, 0x14),
+            "强调柔底 #00dfe114"
+        );
+        assert_eq!(hex(t.menu_bg), "#1c1c1c", "卡片");
+        assert_eq!(hex(t.sidebar_hover), "#232323", "悬停");
+        assert_eq!(hex(t.star), "#00dfe1", "暗色收藏星 = 强调色（M5-GR-07）");
+        assert_eq!(t.radius_card, 22.0, "卡片圆角");
+        assert_eq!(t.radius_thumb, 10.0, "缩略图圆角");
+        assert_eq!(t.radius_btn, 8.0, "按钮圆角");
+        assert_eq!(hex(t.ring_inner), "#151515", "选中环内圈");
+        assert_eq!(hex(t.ring_outer), "#00dfe1", "选中环外圈");
+        assert_eq!(t.sidebar_ref_w, 216.0, "侧栏参考宽");
+        assert!(t.dark);
+        assert!(t.title_uppercase, "暗色标题可用小号大写");
+        assert_eq!(t.appearance, Appearance::Dark);
+    }
+
+    /// 默认仍是亮色（§11 #4 未裁定，不把默认改成跟随系统 / 暗色）。
+    #[test]
+    fn m5_r3_default_appearance_is_light() {
+        assert_eq!(Appearance::default(), Appearance::Light);
+        assert_eq!(Theme::for_appearance(Appearance::default()).appearance, Appearance::Light);
+        assert!(!Theme::for_appearance(Appearance::default()).dark);
+    }
+
+    /// 切换主题不改变缩略图范围 / 当前边长（AC-THUMB-01 的主题相关句）。
+    #[test]
+    fn m5_r3_theme_switch_keeps_thumbnail_range_and_value() {
+        let before = ZoomState::from_setting(Some(144.0));
+        let light = Theme::light();
+        let dark = Theme::dark();
+        // 主题只影响绘制，不参与 ZoomState 的任何计算。
+        let after = ZoomState::from_setting(Some(144.0));
+        assert_eq!(before.cell_px(), after.cell_px());
+        assert_eq!(before.to_setting(), after.to_setting());
+        assert_eq!(CELL_MIN_PX, 22.0);
+        assert_eq!(CELL_MAX_PX, 512.0);
+        assert_eq!(DEFAULT_CELL_PX, 96.0);
+        // 主题的圆角/颜色不同，但都不携带任何尺寸范围。
+        assert_ne!(light.radius_thumb, dark.radius_thumb);
+    }
+
+    /// §5.3：主材质必须实色，且顶栏默认不再是白圆钮。
+    #[test]
+    fn m5_r3_no_glass_and_no_white_circle_toolbar() {
+        for t in [Theme::light(), Theme::dark()] {
+            for (name, c) in [
+                ("窗口", t.chrome_bg),
+                ("内容井", t.grid_bg),
+                ("侧栏", t.sidebar_bg),
+                ("菜单", t.menu_bg),
+                ("顶栏", t.toolbar_bg),
+            ] {
+                assert_eq!(c.a(), 255, "{name}必须是实色（玻璃拟态不得作为主材质）");
+            }
+            // 顶栏图标默认透明；悬停/选中也不是不透明白圆。
+            assert_eq!(
+                t.topbar_icon_fill(false, false).a(),
+                0,
+                "顶栏默认不能是白圆底"
+            );
+            assert_ne!(hex(t.topbar_icon_fill(true, false)), "#ffffff");
+            assert_ne!(hex(t.topbar_icon_fill(false, true)), "#ffffff");
+            // 缩略图落影存在但很淡（不是白圆按钮的软阴影语言）。
+            assert!(t.thumb_shadow.color.a() < 130);
+        }
+    }
+
+    /// 字体栈按主题切换；缺字体时加载函数静默回退（这里只锁 token）。
+    #[test]
+    fn m5_r3_font_stack_matches_theme() {
+        assert_eq!(Theme::light().font_stack()[0], "Inter");
+        assert_eq!(Theme::dark().font_stack()[0], "Geist");
+        for t in [Theme::light(), Theme::dark()] {
+            assert!(
+                t.font_stack().contains(&"Noto Sans CJK SC"),
+                "中文回退必须在字体栈里"
+            );
+        }
+    }
+
+    /// M5-TB-10：极小尺寸收窄圆角仍成立（主题 token 不改变这条行为）。
+    #[test]
+    fn m5_r3_thumb_radius_still_shrinks_on_tiny_cells() {
+        for t in [Theme::light(), Theme::dark()] {
+            assert_eq!(t.thumb_radius_for(96.0), t.radius_thumb);
+            assert_eq!(t.thumb_radius_for(512.0), t.radius_thumb);
+            assert!(t.thumb_radius_for(22.0) < 4.0);
+            assert!(t.thumb_radius_for(22.0) < t.thumb_radius_for(48.0));
+        }
+    }
+
+    /// 颜色辅助函数本身要正确（防止 token 断言因为解析错误而「全绿」）。
+    #[test]
+    fn hex_helper_round_trips() {
+        assert_eq!(hex(c("#0485f7")), "#0485f7");
+        assert_eq!(hex(c("c8c8cc")), "#c8c8cc");
     }
 }

@@ -65,21 +65,23 @@ pub fn show(
 pub fn sort_menu(
     ui: &mut Ui,
     at: Pos2,
+    theme: &crate::theme::Theme,
     current: picasa_db::SortSpec,
     thumbs_first: bool,
 ) -> Option<TopbarAction> {
-    crate::topbar::sort_menu(ui, at, current, thumbs_first)
+    crate::topbar::sort_menu(ui, at, theme, current, thumbs_first)
 }
 
 /// 「…」弹出菜单：转调顶栏版本。
 pub fn more_menu(
     ui: &mut Ui,
     at: Pos2,
+    theme: &crate::theme::Theme,
     recurse_on: bool,
     recurse_available: bool,
     show_filename: bool,
 ) -> Vec<TopbarAction> {
-    crate::topbar::more_menu(ui, at, recurse_on, recurse_available, show_filename)
+    crate::topbar::more_menu(ui, at, theme, recurse_on, recurse_available, show_filename)
 }
 
 /// 筛选面板的动作（M3.1 起与顶栏动作解耦，避免枚举递归）。
@@ -101,6 +103,7 @@ pub enum FilterPanelAction {
 pub fn filter_menu(
     ui: &mut Ui,
     at: Pos2,
+    theme: &crate::theme::Theme,
     current: &picasa_db::PhotoFilter,
     draft_tag: &mut String,
 ) -> (Option<FilterPanelAction>, String) {
@@ -113,17 +116,14 @@ pub fn filter_menu(
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
             egui::Frame::new()
-                .fill(Color32::WHITE)
-                .corner_radius(8.0)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    Color32::from_rgba_premultiplied(0, 0, 0, 30),
-                ))
+                .fill(theme.menu_bg)
+                .corner_radius(theme.radius_btn + 2.0)
+                .stroke(egui::Stroke::new(1.0, theme.hairline))
                 .shadow(egui::epaint::Shadow {
-                    offset: [0, 4],
-                    blur: 18,
+                    offset: [0, 6],
+                    blur: 20,
                     spread: 0,
-                    color: Color32::from_black_alpha(45),
+                    color: Color32::from_black_alpha(if theme.dark { 150 } else { 40 }),
                 })
                 .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
@@ -133,7 +133,7 @@ pub fn filter_menu(
                         egui::RichText::new("筛选")
                             .size(13.0)
                             .strong()
-                            .color(Color32::from_rgb(0x20, 0x20, 0x20)),
+                            .color(theme.text_primary),
                     );
                     ui.add_space(4.0);
                     ui.separator();

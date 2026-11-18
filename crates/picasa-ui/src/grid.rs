@@ -1026,7 +1026,24 @@ pub fn show(
     };
 
     let full = ui.available_rect_before_wrap();
-    ui.painter().rect_filled(full, 0.0, theme.grid_bg);
+    // M5：主内容井 = 主题卡片（亮：浅灰窗体上的白井；暗：`#1c1c1c` 卡片里的暗房）。
+    // 外圈卡片与内井同色时（亮色）只看到一道发丝边；暗色两层色阶分明。
+    ui.painter()
+        .rect_filled(full, theme.radius_card, theme.well_bg);
+    let inner = full.shrink(if theme.dark { 6.0 } else { 0.0 });
+    if inner.width() > 8.0 && inner.height() > 8.0 {
+        ui.painter().rect_filled(
+            inner,
+            (theme.radius_card - 4.0).max(2.0),
+            theme.grid_bg,
+        );
+    }
+    ui.painter().rect_stroke(
+        full,
+        theme.radius_card,
+        Stroke::new(1.0, theme.hairline),
+        StrokeKind::Inside,
+    );
 
     // ---- M4.1 `M41-UI-09/10`：框选拖拽状态（egui IdTypeMap 跨帧）----
     // 起手在照片上或留白均可；移动 < DRAG_THRESHOLD 仍按普通单击处理。
@@ -1410,7 +1427,9 @@ pub fn show(
                 let response = interact_cell(ui, rect, row.id, &painter, theme);
                 let hovered = response.hovered();
                 let stroke = if is_sel {
-                    Stroke::new(2.0, theme.selected)
+                    // M5 §5.1：选中环 = 2px 内环（白 / #151515）+ 4px 外环（强调色）。
+                    // 内环把照片与外环隔开，暗色时尤其重要。
+                    Stroke::new(2.0, theme.ring_inner)
                 } else if is_current {
                     Stroke::new(1.0, theme.selected)
                 } else if hovered {
@@ -1420,6 +1439,16 @@ pub fn show(
                     // （圆角 + 软阴影已表达边界，删掉 masonry 的 1px 灰框）。
                     Stroke::NONE
                 };
+                if is_sel {
+                    // 外环：画在 frame 外扩 2px 的位置，等价于 CSS
+                    // `0 0 0 2px inner, 0 0 0 4px outer`。
+                    painter.rect_stroke(
+                        frame.expand(2.0),
+                        frame_radius + 2.0,
+                        Stroke::new(2.0, theme.ring_outer),
+                        StrokeKind::Outside,
+                    );
+                }
                 if stroke.color != Color32::TRANSPARENT {
                     painter.rect_stroke(frame, frame_radius, stroke, StrokeKind::Inside);
                 }
@@ -1445,9 +1474,13 @@ pub fn show(
                 // `false` → 不画。星形自绘（`icons::draw_star`，不依赖字体 glyph），
                 // 直接读 `row.starred` 零查库；与左上选中角标分置两侧、不重叠。
                 if row.starred {
+                    // M5：亮色金 `#f5b942` / 暗色强调 `#00dfe1`（M5-GR-07），
+                    // 仍是布尔星标（不是 1–5 颗）。
                     let (c, r) = star_badge(frame);
-                    painter.circle_filled(c, r + 2.0, Color32::from_black_alpha(150));
-                    icons::draw_star(&painter, c, r, Color32::GOLD);
+                    if !theme.dark {
+                        painter.circle_filled(c, r + 2.0, Color32::from_black_alpha(110));
+                    }
+                    icons::draw_star(&painter, c, r, theme.star);
                 }
 
                 if hovered {
@@ -1589,16 +1622,16 @@ pub fn show(
 
 /// 画一条分组头（普通位置与吸顶位置共用）。
 fn draw_group_header(painter: &egui::Painter, bar: Rect, title: &str, theme: &Theme) {
+    // M5：内容井里的日期分组头 = 与井同色的透明底 + 一行文字，不再画灰条。
     painter.rect_filled(bar, 0.0, theme.header_bg);
-    painter.line_segment(
-        [bar.left_bottom(), bar.right_bottom()],
-        Stroke::new(1.0, theme.separator),
-    );
     painter.text(
         pos2(bar.left() + Metrics::GRID_PAD, bar.center().y),
         Align2::LEFT_CENTER,
         title,
-        FontId::new(12.0, egui::FontFamily::Proportional),
+        FontId::new(
+            if theme.dark { 11.0 } else { 13.0 },
+            egui::FontFamily::Proportional,
+        ),
         theme.header_text,
     );
 }
@@ -1644,6 +1677,18 @@ pub fn thumb_radius_for(cell_px: f32) -> f32 {
     let r = 2.0 + t * 3.0;
     // 圆角不能超过格子的 1/4，否则小格会变成椭圆。
     r.min(cell / 4.0).max(1.0)
+}
+
+/// 主题版圆角：正常尺寸用主题 token（亮 16 / 暗 10），极小尺寸按同一收窄规则。
+///
+/// 保留 [`thumb_radius_for`] 是为了既有单测与图集档的「小格不是胶囊」不变量；
+/// 绘制路径一律走这里，两套主题的圆角才真的不同。
+pub fn themed_thumb_radius(theme: &Theme, cell_px: f32) -> f32 {
+    if cell_px >= 96.0 {
+        return theme.radius_thumb;
+    }
+    let shrink = thumb_radius_for(cell_px);
+    shrink.min(theme.radius_thumb).max(1.0)
 }
 
 /// 构造一张「带圆角的贴图矩形」，正常纹理档与微缩图集档**共用**。
@@ -1703,7 +1748,7 @@ fn draw_from_atlas(
     let Some(tex) = atlas.texture_of(slot.page) else {
         return false;
     };
-    // M5-TB-10：图集档只服务 ≤48 px 的极小格，圆角随边长收窄。
+    // M5-TB-10：图集档只服务 ≤48 px 的极小格，圆角随边长收窄（与主题无关的收窄规则）。
     painter.add(rounded_image_shape_r(
         rect,
         tex.id(),
@@ -2685,6 +2730,22 @@ mod tests {
 
     /// `M42-UI-01` AC-03：星标角标在右上、与左上选中角标不重叠；22px 微缩
     /// 图集格也放得下（半径被夹到 3.5）。纯几何断言，不依赖 GPU。
+    /// M5-R3：两套主题的缩略图圆角确实不同（亮 16 / 暗 10），极小尺寸仍收窄，
+    /// 且 96 px 以上的圆角不随格子尺寸抖动。
+    #[test]
+    fn m5_r3_themed_thumb_radius_differs_by_theme() {
+        let light = crate::theme::Theme::light();
+        let dark = crate::theme::Theme::dark();
+        assert_eq!(themed_thumb_radius(&light, 96.0), 16.0);
+        assert_eq!(themed_thumb_radius(&dark, 96.0), 10.0);
+        assert_eq!(themed_thumb_radius(&light, 512.0), 16.0);
+        assert_eq!(themed_thumb_radius(&dark, 512.0), 10.0);
+        for theme in [light, dark] {
+            assert!(themed_thumb_radius(&theme, 22.0) < 4.0, "22px 不能像胶囊");
+            assert!(themed_thumb_radius(&theme, 22.0) <= theme.radius_thumb);
+        }
+    }
+
     #[test]
     fn m42_star_badge_is_top_right_and_clear_of_selection_badge() {
         let frame = Rect::from_min_size(pos2(100.0, 100.0), vec2(96.0, 96.0));

@@ -68,7 +68,7 @@ pub use zoom::{
     CELL_MAX_PX, CELL_MIN_PX, DEFAULT_CELL_PX, KEYBOARD_STEP_PX, SNAP_POINTS, TexTier, ZoomState,
     at_linear_bound, at_log_bound, snap_to_point, step_linear, step_log, tier_for, uses_atlas,
 };
-pub use prefs::Preferences;
+pub use prefs::{Appearance, Preferences};
 pub use root_intake::RootIntake;
 pub use tag_counts::{TagsSort, sort_tag_counts, truncate_label};
 pub use scanner::{CoreEvent, IndexService, ScanHandle, spawn_scan, spawn_scan_with_board};

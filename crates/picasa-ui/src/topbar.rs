@@ -471,7 +471,7 @@ fn draw_breadcrumb(
                 theme.text_disabled,
             );
             x += painter
-                .layout_no_wrap("/".to_string(), font.clone(), Color32::WHITE)
+                .layout_no_wrap("/".to_string(), font.clone(), theme.text_primary)
                 .size()
                 .x
                 + 6.0;
@@ -479,18 +479,9 @@ fn draw_breadcrumb(
     }
 }
 
-/// M4.1 v1.8：白色控件的「脱底」三件套 —— 外阴影 + 接触阴影 + 1px 发丝边。
+/// 圆形图标按钮（M5 §5.3）：**线性图标直接落在顶栏上**，不是一排白圆钮。
 ///
-/// 用户反馈白圆钮和白工具栏背景重合；只加深一层模糊阴影仍会糊，
-/// 所以补一道**紧贴底边的近阴影**（边界立刻可辨）与一圈极淡发丝边。
-/// 圆钮与两个胶囊共用，保证视觉语言一致。
-fn draw_control_chrome(painter: &egui::Painter, rect: Rect, radius: f32, theme: &Theme) {
-    painter.add(theme.control_shadow.as_shape(rect, radius));
-    painter.add(theme.control_contact_shadow.as_shape(rect, radius));
-}
-
-/// 圆形图标按钮：**常驻白圆底 + 软阴影**（M4 原版样式，v1.7 回退）。
-/// 悬停压浅灰，无文字。
+/// 默认底透明；悬停用主题 hover 底；选中用强调柔底。不再有软阴影 / 白圆底。
 fn icon_btn(
     ui: &mut Ui,
     painter: &egui::Painter,
@@ -504,8 +495,8 @@ fn icon_btn(
 }
 
 /// 带「选中态」的图标按钮（♥ 收藏 / ▣ 托盘双态）。
-/// v1.7：回退到 M4 白圆底绘法；双态选中沿用 M4 排布胶囊那款淡橙
-/// `seg_active_orange`（`09` §7.2 像素校准），不再是玻璃的灰/粉。
+///
+/// M5：选中态用主题强调柔底（亮 `#e6f1fe` / 暗 `#00dfe114`），不再是白圆 + 淡橙。
 #[allow(clippy::too_many_arguments)]
 fn icon_btn_ex(
     ui: &mut Ui,
@@ -523,24 +514,19 @@ fn icon_btn_ex(
         Sense::hover()
     };
     let resp = ui.interact(rect, ui.scope_id().with(("topbar-btn", tooltip)), sense);
-    // v1.8：外阴影 + 接触阴影（脱底）
-    let radius = rect.width() / 2.0;
-    draw_control_chrome(painter, rect, radius, theme);
-    let fill = if selected {
-        theme.seg_active_orange
-    } else if enabled && resp.hovered() {
-        theme.sidebar_hover
-    } else {
-        Color32::WHITE
-    };
-    painter.rect_filled(rect, radius, fill);
-    // 1px 发丝边：白底上给白圆钮一圈可辨的轮廓（极淡，不是实边框）
-    painter.rect_stroke(
-        rect,
-        radius,
-        egui::Stroke::new(1.0, theme.control_hairline),
-        egui::StrokeKind::Inside,
-    );
+    let radius = theme.radius_btn;
+    let fill = theme.topbar_icon_fill(enabled && resp.hovered(), selected);
+    if fill != Color32::TRANSPARENT {
+        painter.rect_filled(rect, radius, fill);
+    }
+    if enabled && resp.hovered() {
+        painter.rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(1.0, theme.hairline),
+            egui::StrokeKind::Inside,
+        );
+    }
     if enabled && resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -567,13 +553,13 @@ fn draw_layout_pill(
     current: ViewMode,
     out: &mut TopbarOutput,
 ) {
-    // v1.8：回退 M4 白底胶囊，但用三件套阴影脱底。
-    draw_control_chrome(painter, rect, rect.height() / 2.0, theme);
-    painter.rect_filled(rect, rect.height() / 2.0, Color32::WHITE);
+    // M5：排布胶囊 = 槽底 + 选中片，实色，无软阴影。
+    let radius = rect.height() / 2.0;
+    painter.rect_filled(rect, radius, theme.seg_bg);
     painter.rect_stroke(
         rect,
-        rect.height() / 2.0,
-        egui::Stroke::new(1.0, theme.control_hairline),
+        radius,
+        egui::Stroke::new(1.0, theme.hairline),
         egui::StrokeKind::Inside,
     );
     // 与 −|+ 同款中缝：未选中的两片之间有一条极淡的竖线。
@@ -582,7 +568,7 @@ fn draw_layout_pill(
         let sx = rect.left() + i as f32 * w;
         painter.line_segment(
             [pos2(sx, rect.top() + 7.0), pos2(sx, rect.bottom() - 7.0)],
-            egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 0, 0, 26)),
+            egui::Stroke::new(1.0, theme.hairline),
         );
     }
     let modes = [
@@ -597,14 +583,14 @@ fn draw_layout_pill(
         );
         let active = *mode == current;
         if active {
-            // v1.7：回退 M4 的淡橙内切圆（定稿效果图采样）。
+            // M5 §5.1：选中片是主题的「白片 / 2a2a2a 片」，图标用强调色。
             let d = rect.height() - 6.0;
             let circle = Rect::from_center_size(piece.center(), vec2(d, d));
-            painter.rect_filled(circle, d / 2.0, theme.seg_active_orange);
+            painter.rect_filled(circle, d / 2.0, theme.seg_active);
         }
         let resp = ui.interact(piece, ui.scope_id().with(("layout", label)), Sense::click());
         let color = if active {
-            theme.toolbar_icon
+            theme.selected
         } else {
             theme.text_secondary
         };
@@ -631,11 +617,12 @@ fn draw_search(
     search_in_current: bool,
     out: &mut TopbarOutput,
 ) {
-    painter.rect_filled(rect, rect.height() / 2.0, Color32::WHITE);
+    // M5：搜索框 = 芯片底 + 发丝边（亮白 / 暗 #f4f4f5 对应的 chip 槽）。
+    painter.rect_filled(rect, rect.height() / 2.0, theme.chip_bg);
     painter.rect_stroke(
         rect,
         rect.height() / 2.0,
-        egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 0, 0, 36)),
+        egui::Stroke::new(1.0, theme.hairline),
         egui::StrokeKind::Inside,
     );
     // 范围小字（当前文件夹 / 全库）：放在框内左端，点击切换
@@ -759,6 +746,7 @@ pub fn more_menu_items(
 pub fn more_menu(
     ui: &mut Ui,
     at: Pos2,
+    theme: &Theme,
     recurse_on: bool,
     recurse_available: bool,
     show_filename: bool,
@@ -768,20 +756,18 @@ pub fn more_menu(
         .fixed_pos(at)
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
+            // M5：菜单 = 主题卡片实色 + 圆角 + 发丝边（亮白 / 暗 #1c1c1c）。
             egui::Frame::new()
-                .fill(Color32::WHITE)
-                .corner_radius(8.0)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    Color32::from_rgba_premultiplied(0, 0, 0, 30),
-                ))
+                .fill(theme.menu_bg)
+                .corner_radius(theme.radius_btn + 2.0)
+                .stroke(egui::Stroke::new(1.0, theme.hairline))
                 .shadow(egui::epaint::Shadow {
-                    offset: [0, 4],
-                    blur: 18,
+                    offset: [0, 6],
+                    blur: 20,
                     spread: 0,
-                    color: Color32::from_black_alpha(45),
+                    color: Color32::from_black_alpha(if theme.dark { 150 } else { 40 }),
                 })
-                .inner_margin(egui::Margin::same(5))
+                .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
                     ui.set_min_width(210.0);
                     for (label, enabled, action) in
@@ -791,7 +777,7 @@ pub fn more_menu(
                             enabled,
                             egui::Button::new(label)
                                 .frame(false)
-                                .min_size(vec2(ui.available_width(), 22.0)),
+                                .min_size(vec2(ui.available_width(), 24.0)),
                         );
                         // 设置… / 索引管理… 是 M5 新增的两条入口，快捷键写在悬停提示里，
                         // 不额外占菜单宽度（v1.4 截图里显示在右侧）。
@@ -816,6 +802,7 @@ pub fn more_menu(
 pub fn sort_menu(
     ui: &mut Ui,
     at: Pos2,
+    theme: &Theme,
     current: picasa_db::SortSpec,
     thumbs_first: bool,
 ) -> Option<TopbarAction> {
@@ -825,19 +812,16 @@ pub fn sort_menu(
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
             egui::Frame::new()
-                .fill(Color32::WHITE)
-                .corner_radius(8.0)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    Color32::from_rgba_premultiplied(0, 0, 0, 30),
-                ))
+                .fill(theme.menu_bg)
+                .corner_radius(theme.radius_btn + 2.0)
+                .stroke(egui::Stroke::new(1.0, theme.hairline))
                 .shadow(egui::epaint::Shadow {
-                    offset: [0, 4],
-                    blur: 18,
+                    offset: [0, 6],
+                    blur: 20,
                     spread: 0,
-                    color: Color32::from_black_alpha(45),
+                    color: Color32::from_black_alpha(if theme.dark { 150 } else { 40 }),
                 })
-                .inner_margin(egui::Margin::same(5))
+                .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
                     ui.set_min_width(170.0);
                     for (key, label) in [
