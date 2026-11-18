@@ -2298,13 +2298,10 @@ impl OpenPicasaApp {
                             // 影调信息；采样到 512² 只是省一次 6 万桶的循环）。
                             v.histogram = Some(picasa_imaging::histogram(&small));
                             v.loaded_id = Some(photo_id);
-                            // 拿到真实尺寸后按「适应窗口」重新定 zoom
-                            let avail = ctx.content_rect();
-                            let fit = (avail.width() / v.tex_size.x)
-                                .min(avail.height() / v.tex_size.y)
-                                .min(1.0);
-                            if fit.is_finite() && fit > 0.0 {
-                                v.zoom = fit;
+                            // 拿到真实尺寸后按「适应窗口」重新定 zoom——但只在
+                            // 用户还没手动缩放过时；否则会抢掉刚按下的 100% / +。
+                            if !v.user_zoomed {
+                                v.fit_pending = true;
                             }
                         }
                     }
@@ -2617,14 +2614,20 @@ impl OpenPicasaApp {
         match action {
             KeyAction::ZoomIn => v.zoom_in(),
             KeyAction::ZoomOut => v.zoom_out(),
-            KeyAction::ZoomFit => v.zoom = 0.0001, // 下一帧会被 fit 覆盖
-            KeyAction::ZoomActual => v.zoom = 1.0,
+            // PageDown = 适合：下一帧按当前可用宽度重算（信息栏开合会改变它）
+            KeyAction::ZoomFit => v.request_fit(),
+            // 数字 1 = 100%，**不是评分**
+            KeyAction::ZoomActual => v.zoom_actual(),
             KeyAction::ToggleBackground => v.toggle_bg(),
-            KeyAction::ToggleInfo => v.info_open = !v.info_open,
+            KeyAction::ToggleInfo => v.toggle_info(),
             KeyAction::ToggleCompare => {
-                v.compare = !v.compare;
-                if !v.compare {
-                    v.compare_tex = None;
+                // 只有一张时不进入并排，也不画假比较图（M5-VW-10 / AC-VW-COMPARE）
+                if v.compare_available(self.lib.photos.len()) {
+                    v.compare = !v.compare;
+                    if !v.compare {
+                        v.compare_tex = None;
+                        v.compare_requested = None;
+                    }
                 }
             }
             KeyAction::ToggleFullscreen => {
@@ -2713,6 +2716,8 @@ impl OpenPicasaApp {
     fn open_viewer(&mut self, index: usize) {
         let mut v = Viewer::new(index);
         v.info_open = self.lib.prefs.viewer_info_open;
+        // VW-11：背景档位读偏好（产品既有深 / 浅，不扩展档位——§11 #2 未裁定）。
+        v.bg = crate::viewer::Bg::from_code(self.lib.prefs.viewer_bg);
         if let Some(row) = self.lib.photos.get(index) {
             viewer::ensure_loaded(&mut v, row, &self.service);
         }
@@ -3447,10 +3452,9 @@ impl OpenPicasaApp {
         if let Some(v) = self.viewer.as_mut() {
             if let Some(row) = self.lib.photos.get(v.index) {
                 viewer::ensure_loaded(v, row, &self.service);
-                // 并排比较（M4 #11）：需要右侧图且还没载入 → 排队下一张的大图。
-                // 复用同一 ThumbnailService 通道；载入完成在 pump_events 的
-                // FullImageReady 里落进 compare_tex。
-                if v.compare
+                // 并排比较（M4 #11 / M5-VW-10）：只在**真的存在下一张**时排队右侧图。
+                // 序列末尾按 C 不画假比较图（viewer::layout 的窗格由同一判定决定）。
+                if v.compare_active(self.lib.photos.len())
                     && v.compare_tex.is_none()
                     && let Some(next) = self.lib.photos.get(v.index + 1)
                     && v.compare_requested != Some(next.id)
@@ -3483,13 +3487,52 @@ impl OpenPicasaApp {
                 // tags_for 做幂等标记，避免每帧查库（R-M42-1 展示速度不劣化）。
                 if v.tags_for != Some(row.id) {
                     let db_arc = self.lib.db.clone();
-                    let tags = {
+                    let (tags, caption) = {
                         let db = db_arc.lock().expect("db 锁");
-                        db.tags_of(row.id).unwrap_or_default()
+                        (
+                            db.tags_of(row.id).unwrap_or_default(),
+                            db.caption_of(row.id).unwrap_or_default(),
+                        )
                     };
                     v.tags = tags;
+                    v.caption_text = caption;
                     v.tags_for = Some(row.id);
                 }
+            }
+            // M5-R4：胶片条缩略图。只预取本帧可见的一小撮（与栅格共用同一
+            // `TextureCache` 的每帧预算），拿不到就画占位格，不做假图。
+            let photo_count = self.lib.photos.len();
+            let slots = {
+                let (info_open, compare_active, index) = (
+                    v.info_open,
+                    v.compare_active(photo_count),
+                    v.index,
+                );
+                let lay = viewer::layout(ui.max_rect(), info_open, compare_active);
+                viewer::filmstrip_slots(lay.filmstrip, photo_count, index)
+            };
+            let mut film_thumbs = Vec::with_capacity(slots.len());
+            if !slots.is_empty() {
+                let db_arc = self.lib.db.clone();
+                let db = db_arc.lock().expect("db 锁");
+                let mut budget = 6usize;
+                for slot in &slots {
+                    let Some(p) = self.lib.photos.get(slot.index) else {
+                        continue;
+                    };
+                    let tex = match self
+                        .cache
+                        .get(ui.ctx(), &db, &self.service, p, &mut budget)
+                    {
+                        TexState::Ready(t, s) => Some((t, s)),
+                        _ => None,
+                    };
+                    film_thumbs.push(viewer::FilmThumb {
+                        index: slot.index,
+                        tex,
+                    });
+                }
+                drop(db);
             }
             let action = viewer::show(
                 ui,
@@ -3497,22 +3540,89 @@ impl OpenPicasaApp {
                 &self.lib.photos,
                 &theme,
                 ui.ctx().memory(|m| m.focused()).is_none(),
+                &film_thumbs,
             );
             match action {
                 Some(ViewerAction::Close) => self.close_viewer(),
                 Some(ViewerAction::Reveal) => self.reveal_selected(),
                 Some(ViewerAction::Next) => self.nudge_viewer(1),
                 Some(ViewerAction::Prev) => self.nudge_viewer(-1),
+                Some(ViewerAction::JumpTo(i)) => self.jump_viewer_to(i),
+                Some(ViewerAction::ToggleInfo) => {
+                    if let Some(v) = self.viewer.as_mut() {
+                        v.toggle_info();
+                    }
+                }
+                Some(ViewerAction::ToggleCompare) => {
+                    if let Some(v) = self.viewer.as_mut() {
+                        // 只有一张时不进入并排，也不画假窗格。
+                        if v.compare_available(self.lib.photos.len()) {
+                            v.compare = !v.compare;
+                            if !v.compare {
+                                v.compare_tex = None;
+                                v.compare_requested = None;
+                            }
+                        }
+                    }
+                }
+                Some(ViewerAction::ToggleBg) => {
+                    if let Some(v) = self.viewer.as_mut() {
+                        v.toggle_bg();
+                    }
+                }
+                Some(ViewerAction::ZoomIn) => {
+                    if let Some(v) = self.viewer.as_mut() {
+                        v.zoom_in();
+                    }
+                }
+                Some(ViewerAction::ZoomOut) => {
+                    if let Some(v) = self.viewer.as_mut() {
+                        v.zoom_out();
+                    }
+                }
+                Some(ViewerAction::ZoomFit) => {
+                    if let Some(v) = self.viewer.as_mut() {
+                        v.request_fit();
+                    }
+                }
+                Some(ViewerAction::ZoomActual) => {
+                    if let Some(v) = self.viewer.as_mut() {
+                        v.zoom_actual();
+                    }
+                }
                 None => {}
             }
-            // 记住信息面板的展开状态（F2-09「可折叠记忆」）
-            if let Some(v) = self.viewer.as_ref()
-                && self.lib.prefs.viewer_info_open != v.info_open
-            {
-                self.lib.prefs.viewer_info_open = v.info_open;
-                self.lib.mark_prefs_dirty();
+            // 记住信息面板的展开状态（F2-09「可折叠记忆」）与背景档位（VW-11）。
+            if let Some(v) = self.viewer.as_ref() {
+                let mut dirty = false;
+                if self.lib.prefs.viewer_info_open != v.info_open {
+                    self.lib.prefs.viewer_info_open = v.info_open;
+                    dirty = true;
+                }
+                if self.lib.prefs.viewer_bg != v.bg.code() {
+                    self.lib.prefs.viewer_bg = v.bg.code();
+                    dirty = true;
+                }
+                if dirty {
+                    self.lib.mark_prefs_dirty();
+                }
             }
         }
+    }
+
+    /// 胶片条 / 程序接口：跳到序列第 `index` 张（越界忽略）。
+    fn jump_viewer_to(&mut self, index: usize) {
+        if index >= self.lib.photos.len() {
+            return;
+        }
+        let Some(v) = self.viewer.as_mut() else {
+            return;
+        };
+        if v.index == index {
+            return;
+        }
+        v.jump_to(index);
+        self.lib.click_select(index, false, false);
     }
 
     fn draw_overlays(&mut self, ui: &mut egui::Ui) {

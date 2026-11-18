@@ -178,3 +178,83 @@ pub fn collect(ctx: &Context, in_viewer: bool) -> Vec<KeyAction> {
 
     out
 }
+
+#[cfg(test)]
+mod m5r4_viewer_tests {
+    use super::*;
+    use eframe::egui::{Event, Modifiers, Pos2, RawInput, Rect, vec2};
+
+    /// 造一帧：只按下指定键。
+    fn press(ctx: &Context, key: Key, modifiers: Modifiers) {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))),
+            max_texture_side: Some(2048),
+            // `collect` 读的是 InputState 的当前修饰键：先发 ModifiersChanged
+            events: vec![
+                Event::ModifiersChanged(modifiers),
+                Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                },
+            ],
+            ..Default::default()
+        };
+        crate::theme::apply(ctx, picasa_core::Appearance::Light);
+        let out = ctx.run_ui(input, |ui| {
+            let _ = ui;
+        });
+        out.drop_without_applying_deltas();
+    }
+
+    /// 查看器缩放键：PageUp 放大、PageDown 适合、数字 1 = 100%（不打分）。
+    #[test]
+    fn viewer_zoom_keys_map_to_expected_actions() {
+        let ctx = Context::default();
+        press(&ctx, Key::PageUp, Modifiers::NONE);
+        assert_eq!(collect(&ctx, true), vec![KeyAction::ZoomIn]);
+        press(&ctx, Key::PageDown, Modifiers::NONE);
+        assert_eq!(collect(&ctx, true), vec![KeyAction::ZoomFit]);
+        press(&ctx, Key::Num1, Modifiers::NONE);
+        assert_eq!(
+            collect(&ctx, true),
+            vec![KeyAction::ZoomActual],
+            "数字 1 是 100%，不是评分"
+        );
+    }
+
+    /// 查看器 +/-、↑/↓、I、Space、C 映射保持。
+    #[test]
+    fn viewer_retained_keys_still_map() {
+        let ctx = Context::default();
+        for (key, expected) in [
+            (Key::Plus, KeyAction::ZoomIn),
+            (Key::Equals, KeyAction::ZoomIn),
+            (Key::ArrowUp, KeyAction::ZoomIn),
+            (Key::Minus, KeyAction::ZoomOut),
+            (Key::ArrowDown, KeyAction::ZoomOut),
+            (Key::I, KeyAction::ToggleInfo),
+            (Key::Space, KeyAction::ToggleBackground),
+            (Key::C, KeyAction::ToggleCompare),
+            (Key::Escape, KeyAction::CloseViewer),
+            (Key::ArrowLeft, KeyAction::Prev),
+            (Key::ArrowRight, KeyAction::Next),
+        ] {
+            press(&ctx, key, Modifiers::NONE);
+            assert_eq!(collect(&ctx, true), vec![expected], "{key:?}");
+        }
+    }
+
+    /// 查看器放大键不会落到「给照片打分」的动作上（没有那样的 KeyAction）。
+    #[test]
+    fn viewer_numeric_one_is_not_a_rating_action() {
+        let ctx = Context::default();
+        press(&ctx, Key::Num1, Modifiers::NONE);
+        assert_eq!(collect(&ctx, true), vec![KeyAction::ZoomActual]);
+        // 图库语境里 ⌘1 才是缩略图档位（与查看器无关）
+        press(&ctx, Key::Num1, Modifiers::COMMAND);
+        assert_eq!(collect(&ctx, false), vec![KeyAction::TierSmall]);
+    }
+}
