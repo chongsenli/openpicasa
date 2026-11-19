@@ -62,6 +62,21 @@ fn fixture(root: &Path, dirs: &[&str], files_per_dir: usize) -> (Vec<i64>, Db) {
     (ids, db)
 }
 
+/// 目录自身的 mtime（**纳秒**自 epoch）。`None` = 打不开。
+///
+/// 精度必须与 `verify::stat_dir_mtime_ns` 一致，否则 L1 会永远判「有变化」；
+/// 取纳秒的理由见 `07` §2.2。
+fn dir_mtime_ns(dir: &Path) -> Option<i64> {
+    let meta = std::fs::metadata(dir).ok()?;
+    let nanos = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    i64::try_from(nanos).ok()
+}
+
 /// 给所有目录补上 `dir_mtime`（模拟「上一轮 L2 已经量过」）。
 fn stamp_dir_mtimes(db: &Db, root: &Path) {
     let _ = root;
@@ -69,18 +84,9 @@ fn stamp_dir_mtimes(db: &Db, root: &Path) {
         // `folders.path` 已经是**绝对路径且已归一**（`upsert_folder` 里做过 NFC/规范化），
         // 直接用它 stat。不要拿 `root.join(...)` 拼：tempdir 在 macOS 上
         // 可能带 `/private` 前缀差异，拼出来的路径不存在。
-        let Ok(meta) = std::fs::metadata(&f.path) else {
+        let Some(nanos) = dir_mtime_ns(Path::new(&f.path)) else {
             continue;
         };
-        // 必须与 `verify::stat_dir_mtime_ns` 同精度（纳秒），否则 L1 会永远判「有变化」
-        let nanos = i64::try_from(
-            meta.modified()
-                .unwrap()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        )
-        .unwrap();
         db.set_folder_dir_mtime(f.id, Some(nanos)).unwrap();
     }
 }
@@ -241,10 +247,42 @@ fn tc_m3_verify_l1_detects_an_added_file() {
     let root = tmp.path();
     let (ids, db) = fixture(root, &["a"], 2);
     stamp_dir_mtimes(&db, root);
+    let dir = root.join("a");
+    // stamp 取**库里实际存的那个值**（而不是重新 stat 一次），并核对它与
+    // `folders.path` 的 stat 同值：L1 比的正是这一对值，路径或精度不一致
+    // 会让这条用例永远「有变化」，也会让真实库永远全校。
+    let stamp_ns = db
+        .folder_dir_mtime(ids[0])
+        .unwrap()
+        .expect("stamp_dir_mtimes 必须已写入 dir_mtime");
+    assert_eq!(
+        Some(stamp_ns),
+        dir_mtime_ns(&dir),
+        "库里的 dir_mtime 必须与目录真实 mtime（纳秒）一致"
+    );
+
+    // ⚠️ 等待必须在**新增文件之前**（M5-L1-mtime 修复）。
+    //
+    // 目录 mtime 是内核在「目录条目变化」的那一刻打上的，之后即使再睡一小时，
+    // 已经写进去的那个时间戳也不会变——旧写法把 `sleep(1100ms)` 放在 write
+    // 之后，对判定毫无帮助。而 Linux 的目录 mtime 又取自**粗粒度时钟**
+    // （本机实测 `CLOCK_REALTIME_COARSE`，4 ms 一格），stamp 与 write 落在同一格时
+    // 两者拿到完全相同的纳秒值，L1 的精确相等比较会判「没变化」。
+    // 先把时钟推过至少一格（1100 ms 也覆盖 HFS+ 这类 1 秒粒度）再写，
+    // 「新增文件 ⇒ 目录 mtime 变了」这个前提才真的成立。
+    std::thread::sleep(std::time::Duration::from_millis(1100));
 
     // 用户在 Finder 里拷进一张新图
-    std::fs::write(root.join("a/new.jpg"), vec![0u8; 128]).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(dir.join("new.jpg"), vec![0u8; 128]).unwrap();
+
+    // 前提断言（与姊妹用例 `..._misses_in_place_overwrite...` 对称）：
+    // 新增文件必须真的让目录 mtime 与 stamp 值可区分，否则 L1 判「没变化」
+    // 不是漏判，而是这个用例的前提没造出来。
+    let after_write_ns = dir_mtime_ns(&dir).expect("目录能 stat");
+    assert_ne!(
+        after_write_ns, stamp_ns,
+        "前提：新增文件后目录 mtime 必须与 stamp 值不同（否则测的是文件系统粒度，不是 L1）"
+    );
 
     let plan = VerifyPlan::from_root_paths([root.to_path_buf()]);
     let mut runner = VerifyRunner::new(plan);
