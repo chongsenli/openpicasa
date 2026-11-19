@@ -142,6 +142,12 @@ pub struct OpenPicasaApp {
     filter_menu_pos: Pos2,
     /// 筛选面板的草稿状态（点「应用」才提交，避免每点一下就重查全库）
     filter_draft_tag: String,
+    /// `M5-SF-08`：相机 / 镜头草稿。必须点「应用」才进筛选。
+    filter_draft_camera: String,
+    filter_draft_lens: String,
+    /// `M5-SF-10`：文件大小 KB 上下界草稿。必须点「应用」才进筛选。
+    filter_draft_size_lo: String,
+    filter_draft_size_hi: String,
     /// 排序菜单打开的帧号，用途同 `folder_ctx_frame`（点按钮也是 click，同一帧会被误关）
     sort_menu_frame: u64,
     /// 「…」菜单打开的帧号（同上豁免）
@@ -332,6 +338,13 @@ pub struct OpenPicasaApp {
     /// 存在的唯一理由是：查看器只能靠双击进入，而自动化截图无法点击，
     /// 于是「查看器的界面还原」就永远没有基线。这是**只读的调试入口**，不影响正常使用。
     open_initial: Option<usize>,
+    /// 上一帧结束时焦点是否停在**文本输入框**（`M5-SF-01` / `AC-KB-FOCUS`）。
+    ///
+    /// 不能只看本帧的 `focused()`：egui 在读输入的 `begin_pass` 里就把 Esc
+    /// 当作失焦，那一帧焦点已经是 `None`，只按本帧判断会让「输入框里按 Esc
+    /// 退出查看器」。另外把判据收窄到 `text_edit_focused()`——按钮被 Tab 聚焦
+    /// 不该让整张快捷键表失效。
+    input_focus_prev: bool,
     /// 已绘制的帧数。调试钩子用它等「扫描落定」再动作
     /// （照片是逐目录入库的，太早打开会拿到半截列表）。
     frames: u32,
@@ -405,6 +418,10 @@ impl OpenPicasaApp {
             filter_menu_frame: u64::MAX,
             filter_menu_pos: Pos2::ZERO,
             filter_draft_tag: String::new(),
+            filter_draft_camera: String::new(),
+            filter_draft_lens: String::new(),
+            filter_draft_size_lo: String::new(),
+            filter_draft_size_hi: String::new(),
             sort_menu_frame: u64::MAX,
             sidebar_visible: true,
             grid_show_filename: true,
@@ -485,6 +502,7 @@ impl OpenPicasaApp {
             open_initial: std::env::var("OPENPICASA_OPEN_INDEX")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok()),
+            input_focus_prev: false,
             frames: 0,
         };
         app.refresh_tray_rows();
@@ -540,14 +558,18 @@ impl OpenPicasaApp {
             ));
             tracing::info!("启动扫描已按环境变量跳过");
         } else {
-            // M4.3 阶段 1：在 start_index() **之前**数出上次进程遗留的
+            // M4.3 阶段 1 / M5-SH-01：在 start_index() **之前**数出上次进程遗留的
             // 未完成任务（scanner 会在本次启动把它们自动续跑）。放在前面
             // 才不会把本次刚创建的任务也算进去。
+            //
+            // 只数 `resumable_index_tasks()`：`unfinished_index_tasks()` 还包含
+            // **用户显式暂停**的任务，那些按规格保持原状、并不会被续跑。
+            // 数错就会对用户说「已自动续跑 N 个」，而实际只跑了 N-1 个。
             let n = app
                 .lib
                 .db()
                 .ok()
-                .and_then(|db| db.unfinished_index_tasks().ok())
+                .and_then(|db| db.resumable_index_tasks().ok())
                 .map(|v| v.len())
                 .unwrap_or(0);
             if n > 0 {
@@ -2418,7 +2440,7 @@ impl OpenPicasaApp {
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
         let in_viewer = self.viewer.is_some();
-        for action in shortcuts::collect(ctx, in_viewer) {
+        for action in shortcuts::collect_ex(ctx, in_viewer, self.input_focus_prev) {
             if in_viewer {
                 self.apply_viewer_key(action, ctx);
             } else {
@@ -2890,12 +2912,19 @@ impl OpenPicasaApp {
                             if self.filter_menu_open {
                                 self.filter_menu_frame = ctx.cumulative_frame_nr();
                                 // 面板打开时把现有筛选读进草稿
-                                self.filter_draft_tag = self
-                                    .lib
-                                    .filter
-                                    .as_ref()
-                                    .and_then(|f| f.tag.clone())
+                                let f = self.lib.filter.clone().unwrap_or_default();
+                                self.filter_draft_tag = f.tag.clone().unwrap_or_default();
+                                self.filter_draft_camera =
+                                    f.camera.clone().unwrap_or_default();
+                                self.filter_draft_lens = f.lens.clone().unwrap_or_default();
+                                let (lo, hi) = f
+                                    .size_bytes
+                                    .map(|(a, b)| {
+                                        ((a / 1024).to_string(), (b / 1024).to_string())
+                                    })
                                     .unwrap_or_default();
+                                self.filter_draft_size_lo = lo;
+                                self.filter_draft_size_hi = hi;
                             }
                         }
                         TopbarAction::ToggleMoreMenu => {
@@ -3207,6 +3236,20 @@ impl OpenPicasaApp {
                     self.anchor_id = None;
                 } else if out.clear_selection {
                     self.lib.select_none();
+                }
+                // `M5-SH-05` / `AC-SH-01`：空态里的「清除全部筛选」。
+                // 与筛选面板的 Clear 走同一个 `set_filter(None)`，且**不换视图**
+                // （`M5-SF-11`：不退出文件夹）。
+                if out.clear_filters {
+                    if let Err(e) = self.lib.set_filter(None) {
+                        tracing::warn!(error = %e, "清除筛选失败");
+                    }
+                    self.filter_draft_tag.clear();
+                    self.filter_draft_camera.clear();
+                    self.filter_draft_lens.clear();
+                    self.filter_draft_size_lo.clear();
+                    self.filter_draft_size_hi.clear();
+                    self.restore_scroll = Some(0.0);
                 }
             });
     }
@@ -3938,6 +3981,10 @@ impl OpenPicasaApp {
                 &theme,
                 &current,
                 &mut self.filter_draft_tag,
+                &mut self.filter_draft_camera,
+                &mut self.filter_draft_lens,
+                &mut self.filter_draft_size_lo,
+                &mut self.filter_draft_size_hi,
             );
             if let Some(action) = action {
                 match action {
@@ -3956,6 +4003,13 @@ impl OpenPicasaApp {
                         if let Err(e) = self.lib.set_filter(None) {
                             tracing::warn!(error = %e, "清除筛选失败");
                         }
+                        // `M5-SF-11`：清除全部筛选，草稿也一起清 —— 否则面板重开时
+                        // 上下次填的相机 / 大小又冒出来，看起来像「没清干净」。
+                        self.filter_draft_tag.clear();
+                        self.filter_draft_camera.clear();
+                        self.filter_draft_lens.clear();
+                        self.filter_draft_size_lo.clear();
+                        self.filter_draft_size_hi.clear();
                         self.filter_menu_open = false;
                         self.restore_scroll = Some(0.0);
                     }
@@ -4632,8 +4686,11 @@ impl OpenPicasaApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
-        // 错误横幅
-        if let Some(err) = self.lib.last_error.clone() {
+        // 错误横幅（`AC-SH-ERROR`）：查看器内**不叠**这条红条——它会压在原图上，
+        // 而查看器自己的失败反馈走信息栏 / toast。库存错误等退出查看器后仍然可见。
+        if self.viewer.is_none()
+            && let Some(err) = self.lib.last_error.clone()
+        {
             egui::Area::new(ui.scope_id().with("error-banner"))
                 .anchor(Align2::CENTER_TOP, vec2(0.0, Metrics::TOOLBAR_H + 8.0))
                 .order(egui::Order::Foreground)
@@ -5366,6 +5423,10 @@ impl eframe::App for OpenPicasaApp {
         }
         // 容器路径在这里被读一次：既避免「字段未使用」，也让启动日志能定位数据位置
         tracing::debug!(support = %self.paths.support.display(), "应用容器");
+
+        // `M5-SF-01` / `AC-KB-FOCUS`：记下**本帧结束时**输入框是否仍有焦点，
+        // 供下一帧的快捷键收集使用（egui 会把 Esc 当失焦动作、在帧首就清掉焦点）。
+        self.input_focus_prev = ctx.text_edit_focused();
 
         // 让「鼠标静止 3 秒」与滚动惯性有帧可跑
         if self.viewer.is_some() {

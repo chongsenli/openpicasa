@@ -861,7 +861,11 @@ pub enum Placeholder {
 }
 
 impl Placeholder {
-    fn label(self) -> &'static str {
+    /// 文案（云端未下载是空串：静默）。
+    ///
+    /// `pub` 是为了让「云端不写字、待生成写字、失败写字」这条口径能被
+    /// `grid` 的占位格单测直接锁住（`AC-GR-CLOUD`）。
+    pub fn label(self) -> &'static str {
         match self {
             Placeholder::Pending => "待生成",
             Placeholder::Failed => "失败",
@@ -871,7 +875,7 @@ impl Placeholder {
     }
 
     /// 这一态是否只画空灰格（不写文案、不画角标）。
-    fn is_silent(self) -> bool {
+    pub fn is_silent(self) -> bool {
         self.label().is_empty()
     }
 }

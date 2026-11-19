@@ -798,12 +798,19 @@ impl Library {
     }
 
     pub fn set_view(&mut self, view: View) -> Result<()> {
-        // 「星标」不是独立的 `View`，而是叠在当前视图上的 `starred_only`。
-        // 用户已经停在「所有照片」上再点一次时，视图值没变，若在这里直接返回，
-        // 侧栏高亮还在、筛选芯片还亮，栅格也回不到全部照片。
-        let clear_star =
-            view == View::All && self.filter.as_ref().is_some_and(|f| f.starred_only);
-        if self.view == view && !clear_star {
+        // 「星标」不是独立的 `View`，而是叠在当前视图上的 `starred_only`；
+        // 年份同理，是叠在视图上的 `taken_range`。用户已经停在「所有照片」上
+        // 再点一次时，视图值没变，若在这里直接返回，侧栏高亮还在、筛选芯片还亮，
+        // 栅格也回不到全部照片。
+        //
+        // `M5-SB-02`：点「所有照片」要同时清掉**星标与年份**，否则「所有照片」与
+        // 某一行年份会同时亮着，用户看不出自己到底在哪一层。
+        let reset_all = view == View::All
+            && self
+                .filter
+                .as_ref()
+                .is_some_and(|f| f.starred_only || f.taken_range.is_some());
+        if self.view == view && !reset_all {
             return Ok(());
         }
         if self.view != view {
@@ -814,18 +821,19 @@ impl Library {
             self.anchor = None;
             self.dirty_prefs = true;
         }
-        if clear_star {
-            self.clear_starred_only();
+        if reset_all {
+            self.clear_all_photos_overlays();
         }
         self.reload_photos()
     }
 
-    /// 退出「只看收藏」。格式 / 日期 / 尺寸 / 标签这些维度留下。
-    fn clear_starred_only(&mut self) {
+    /// 退出「只看收藏」与年份筛选。格式 / 尺寸 / 标签这些维度留下。
+    fn clear_all_photos_overlays(&mut self) {
         let Some(mut f) = self.filter.take() else {
             return;
         };
         f.starred_only = false;
+        f.taken_range = None;
         self.filter = f.is_active().then_some(f);
     }
 

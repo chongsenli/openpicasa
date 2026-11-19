@@ -422,3 +422,39 @@ fn root_id_for_path_finds_real_and_lowercased_paths() {
         "unknown path resolves to None"
     );
 }
+
+/// `M5-SH-01` / `AC-SH-RESUME`：启动续跑 toast 的 `{n}` 必须只数**会被续跑**的任务。
+///
+/// 语义来源：`resumable_index_tasks()` = 未结束 + 未取消 + **未被用户暂停**。
+/// 暂停的任务按规格「保持原状」，不该出现在「已自动续跑 n 个」里；
+/// 数错就会对用户说跑了 n 个而实际只跑了 n-1 个。
+#[test]
+fn startup_resume_count_excludes_user_paused_and_cancelled_tasks() {
+    let (_tmp, db) = fresh_db();
+    let live = db
+        .begin_index_task(None, "/live", TaskKind::FirstScan, TaskScopeKind::Root)
+        .unwrap();
+    let paused = db
+        .begin_index_task(None, "/paused", TaskKind::Refresh, TaskScopeKind::Root)
+        .unwrap();
+    let cancelled = db
+        .begin_index_task(None, "/cancelled", TaskKind::Reindex, TaskScopeKind::Root)
+        .unwrap();
+    db.set_task_user_paused(paused, true).unwrap();
+    assert!(db.cancel_index_task(cancelled, "user_cancel").unwrap());
+
+    let resumable = db.resumable_index_tasks().unwrap();
+    assert_eq!(
+        resumable.iter().map(|t| t.task_id).collect::<Vec<_>>(),
+        vec![live],
+        "只有未被用户暂停、未取消的任务会被自动续跑"
+    );
+    // 对照：`unfinished_index_tasks()` 是「面板上要显示的全部未完成」，
+    // 它**包含**暂停的那些，因此不能拿来当续跑计数。
+    let unfinished = db.unfinished_index_tasks().unwrap();
+    assert_eq!(unfinished.len(), 2, "面板口径 = 可续跑 + 已暂停");
+    assert!(
+        unfinished.len() > resumable.len(),
+        "两个口径必须能区分，否则启动 toast 会多报"
+    );
+}

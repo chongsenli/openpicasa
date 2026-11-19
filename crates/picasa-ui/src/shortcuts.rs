@@ -47,7 +47,22 @@ pub enum KeyAction {
 ///
 /// 焦点在输入框里时**一律不处理**（否则用户打「A」会全选照片）。
 pub fn collect(ctx: &Context, in_viewer: bool) -> Vec<KeyAction> {
-    if ctx.memory(|m| m.focused()).is_some() {
+    collect_ex(ctx, in_viewer, false)
+}
+
+/// 同 [`collect`]，但额外知道**上一帧结束时焦点是否停在输入框**。
+///
+/// ## 为什么需要这个参数（`M5-SF-01` / `AC-KB-FOCUS`）
+///
+/// egui 在每一帧开头的 `begin_pass` 里就把「按了 Escape」当作失焦动作，
+/// 直接清掉 `focused_widget`。于是用户在搜索框里按 Esc 的那一帧，
+/// `ctx.memory(|m| m.focused())` 已经是 `None`——只这一条判据会把 Esc 当成
+/// 「关闭查看器」，用户想失焦却被踢出查看器，正是验收里明令禁止的行为。
+///
+/// 调用方在上一帧末尾记下焦点状态传进来：那一帧所有快捷键都停用，
+/// Esc 只由 egui 完成失焦，不产生任何 `KeyAction`。
+pub fn collect_ex(ctx: &Context, in_viewer: bool, input_focus_prev: bool) -> Vec<KeyAction> {
+    if input_focus_prev || ctx.memory(|m| m.focused()).is_some() {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -203,6 +218,10 @@ mod m5r4_viewer_tests {
             ..Default::default()
         };
         crate::theme::apply(ctx, picasa_core::Appearance::Light);
+        // egui 自己把 ⌘0 / ⌘+ / ⌘− 当「界面缩放」并在**帧末**消费掉这些快捷键。
+        // 应用里的 `collect` 跑在帧内（`handle_keys`），所以不受影响；而这里的
+        // 测试助手是在整帧跑完才回读，不关掉它就会误判成「⌘0 没有映射」。
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let out = ctx.run_ui(input, |ui| {
             let _ = ui;
         });
@@ -244,6 +263,72 @@ mod m5r4_viewer_tests {
         ] {
             press(&ctx, key, Modifiers::NONE);
             assert_eq!(collect(&ctx, true), vec![expected], "{key:?}");
+        }
+    }
+
+    /// `AC-KB-FOCUS`：焦点在输入框时**整张快捷键表停用**。
+    ///
+    /// 还要覆盖「Esc 那一帧」：egui 在帧首把 Esc 当失焦动作、已清掉 `focused()`，
+    /// 只看本帧会把 Esc 当成「关闭查看器」。调用方传入上一帧的焦点状态即可挡住。
+    #[test]
+    fn input_focus_disables_the_whole_shortcut_table_including_escape() {
+        let ctx = Context::default();
+        // 上一帧焦点在输入框：这一帧任何键都不产生动作（含 Esc）。
+        for key in [Key::Escape, Key::Delete, Key::Num1, Key::J, Key::A] {
+            press(&ctx, key, Modifiers::NONE);
+            assert!(
+                collect_ex(&ctx, true, true).is_empty(),
+                "输入框聚焦时 {key:?} 不该生效"
+            );
+            assert!(collect_ex(&ctx, false, true).is_empty(), "图库同样停用");
+        }
+        // 没有输入框焦点时，Esc 恢复为「关闭查看器」。
+        press(&ctx, Key::Escape, Modifiers::NONE);
+        assert_eq!(collect_ex(&ctx, true, false), vec![KeyAction::CloseViewer]);
+    }
+
+    /// `AC-KB-01`：图库侧的整张表都在，且每一键都能映射到动作（不是空转）。
+    #[test]
+    fn library_shortcut_table_covers_every_documented_key() {
+        let ctx = Context::default();
+        for (key, mods, expected) in [
+            (Key::A, Modifiers::COMMAND, KeyAction::SelectAll),
+            (Key::D, Modifiers::COMMAND, KeyAction::SelectNone),
+            (Key::I, Modifiers::COMMAND, KeyAction::Invert),
+            (Key::H, Modifiers::COMMAND, KeyAction::ToTray),
+            (Key::Num1, Modifiers::COMMAND, KeyAction::TierSmall),
+            (Key::Num2, Modifiers::COMMAND, KeyAction::TierLarge),
+            (Key::Num0, Modifiers::COMMAND, KeyAction::ZoomReset),
+            (Key::Minus, Modifiers::COMMAND, KeyAction::TierSmall),
+            (Key::Plus, Modifiers::COMMAND, KeyAction::TierLarge),
+            (Key::F, Modifiers::COMMAND, KeyAction::FocusSearch),
+            (Key::R, Modifiers::COMMAND | Modifiers::SHIFT, KeyAction::ToggleRecurse),
+            (Key::F11, Modifiers::NONE, KeyAction::ToggleFullscreen),
+            (Key::Enter, Modifiers::COMMAND, KeyAction::Reveal),
+            (Key::Enter, Modifiers::NONE, KeyAction::OpenViewer),
+            (Key::Home, Modifiers::NONE, KeyAction::ToStart),
+            (Key::End, Modifiers::NONE, KeyAction::ToEnd),
+        ] {
+            press(&ctx, key, mods);
+            assert_eq!(collect(&ctx, false), vec![expected], "{key:?} + {mods:?}");
+        }
+        // 图库里 Enter 与 ⌘Enter 是两件事：一个进查看器、一个显示位置。
+        // 同时按下时 `OpenViewer` 的判据带了 `!cmd`，所以只出 Reveal。
+        press(&ctx, Key::Enter, Modifiers::COMMAND);
+        assert_eq!(collect(&ctx, false), vec![KeyAction::Reveal]);
+    }
+
+    /// `AC-OUT-C` / `M5-OR-13`：数字键 2–5 在查看器里**什么都不做**。
+    /// 原型用 0–5 打分，本产品没有评分，不能留一个能改状态的半成品入口。
+    #[test]
+    fn viewer_digit_keys_other_than_one_are_inert() {
+        let ctx = Context::default();
+        for key in [Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num0] {
+            press(&ctx, key, Modifiers::NONE);
+            assert!(
+                collect(&ctx, true).is_empty(),
+                "{key:?} 在查看器里不该有任何动作（没有评分）"
+            );
         }
     }
 

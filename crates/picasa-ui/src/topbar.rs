@@ -1018,6 +1018,93 @@ mod m41_tests {
         assert_eq!(items[0].0, "✓ 只看本文件夹", "开着时以勾选说明当前语义");
     }
 
+    /// `AC-SORT-THUMBS` / `M5-MN-06～08`：排序菜单的可见项。
+    ///
+    /// 用无窗口后端跑真实 `sort_menu`，把本帧所有文本收集起来判定——
+    /// 比另写一份「菜单应该有什么」的常量更能防止实现漂移。
+    fn sort_menu_texts(current: picasa_db::SortSpec, thumbs_first: bool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, picasa_core::Appearance::Light);
+        let mut last = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))),
+                max_texture_side: Some(2048),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                let theme = Theme::for_appearance(picasa_core::Appearance::Light);
+                let _ = sort_menu(ui, pos2(681.0, 100.0), &theme, current, thumbs_first);
+            });
+            let mut texts = Vec::new();
+            collect_texts(&out.shapes, &mut texts);
+            last = texts.into_iter().map(|(t, _, _)| t).collect();
+            out.drop_without_applying_deltas();
+        }
+        last
+    }
+
+    /// `AC-SORT-THUMBS`：排序键齐全、当前键带「✓」、降序再加「↓」，
+    /// 且有「有缩略图的排在前面」与「改为升序 / 改为降序」；**没有评分排序**。
+    #[test]
+    fn m5_sort_menu_lists_the_spec_keys_checks_current_and_never_offers_rating() {
+        let texts = sort_menu_texts(
+            picasa_db::SortSpec {
+                key: SortKey::TakenAt,
+                descending: true,
+            },
+            true,
+        );
+        for label in ["拍摄日期", "文件名", "修改日期", "文件大小", "图片尺寸"] {
+            assert!(
+                texts.iter().any(|t| t.contains(label)),
+                "排序菜单缺「{label}」：{texts:?}"
+            );
+        }
+        assert!(
+            texts.iter().any(|t| t.contains("有缩略图的排在前面")),
+            "缺「有缩略图的排在前面」：{texts:?}"
+        );
+        // 降序 → 「改为升序」；当前键 + 降序 → 「✓ … ↓」
+        assert!(
+            texts.iter().any(|t| t == "改为升序"),
+            "降序时应该出现「改为升序」：{texts:?}"
+        );
+        let taken = texts
+            .iter()
+            .find(|t| t.contains("拍摄日期"))
+            .expect("拍摄日期这一项");
+        assert!(taken.starts_with('✓'), "当前键要带勾：{taken}");
+        assert!(taken.ends_with('↓'), "降序要带 ↓：{taken}");
+        // 没有「评分」排序（OR-13 / AC-OUT-C）
+        assert!(
+            !texts.iter().any(|t| t.contains("评分") || t.contains("星级")),
+            "排序菜单不许有评分：{texts:?}"
+        );
+
+        // 升序时应改为「改为降序」，且当前键不再带 ↓
+        let texts = sort_menu_texts(
+            picasa_db::SortSpec {
+                key: SortKey::Name,
+                descending: false,
+            },
+            false,
+        );
+        assert!(texts.iter().any(|t| t == "改为降序"), "{texts:?}");
+        let name = texts
+            .iter()
+            .find(|t| t.contains("文件名"))
+            .expect("文件名这一项");
+        assert!(name.starts_with('✓'), "{name}");
+        assert!(!name.contains('↓'), "升序不该带 ↓：{name}");
+        // 未开启时，「有缩略图的排在前面」不带勾
+        let thumbs = texts
+            .iter()
+            .find(|t| t.contains("有缩略图的排在前面"))
+            .expect("缩略图优先这一项");
+        assert!(!thumbs.starts_with('✓'), "{thumbs}");
+    }
+
     // ---- M5-R3 缺陷修复：更多菜单宽度 -------------------------------------------------
 
     /// 无窗口后端跑一帧 egui（宽高即窗口逻辑尺寸），返回本帧绘制结果。

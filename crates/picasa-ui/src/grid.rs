@@ -907,6 +907,9 @@ pub struct GridOutput {
     pub marquee: Option<MarqueeHit>,
     /// M4.1 `M41-UI-09`：点击照片外空白 → 清空选中集。
     pub clear_selection: bool,
+    /// `M5-SH-05` / `AC-SH-01`：搜索或筛选没有结果时，空态里那枚
+    /// 「清除全部筛选」被点了。栅格不碰筛选状态，只如实上报给 App。
+    pub clear_filters: bool,
     /// M4.2 `M42-PERF-00`：本帧可见格里「未出图（占位）」的格数，供诊断探针
     /// 算空白格率；纯统计，不进任何绘制决策。
     pub blank_cells: usize,
@@ -1021,6 +1024,7 @@ pub fn show(
         need_dims: Vec::new(),
         marquee: None,
         clear_selection: false,
+        clear_filters: false,
         blank_cells: 0,
         uploads_this_frame: 0,
     };
@@ -1109,7 +1113,7 @@ pub fn show(
                 m.data.insert_temp(drag_id, d);
             }
         });
-        draw_empty_state(ui, full, theme, cache, empty);
+        out.clear_filters = draw_empty_state(ui, full, theme, cache, empty);
         return out;
     }
 
@@ -1336,12 +1340,18 @@ pub fn show(
             // M4.2 `M42-PERF-00`：本格是否画了占位（未出图）。只做统计，不改绘制。
             let mut blank = placeholder;
             if placeholder {
-                let state = if failed {
-                    index_progress::Placeholder::Failed
-                } else if cloud_only {
-                    index_progress::Placeholder::CloudOnly
-                } else {
-                    index_progress::Placeholder::Pending
+                // 占位态由 [`placeholder_for`] 统一判定（`M5-GR-10` / `M5-GR-11`）：
+                // 失败 → 警示色 + 感叹号；其余 → 灰格 + 「待生成」。
+                // 这里传 `has_texture = false` 是刻意的：云端行即使有 BLOB 也要先走
+                // `cache.get` 才看得出有没有图，占位分支不替它做决定。
+                let state = match placeholder_for(
+                    row.thumb_state,
+                    indexing_folders.contains(&row.folder_id),
+                    false,
+                ) {
+                    Some(CellPlaceholder::Failed) => index_progress::Placeholder::Failed,
+                    Some(CellPlaceholder::CloudOnly) => index_progress::Placeholder::CloudOnly,
+                    _ => index_progress::Placeholder::Pending,
                 };
                 index_progress::draw_placeholder_state(&painter, img_rect, theme, state);
             } else if use_atlas {
@@ -1838,6 +1848,44 @@ fn pump_atlas_from_db(
     done
 }
 
+/// 一行的缩略图占位态（`M5-GR-10` / `M5-GR-11` / `M5-GR-12`）。
+///
+/// 抽成纯函数是为了让三种占位格的口径能被单测钉住：**云端未下载既不是失败、
+/// 也不写字、也不画角标**，而「待生成」要写字、「失败」要警示色 + 右上感叹号。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellPlaceholder {
+    /// 云端未下载：只画安静的灰格（不写字、不画角标）。
+    CloudOnly,
+    /// 失败 / 损坏：警示色 + 右上感叹号。
+    Failed,
+    /// 待生成：灰格 + 「待生成」。
+    Pending,
+}
+
+/// 这一格该画哪种占位；`None` = 不画占位（有图就出图）。
+///
+/// 参数 `has_texture` 很关键：导入的索引包会把缩略图一起带过来，一条
+/// `thumb_state = 4`（云端未下载）的行**也可能有 BLOB**——那种必须照常出图。
+/// 只有「库里也没有 BLOB」才退化成安静灰格（`v0.7-dev23` 的既有口径）。
+///
+/// 注意顺序与栅格绘制处保持一致：先判失败，再判「没图 + 云端」，最后判「待生成」。
+pub fn placeholder_for(
+    thumb_state: i64,
+    folder_indexing: bool,
+    has_texture: bool,
+) -> Option<CellPlaceholder> {
+    if thumb_state == 2 || thumb_state == 3 {
+        return Some(CellPlaceholder::Failed);
+    }
+    if has_texture {
+        return None;
+    }
+    if thumb_state == ThumbState::CloudOnly as i64 {
+        return Some(CellPlaceholder::CloudOnly);
+    }
+    (thumb_state == 0 && folder_indexing).then_some(CellPlaceholder::Pending)
+}
+
 /// 栅格没有照片时该说什么。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EmptyReason {
@@ -1879,13 +1927,14 @@ fn empty_grid_lines(reason: EmptyReason) -> (&'static str, &'static str) {
     }
 }
 
+/// 画空态。返回 `true` 表示用户点了「清除全部筛选」（仅 [`EmptyReason::NoMatches`]）。
 fn draw_empty_state(
     ui: &mut Ui,
     full: Rect,
     theme: &Theme,
     cache: &mut TextureCache,
     reason: EmptyReason,
-) {
+) -> bool {
     let _ = cache;
     let (title, hint) = empty_grid_lines(reason);
     let painter = ui.painter_at(full);
@@ -1903,6 +1952,27 @@ fn draw_empty_state(
         FontId::new(12.0, egui::FontFamily::Proportional),
         theme.text_secondary.gamma_multiply(0.85),
     );
+    // `M5-SH-05`：无结果时给一条出路。只在这里出现——空库（Library）不画，
+    // 那时该做的是「导入」，不是「清除筛选」。
+    if reason == EmptyReason::NoMatches {
+        let btn = Rect::from_center_size(
+            pos2(full.center().x, full.center().y + 34.0),
+            vec2(112.0, 26.0),
+        );
+        let resp = ui.put(
+            btn,
+            egui::Button::new(
+                egui::RichText::new("清除全部筛选")
+                    .size(12.0)
+                    .color(theme.text_primary),
+            )
+            .fill(theme.menu_bg)
+            .stroke(egui::Stroke::new(1.0, theme.hairline))
+            .corner_radius(theme.radius_btn),
+        );
+        return resp.clicked();
+    }
+    false
 }
 
 /// 等比放进正方形（U-25：长边贴合，短边留白，不裁切不拉伸）。
@@ -2012,6 +2082,59 @@ mod tests {
         (1..=n as i64)
             .map(|i| photo(i, 1_300_000_000 + i))
             .collect()
+    }
+
+    /// `M5-GR-10` / `M5-GR-11` / `M5-GR-12`：三种占位格的口径。
+    ///
+    /// - 待生成：`thumb_state = 0` 且所在文件夹正在索引 → 灰格 + 「待生成」
+    /// - 失败 / 损坏：`thumb_state = 2 / 3` → 警示色 + 右上感叹号
+    /// - 云端未下载：`thumb_state = 4` 且**库里没有 BLOB** → 只画灰格，不写字、不画角标
+    /// - 云端未下载但**有 BLOB**（导入的索引包）：照常出图，不退化成占位
+    #[test]
+    fn m5_cell_placeholders_keep_three_distinct_states() {
+        use picasa_db::ThumbState;
+        // 待生成
+        assert_eq!(placeholder_for(0, true, false), Some(CellPlaceholder::Pending));
+        // 0 但文件夹不在索引中 → 不是「待生成」，走纹理缓存判定
+        assert_eq!(placeholder_for(0, false, false), None);
+        // 失败 / 损坏
+        assert_eq!(placeholder_for(2, true, false), Some(CellPlaceholder::Failed));
+        assert_eq!(placeholder_for(3, false, false), Some(CellPlaceholder::Failed));
+        // 云端未下载：无 BLOB → 静默灰格
+        assert_eq!(
+            placeholder_for(ThumbState::CloudOnly as i64, true, false),
+            Some(CellPlaceholder::CloudOnly)
+        );
+        // 云端未下载但库里有缩略图（导入的索引包）→ 不许退化成占位
+        assert_eq!(placeholder_for(ThumbState::CloudOnly as i64, true, true), None);
+        // 已有缩略图 → 不占位
+        assert_eq!(placeholder_for(ThumbState::Ok as i64, true, true), None);
+    }
+
+    /// 三种占位态在 UI 上的可读性差异必须成立（`AC-GR-CLOUD`）：
+    /// 云端未下载**静默**、失败与待生成**都写字**。
+    #[test]
+    fn m5_cloud_only_placeholder_stays_silent_while_failed_and_pending_are_labelled() {
+        use crate::index_progress::Placeholder;
+        assert!(Placeholder::CloudOnly.is_silent());
+        assert_eq!(Placeholder::CloudOnly.label(), "");
+        assert!(!Placeholder::Failed.is_silent());
+        assert_eq!(Placeholder::Failed.label(), "失败");
+        assert!(!Placeholder::Pending.is_silent());
+        assert_eq!(Placeholder::Pending.label(), "待生成");
+    }
+
+    /// `M5-SH-05` / `AC-SH-01`：搜索或筛选无结果时，空态要给出「清除全部筛选」；
+    /// 空库（没有搜索 / 筛选）时**不给**——那时该做的是导入。
+    #[test]
+    fn m5_only_no_match_empty_state_offers_clearing_filters() {
+        assert_eq!(empty_reason("", None), EmptyReason::Library);
+        assert_eq!(empty_reason("cat", None), EmptyReason::NoMatches);
+        let starred = picasa_db::PhotoFilter {
+            starred_only: true,
+            ..picasa_db::PhotoFilter::default()
+        };
+        assert_eq!(empty_reason("", Some(&starred)), EmptyReason::NoMatches);
     }
 
     /// `M5-SH-04`：空网格第二行指向顶栏「导入」，不再指向已删除的
@@ -2686,6 +2809,95 @@ mod tests {
         // 贴图确实挂上了（否则只是个圆角白块，等于把图弄丢了）
         let brush = shape.brush.expect("圆角贴图必须带 texture brush");
         assert_eq!(brush.uv, uv);
+    }
+
+    /// `AC-LAY-01` / `M5-TB-09` / `M5-GR-14`：实装布局只有三种，且
+    /// **瀑布流不画日期分组头**、**主区没有列表布局**。
+    #[test]
+    fn m5_only_three_layouts_exist_and_masonry_has_no_date_headers() {
+        use picasa_core::ViewMode;
+        let all = [ViewMode::Grid, ViewMode::MasonryV, ViewMode::MasonryH];
+        assert_eq!(all.len(), 3, "实装布局必须只有三种");
+        for m in all {
+            assert!(
+                !format!("{m:?}").to_ascii_lowercase().contains("list"),
+                "不许出现列表布局：{m:?}"
+            );
+        }
+        let photos = same_day(6);
+        for mode in [ViewMode::MasonryV, ViewMode::MasonryH] {
+            // 即使调用方误传 has_headers = true，瀑布流也不该画日期组头
+            let layout = GridLayout::build(&photos, 1000.0, 128.0, true, mode);
+            assert_eq!(layout.mode, mode);
+            assert!(
+                !layout.has_headers,
+                "{mode:?} 不许画日期分组头（即使上游传了 true）"
+            );
+            assert_eq!(layout.groups.len(), 1, "{mode:?} 应只有一个合成组");
+            assert!(layout.groups[0].title.is_empty(), "{mode:?} 组头无文字");
+        }
+        // 方格 + 拍摄日期分组：才有组头，且标题是日期格式
+        let grid = GridLayout::build(&photos, 1000.0, 128.0, true, ViewMode::Grid);
+        assert!(grid.has_headers, "方格 + 日期排序必须画组头");
+        assert!(
+            grid.groups[0].title.contains('年') && grid.groups[0].title.contains('日'),
+            "组头标题应是 YYYY年MM月DD日：{}",
+            grid.groups[0].title
+        );
+    }
+
+    /// `AC-GR-MARQUEE` / `M5-GR-03`：框选边缘自动滚的梯度与上限保持不变。
+    #[test]
+    fn m5_marquee_edge_scroll_ramp_is_still_wired() {
+        let clip = Rect::from_min_max(pos2(100.0, 100.0), pos2(900.0, 700.0));
+        let (edge, max_step) = (MARQUEE_EDGE_PX, MARQUEE_MAX_STEP);
+        assert_eq!(
+            marquee_edge_delta(clip.center(), clip, edge, max_step),
+            Vec2::ZERO
+        );
+        // 符号按 egui 0.37 约定：y 负 = 往下看。
+        let near = marquee_edge_delta(pos2(500.0, 699.0), clip, edge, max_step);
+        let far = marquee_edge_delta(pos2(500.0, 680.0), clip, edge, max_step);
+        assert!(near.y < 0.0, "贴下边应向下滚（y 负）：{near:?}");
+        assert!(
+            near.y <= far.y,
+            "越贴下边滚得越急：{near:?} vs {far:?}"
+        );
+        assert!(near.y.abs() <= max_step, "单帧滚动必须有上限");
+        // 贴上边 → 向上滚（y 正）
+        let top = marquee_edge_delta(pos2(500.0, 101.0), clip, edge, max_step);
+        assert!(top.y > 0.0, "贴上边应向上滚（y 正）：{top:?}");
+        // 视口外不滚（避免「把指针甩出去就永久滚动」）
+        assert_eq!(
+            marquee_edge_delta(pos2(500.0, 5000.0), clip, edge, max_step),
+            Vec2::ZERO
+        );
+    }
+
+    /// `AC-GR-01` / `M5-GR-13`：保留虚拟滚动——巨大单分组一帧也只覆盖视口。
+    #[test]
+    fn m5_virtual_scroll_range_stays_bounded_for_a_huge_dataset() {
+        let photos: Vec<PhotoRow> = (1..=5000)
+            .map(|i| photo(i, 1_300_000_000 + i))
+            .collect();
+        let layout = GridLayout::build(&photos, 1280.0, 96.0, true, ViewMode::Grid);
+        assert_eq!(layout.total_count(), 5000);
+        let (first, last) = layout.visible_index_range(Rect::from_min_max(
+            pos2(0.0, 0.0),
+            pos2(1280.0, 800.0),
+        ));
+        assert!(first <= 1, "应从第 0 张开始：{first}");
+        assert!(
+            last - first < 200,
+            "虚拟滚动失效：一帧算了 {} 格",
+            last - first
+        );
+        let mid = layout.total_h / 2.0;
+        let (f2, l2) = layout.visible_index_range(Rect::from_min_max(
+            pos2(0.0, mid),
+            pos2(1280.0, mid + 800.0),
+        ));
+        assert!(l2 - f2 < 200, "中段虚拟滚动失效：{}", l2 - f2);
     }
 
     /// `M5-TB-10`：极小尺寸（约 22–64 px）收紧缩略图圆角，避免看起来像胶囊；

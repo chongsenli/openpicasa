@@ -533,6 +533,37 @@ mod tests {
         assert_eq!(group_at_offset(&groups, 3).map(|g| g.label.as_str()), Some("b"));
     }
 
+    /// `M5-SF-13` / `AC-SORT-THUMBS`：日期组头格式固定 `YYYY年MM月DD日`（补零）。
+    ///
+    /// 这条与 `library::group_by_day` 必须一字不差，否则「组头说 2011年5月13日、
+    /// 栅格说是另一天」这类偏差会重新长出来。
+    #[test]
+    fn date_group_label_is_zero_padded_year_month_day() {
+        // 2011-05-13 00:00:00 UTC 的某个本地零点（只断言格式，不断言具体时区）
+        let label = day_label(1_305_000_000);
+        let re_ok = label.len() == "2011年05月13日".len()
+            && label.ends_with("日")
+            && label.contains('年')
+            && label.contains('月');
+        assert!(re_ok, "组头格式不对：{label}");
+        let (y, rest) = label.split_once('年').expect("有「年」");
+        assert_eq!(y.chars().count(), 4, "年份 4 位：{label}");
+        let (m, rest) = rest.split_once('月').expect("有「月」");
+        assert_eq!(m.chars().count(), 2, "月份必须补零到 2 位：{label}");
+        let d = rest.trim_end_matches('日');
+        assert_eq!(d.chars().count(), 2, "日必须补零到 2 位：{label}");
+        // 与 library 侧同一格式
+        use chrono::TimeZone;
+        assert_eq!(
+            label,
+            chrono::Local
+                .timestamp_opt(1_305_000_000, 0)
+                .single()
+                .map(|dt| dt.format("%Y年%m月%d日").to_string())
+                .unwrap()
+        );
+    }
+
     #[test]
     fn empty_groups_yield_none() {
         assert_eq!(group_of(&[], 0), None);

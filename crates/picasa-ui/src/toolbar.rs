@@ -100,12 +100,35 @@ pub enum FilterPanelAction {
 /// 返回 `(可能的动作, 草稿标签回写)`——标签输入框的内容要跨帧保存在 App 里。
 ///
 /// M3.1 起观感改为 macOS 弹层（白卡、圆角 8、柔影），交互不变。
+/// 文件大小上下界（KB → 字节）。两格都空 = 不设这一维。
+///
+/// `M5-SF-10`：解析失败时下界当 0、上界极大；**但「两格都空」不是解析失败**，
+/// 它表示用户没填这一维，不能因此造出一个「全通过」的筛选（那会让筛选按钮
+/// 误亮、空库空态误报「当前搜索或筛选没有结果」）。
+pub fn parse_size_bounds(lo_text: &str, hi_text: &str) -> Option<(i64, i64)> {
+    let lo_text = lo_text.trim();
+    let hi_text = hi_text.trim();
+    if lo_text.is_empty() && hi_text.is_empty() {
+        return None;
+    }
+    let lo = lo_text.parse::<i64>().unwrap_or(0).max(0) * 1024;
+    let hi = hi_text.parse::<i64>().unwrap_or(i64::MAX / 1024) * 1024;
+    Some((lo, hi))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn filter_menu(
     ui: &mut Ui,
     at: Pos2,
     theme: &crate::theme::Theme,
     current: &picasa_db::PhotoFilter,
     draft_tag: &mut String,
+    // `M5-SF-08` / `M5-SF-10`：相机 / 镜头 / 文件大小必须点「应用」，
+    // 所以草稿要跨帧存在 App 里；每帧从 `current` 重建输入框会让用户一个字都打不进去。
+    draft_camera: &mut String,
+    draft_lens: &mut String,
+    draft_size_lo: &mut String,
+    draft_size_hi: &mut String,
 ) -> (Option<FilterPanelAction>, String) {
     let mut action = None;
     let mut tag_out = draft_tag.clone();
@@ -230,13 +253,14 @@ pub fn filter_menu(
                     ui.separator();
                     ui.label("相机 / 镜头");
                     ui.horizontal(|ui| {
-                        let mut cam = draft.camera.clone().unwrap_or_default();
-                        ui.add(egui::TextEdit::singleline(&mut cam).hint_text("相机型号").desired_width(90.0));
-                        draft.camera = (!cam.trim().is_empty()).then(|| cam.trim().to_string());
-                        let mut lens = draft.lens.clone().unwrap_or_default();
-                        ui.add(egui::TextEdit::singleline(&mut lens).hint_text("镜头").desired_width(80.0));
-                        draft.lens = (!lens.trim().is_empty()).then(|| lens.trim().to_string());
+                        // M5-SF-08：输入只改草稿，**点「应用」才生效**。
+                        ui.add(egui::TextEdit::singleline(draft_camera).hint_text("相机型号").desired_width(90.0));
+                        ui.add(egui::TextEdit::singleline(draft_lens).hint_text("镜头").desired_width(80.0));
                         if ui.button("应用").clicked() {
+                            let cam = draft_camera.trim();
+                            draft.camera = (!cam.is_empty()).then(|| cam.to_string());
+                            let lens = draft_lens.trim();
+                            draft.lens = (!lens.is_empty()).then(|| lens.to_string());
                             action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
                         }
                     });
@@ -254,21 +278,11 @@ pub fn filter_menu(
                     });
                     ui.horizontal(|ui| {
                         ui.label("文件大小 (KB)");
-                        let mut lo = draft
-                            .size_bytes
-                            .map(|(a, _)| (a / 1024).to_string())
-                            .unwrap_or_default();
-                        let mut hi = draft
-                            .size_bytes
-                            .map(|(_, b)| (b / 1024).to_string())
-                            .unwrap_or_default();
-                        ui.add(egui::TextEdit::singleline(&mut lo).desired_width(48.0));
+                        ui.add(egui::TextEdit::singleline(draft_size_lo).desired_width(48.0));
                         ui.label("～");
-                        ui.add(egui::TextEdit::singleline(&mut hi).desired_width(48.0));
+                        ui.add(egui::TextEdit::singleline(draft_size_hi).desired_width(48.0));
                         if ui.button("应用").clicked() {
-                            let a: i64 = lo.parse::<i64>().unwrap_or(0) * 1024;
-                            let b: i64 = hi.parse::<i64>().unwrap_or(i64::MAX / 1024) * 1024;
-                            draft.size_bytes = (a > 0 || b < i64::MAX).then_some((a, b));
+                            draft.size_bytes = parse_size_bounds(draft_size_lo, draft_size_hi);
                             action = Some(FilterPanelAction::Apply(Box::new(draft.clone())));
                         }
                     });
@@ -284,4 +298,47 @@ pub fn filter_menu(
                 });
         });
     (action, tag_out)
+}
+
+#[cfg(test)]
+mod m5r5_filter_tests {
+    use super::*;
+
+    /// `M5-SF-10`：文件大小上下界——解析失败下界当 0、上界极大；
+    /// 两格都空 = 这一维不参与筛选，不能造出一个「全通过」的条件。
+    #[test]
+    fn m5_size_bounds_follow_the_spec_and_empty_is_not_a_filter() {
+        assert_eq!(parse_size_bounds("", ""), None, "两格都空不该变成筛选");
+        assert_eq!(parse_size_bounds("  ", "  "), None);
+        assert_eq!(parse_size_bounds("100", "2048"), Some((100 * 1024, 2048 * 1024)));
+        // 解析失败：下界 0、上界极大（不是整条丢掉）
+        let (lo, hi) = parse_size_bounds("abc", "xyz").expect("有输入就算一维");
+        assert_eq!(lo, 0);
+        assert!(hi > 10_000_000_000, "上界应取「极大」，实际 {hi}");
+        // 只填下界：上界极大
+        let (lo, hi) = parse_size_bounds("10", "").expect("只填下界也是一维");
+        assert_eq!(lo, 10 * 1024);
+        assert!(hi > 10_000_000_000);
+        // 负数按 0 处理
+        let (lo, _) = parse_size_bounds("-5", "").unwrap();
+        assert_eq!(lo, 0);
+    }
+
+    /// `M5-SF-08`：相机 / 镜头输入必须点「应用」——纯函数层面的口径是
+    /// 「草稿文本 → 筛选字段」只在应用时发生。这里锁住 trim 与空串语义，
+    /// 防止有人把空白字符串当成「筛空白相机」写进 `PhotoFilter`。
+    #[test]
+    fn m5_camera_lens_drafts_only_become_filters_on_apply() {
+        let mut draft = picasa_db::PhotoFilter::default();
+        for raw in ["  ", "\t", ""] {
+            let t = raw.trim();
+            draft.camera = (!t.is_empty()).then(|| t.to_string());
+            draft.lens = (!t.is_empty()).then(|| t.to_string());
+            assert!(draft.camera.is_none(), "空白相机不该进筛选");
+            assert!(draft.lens.is_none(), "空白镜头不该进筛选");
+        }
+        let t = "  Canon R5 ".trim();
+        draft.camera = (!t.is_empty()).then(|| t.to_string());
+        assert_eq!(draft.camera.as_deref(), Some("Canon R5"));
+    }
 }
