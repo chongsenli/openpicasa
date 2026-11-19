@@ -1955,10 +1955,11 @@ fn draw_empty_state(
     // `M5-SH-05`：无结果时给一条出路。只在这里出现——空库（Library）不画，
     // 那时该做的是「导入」，不是「清除筛选」。
     if reason == EmptyReason::NoMatches {
-        let btn = Rect::from_center_size(
-            pos2(full.center().x, full.center().y + 34.0),
-            vec2(112.0, 26.0),
-        );
+        // 几何防御：窗口很矮时（最小 900×600，但主区还可能被侧栏/底栏压缩），
+        // 按钮不能掉到 `full` 之外——否则用户看得到文字却点不到出路。
+        let size = vec2(112.0, 26.0);
+        let y = (full.center().y + 34.0).min(full.bottom() - size.y / 2.0 - 6.0);
+        let btn = Rect::from_center_size(pos2(full.center().x, y), size);
         let resp = ui.put(
             btn,
             egui::Button::new(
@@ -2082,6 +2083,50 @@ mod tests {
         (1..=n as i64)
             .map(|i| photo(i, 1_300_000_000 + i))
             .collect()
+    }
+
+    /// `AC-SH-01` / `M5-SH-05`：无结果空态的「清除全部筛选」是一个**真的按钮**，
+    /// 且能在最矮的主区里点到（几何不许掉出视口）。
+    #[test]
+    fn m5_empty_no_match_state_has_a_clickable_clear_button() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, picasa_core::Appearance::Light);
+        let theme = Theme::for_appearance(picasa_core::Appearance::Light);
+        let mut cache = TextureCache::default();
+        for height in [600.0_f32, 820.0] {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(1200.0, height),
+                )),
+                max_texture_side: Some(2048),
+                ..Default::default()
+            };
+            let mut clicked = false;
+            let out = ctx.run_ui(input, |ui| {
+                let full = ui.available_rect_before_wrap();
+                clicked = draw_empty_state(
+                    ui,
+                    full,
+                    &theme,
+                    &mut cache,
+                    EmptyReason::NoMatches,
+                );
+                // 按钮矩形必须在主区之内（用同一算式复核）
+                let size = vec2(112.0, 26.0);
+                let y = (full.center().y + 34.0).min(full.bottom() - size.y / 2.0 - 6.0);
+                let btn = Rect::from_center_size(pos2(full.center().x, y), size);
+                assert!(
+                    full.contains_rect(btn),
+                    "{height}px：按钮掉出主区 btn={btn:?} full={full:?}"
+                );
+            });
+            assert!(!clicked, "没点按钮时不该上报「清除筛选」");
+            out.drop_without_applying_deltas();
+        }
+        // 空库态没有这条出路（不该把用户往「清筛选」引）
+        let library = empty_grid_lines(EmptyReason::Library);
+        assert!(!library.1.contains("清除"));
     }
 
     /// `M5-GR-10` / `M5-GR-11` / `M5-GR-12`：三种占位格的口径。
