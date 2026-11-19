@@ -324,6 +324,78 @@ mod m5r5_filter_tests {
         assert_eq!(lo, 0);
     }
 
+    /// `XX-06` / `M5-SF-12`：筛选按钮的悬停文案里有「日期」，但**面板不得长出
+    /// 日期控件**——日期的唯一 UI 是侧栏年份。这里用无窗口后端把面板跑一帧，
+    /// 收集本帧所有文本，逐条确认没有日期输入 / 年份选择。
+    #[test]
+    fn m5_filter_panel_never_grows_a_date_control() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, picasa_core::Appearance::Light);
+        let mut tag = String::new();
+        let mut cam = String::new();
+        let mut lens = String::new();
+        let mut lo = String::new();
+        let mut hi = String::new();
+        let mut texts: Vec<String> = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 820.0),
+                )),
+                max_texture_side: Some(2048),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                let theme = crate::theme::Theme::for_appearance(picasa_core::Appearance::Light);
+                let (_a, _t) = filter_menu(
+                    ui,
+                    egui::pos2(500.0, 100.0),
+                    &theme,
+                    &picasa_db::PhotoFilter::default(),
+                    &mut tag,
+                    &mut cam,
+                    &mut lens,
+                    &mut lo,
+                    &mut hi,
+                );
+            });
+            let mut found = Vec::new();
+            fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Vec(v) => {
+                        for s in v {
+                            walk(s, out);
+                        }
+                    }
+                    egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+                    _ => {}
+                }
+            }
+            for c in &out.shapes {
+                walk(&c.shape, &mut found);
+            }
+            texts = found;
+            out.drop_without_applying_deltas();
+        }
+        let joined = texts.join(" | ");
+        // 注意「缺拍摄时间」是**复选框**、不是日期控件，所以不能简单禁「拍摄时间」。
+        // 这里禁的是日期选择 / 年份 / 评分 / 人物 / 颜色这些「面板不该长的维度」。
+        for banned in ["日期", "年", "月", "日", "评分", "星级", "人物", "颜色"] {
+            assert!(
+                !texts.iter().any(|t| t.contains(banned)),
+                "筛选面板不该出现「{banned}」：{joined}"
+            );
+        }
+        // 该有的维度都在
+        for need in ["只看收藏", "类型", "尺寸", "标签", "相机", "镜头", "缺拍摄时间", "缺元数据", "文件大小", "清除全部筛选"] {
+            assert!(
+                texts.iter().any(|t| t.contains(need)),
+                "筛选面板缺「{need}」：{joined}"
+            );
+        }
+    }
+
     /// `M5-SF-08`：相机 / 镜头输入必须点「应用」——纯函数层面的口径是
     /// 「草稿文本 → 筛选字段」只在应用时发生。这里锁住 trim 与空串语义，
     /// 防止有人把空白字符串当成「筛空白相机」写进 `PhotoFilter`。

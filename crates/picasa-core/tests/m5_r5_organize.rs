@@ -61,7 +61,7 @@ fn ids(lib: &Library) -> Vec<i64> {
     lib.photos.iter().map(|p| p.id).collect()
 }
 
-fn row<'a>(lib: &'a Library, id: i64) -> &'a PhotoRow {
+fn row(lib: &Library, id: i64) -> &PhotoRow {
     lib.photos.iter().find(|p| p.id == id).expect("照片在栅格里")
 }
 

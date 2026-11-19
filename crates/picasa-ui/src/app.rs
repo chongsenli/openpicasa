@@ -2785,13 +2785,11 @@ impl OpenPicasaApp {
             .exact_size(Metrics::TOPBAR_H)
             .frame(egui::Frame::new().fill(theme.toolbar_bg))
             .show(ui, |ui| {
-                let filter_active = self.lib.filter.as_ref().is_some_and(|f| {
-                    f.starred_only
-                        || f.tag.is_some()
-                        || f.taken_range.is_some()
-                        || f.size_class.is_some()
-                        || !f.formats.is_empty()
-                });
+                // `M5-SF-03`：面板里任一维度在收窄结果，按钮就要有激活描边。
+                // 判据统一走 `PhotoFilter::is_active()`——这里原先手抄了一份
+                // 只含五个维度的清单，相机 / 镜头 / 文件大小 / 缺元数据 / 相册
+                // 设置后按钮不会亮，看起来像「筛选没生效」。
+                let filter_active = self.lib.filter.as_ref().is_some_and(|f| f.is_active());
                 // §7.2：顶栏只放操作/排布/搜索，不再放大号标题。
                 // 标题与副标题已移到中区左侧（文件树之上）。
                 // M5-TB-10：缩略图 −/+ 已从顶栏移除，尺寸只在底栏最右的滑块上。
@@ -4688,7 +4686,7 @@ impl OpenPicasaApp {
 
         // 错误横幅（`AC-SH-ERROR`）：查看器内**不叠**这条红条——它会压在原图上，
         // 而查看器自己的失败反馈走信息栏 / toast。库存错误等退出查看器后仍然可见。
-        if self.viewer.is_none()
+        if error_banner_visible(self.viewer.is_some(), self.lib.last_error.as_deref())
             && let Some(err) = self.lib.last_error.clone()
         {
             egui::Area::new(ui.scope_id().with("error-banner"))
@@ -5457,6 +5455,115 @@ impl eframe::App for OpenPicasaApp {
 /// `folder_ctx` 与旧 `photo_ctx` 都依赖它；M4.1 照片菜单退役后仍被 folder_ctx 使用。
 fn context_menu_open_frame_exempt(opened_frame: u64, current_frame: u64) -> bool {
     opened_frame == current_frame
+}
+
+/// 库存错误红条该不该画（`AC-SH-ERROR` / `M5-SH-06`）。
+///
+/// 查看器内**不叠**这条红条：它会压在原图上，而查看器自己的失败反馈走信息栏 /
+/// toast。库存错误等退出查看器后仍然可见——不是丢弃，只是延后显示。
+pub fn error_banner_visible(viewer_open: bool, last_error: Option<&str>) -> bool {
+    !viewer_open && last_error.is_some_and(|e| !e.trim().is_empty())
+}
+
+/// 文件夹右键菜单的可见项（`AC-SB-ROOTCTX` / `M5-SB-08`～`12`）。
+///
+/// 抽成纯函数是为了让「根上有什么、子文件夹上有什么」能被单测逐项锁定：
+/// 根上**不能**有「关闭此文件夹（不再显示）」，子文件夹上**不能**有
+/// 「关闭关注文件夹（保留索引）」与「从图库移除」——两条路径的作用范围不同，
+/// 混在一起就会让用户在错误的层级执行危险动作。
+pub fn folder_ctx_items(is_root: bool) -> Vec<&'static str> {
+    let mut items = vec!["在 Finder 中打开", "刷新此文件夹"];
+    if is_root {
+        items.push("关闭关注文件夹（保留索引）");
+        items.push(crate::copy_text::REMOVE_ROOT_LABEL);
+    } else {
+        items.push("关闭此文件夹（不再显示）");
+    }
+    items
+}
+
+#[cfg(test)]
+mod m5r5_tests {
+    use super::{error_banner_visible, folder_ctx_items, library_scope, viewer_scope};
+
+    /// `AC-SH-ERROR`：`last_error` 有值 → 图库可见可关；查看器内不叠加。
+    #[test]
+    fn error_banner_shows_in_the_library_but_never_over_the_viewer() {
+        assert!(error_banner_visible(false, Some("索引库写入失败")));
+        assert!(
+            !error_banner_visible(true, Some("索引库写入失败")),
+            "查看器内不许让红条压住原图"
+        );
+        // 没有错误 / 空串 → 不画
+        assert!(!error_banner_visible(false, None));
+        assert!(!error_banner_visible(false, Some("   ")));
+        assert!(!error_banner_visible(true, None));
+    }
+
+    /// `AC-SB-ROOTCTX`：根与子文件夹的右键项是**两套**，不能混。
+    #[test]
+    fn folder_context_menu_splits_root_and_child_actions() {
+        let root = folder_ctx_items(true);
+        assert!(root.contains(&"在 Finder 中打开"), "{root:?}");
+        assert!(root.contains(&"刷新此文件夹"), "{root:?}");
+        assert!(
+            root.contains(&"关闭关注文件夹（保留索引）"),
+            "根上必须有「关闭关注文件夹」：{root:?}"
+        );
+        assert!(
+            root.iter().any(|i| i.contains("从图库移除")
+                && i.contains("删索引") && i.contains("不删文件")),
+            "「从图库移除」必须写明只删索引：{root:?}"
+        );
+        assert!(
+            !root.contains(&"关闭此文件夹（不再显示）"),
+            "根上不该出现子文件夹的那条关闭：{root:?}"
+        );
+
+        let child = folder_ctx_items(false);
+        assert!(child.contains(&"在 Finder 中打开"), "{child:?}");
+        assert!(child.contains(&"刷新此文件夹"), "{child:?}");
+        assert!(
+            child.contains(&"关闭此文件夹（不再显示）"),
+            "子文件夹上必须有这条：{child:?}"
+        );
+        assert!(
+            !child.contains(&"关闭关注文件夹（保留索引）"),
+            "子文件夹上不该出现根级关闭：{child:?}"
+        );
+        assert!(
+            !child.iter().any(|i| i.contains("从图库移除")),
+            "子文件夹上不该出现根级移除：{child:?}"
+        );
+        // 两条路径的文案必须能区分「保留索引」与「不再显示」
+        assert_ne!(root[2], child[2]);
+    }
+
+    /// `AC-FS-CONFIRM` / `M5-FS-01` / `M5-VW-15`：废纸篓确认集合 = 执行集合。
+    ///
+    /// - 图库：执行整个选择集；
+    /// - 查看器：选择集非空时执行整个选择集（不是恒为 1），为空才只处理当前张。
+    #[test]
+    fn trash_scope_always_matches_the_confirmed_set() {
+        // 图库：3 张就是 3 张
+        let sel = vec![11, 22, 33];
+        let scope = library_scope(&sel);
+        assert_eq!(scope.ids(), vec![11, 22, 33]);
+
+        // 查看器：选择集 3 张、当前可见 1 张 → 执行 3 张（确认也写 3）
+        let scope = viewer_scope(&sel, Some(22));
+        assert_eq!(scope.ids(), vec![11, 22, 33], "不能退化成只处理当前张");
+        assert_eq!(scope.len(), 3);
+
+        // 选择集为空 → 只处理当前可见这一张，且确认写 1
+        let scope = viewer_scope(&[], Some(22));
+        assert_eq!(scope.ids(), vec![22]);
+        assert_eq!(scope.len(), 1);
+
+        // 都没有 → 空范围（不弹确认）
+        assert!(library_scope(&[]).is_empty());
+        assert!(viewer_scope(&[], None).is_empty());
+    }
 }
 
 #[cfg(test)]

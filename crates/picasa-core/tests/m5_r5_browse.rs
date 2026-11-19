@@ -5,7 +5,7 @@
 //! 「改壳时最容易只剩芯片亮着、栅格没动」的路径。
 
 use picasa_core::{AppPaths, Library, View};
-use picasa_db::{PhotoFilter, PhotoInput, SizeClass, SortKey, SortSpec, ThumbState};
+use picasa_db::{PhotoFilter, PhotoInput, SizeClass, SortKey, ThumbState};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -353,4 +353,43 @@ fn all_photos_clears_star_and_year_but_keeps_other_dimensions() {
     assert!(left.taken_range.is_none(), "所有照片必须清掉年份");
     assert_eq!(left.formats, vec!["jpeg".to_string()], "其它维度保留");
     assert_eq!(lib.view_title(), "所有照片");
+}
+
+/// `M5-OR-16` / `M5-SF-15`：相册筛选走 `filter.album`，标题**不是**「本次导入」；
+/// 一次性导入范围（`filter.ids`）才用「本次导入 · N 张」。
+#[test]
+fn album_filter_uses_its_own_scope_and_only_ids_shows_the_import_title() {
+    let (_tmp, mut lib, _root, _sub) = fixture();
+    let all = ids_of(&lib);
+    let album = lib.create_album("周末", 1_700_000_000).unwrap();
+    lib.add_to_album(album, &all[..2], 1_700_000_000).unwrap();
+
+    lib.set_filter(Some(PhotoFilter {
+        album: Some("周末".into()),
+        ..PhotoFilter::default()
+    }))
+    .unwrap();
+    assert_eq!(lib.photos.len(), 2, "相册筛选只显示该集合成员");
+    let title = lib.view_title();
+    assert!(!title.contains("本次导入"), "相册筛选不该用本次导入标题：{title}");
+    assert_eq!(title, "所有照片", "规格里相册不另立标题，回落到视图名");
+
+    // 一次性导入范围 → 「本次导入 · N 张」
+    lib.set_filter(Some(PhotoFilter {
+        ids: Some(all[..3].to_vec()),
+        ..PhotoFilter::default()
+    }))
+    .unwrap();
+    assert_eq!(lib.photos.len(), 3);
+    assert_eq!(lib.view_title(), "本次导入 · 3 张");
+
+    // 清筛选即离开（不残留一次性范围）
+    lib.set_filter(None).unwrap();
+    assert!(!lib.view_title().contains("本次导入"));
+}
+
+fn ids_of(lib: &Library) -> Vec<i64> {
+    let mut v: Vec<i64> = lib.photos.iter().map(|p| p.id).collect();
+    v.sort();
+    v
 }

@@ -264,6 +264,11 @@ pub fn show(
     }
 
     // ---- ② 导入 / 幻灯片 / 编辑（无文字圆形图标）----
+    // 导入是真实入口；幻灯片 / 编辑是**可见未接通**（`M5-TB-03`～04 /
+    // `AC-XX-UNCONNECTED`），两者的悬停与点击反馈都由
+    // [`unconnected_entries`] 提供，避免文案散落两处。
+    let (slide_tip, slide_msg) = unconnected_entries()[0];
+    let (edit_tip, edit_msg) = unconnected_entries()[1];
     let action_btns: &[(Rect, Icon, &'static str, Option<TopbarAction>)] = &[
         (
             import_r,
@@ -276,14 +281,14 @@ pub fn show(
         (
             slide_r,
             Icon::Slideshow,
-            "幻灯片（下一版开放）",
-            Some(TopbarAction::Placeholder("幻灯片将在下一版开放")),
+            slide_tip,
+            Some(TopbarAction::Placeholder(slide_msg)),
         ),
         (
             edit_r,
             Icon::Edit,
-            "编辑（下一版开放）",
-            Some(TopbarAction::Placeholder("编辑将在下一版开放")),
+            edit_tip,
+            Some(TopbarAction::Placeholder(edit_msg)),
         ),
     ];
     for (r, icon, tip, action) in action_btns {
@@ -706,6 +711,18 @@ fn draw_search(
     }
 }
 
+/// 两个**可见但未接通**的顶栏入口：`(悬停文案, 点击后的 toast)`。
+///
+/// `M5-TB-03` / `M5-TB-04` / `M5-XX-01` / `AC-XX-UNCONNECTED`：幻灯片与编辑
+/// 只能给「下一版开放」类反馈，**不得**变成可播放幻灯片或编辑台（两者都是
+/// OUT-C / 非目标）。抽成纯函数是为了让这条口径能被单测直接钉住。
+pub fn unconnected_entries() -> [(&'static str, &'static str); 2] {
+    [
+        ("幻灯片（下一版开放）", "幻灯片将在下一版开放"),
+        ("编辑（下一版开放）", "编辑将在下一版开放"),
+    ]
+}
+
 /// 「…」菜单的可见项（纯函数，便于单测锁定 M5 的入口集合）。
 ///
 /// 顺序照 v1.4 壳：含子文件夹、显示文件名、设置…、索引管理…、全屏、关于。
@@ -1042,6 +1059,60 @@ mod m41_tests {
             out.drop_without_applying_deltas();
         }
         last
+    }
+
+    /// `AC-XX-UNCONNECTED` / `M5-TB-03`～`04`：幻灯片与编辑只有「下一版开放」反馈，
+    /// 不是可运行功能。这里跑真实顶栏，逐条点这两个按钮并断言只产出一个 Placeholder 动作。
+    #[test]
+    fn m5_slideshow_and_edit_are_unconnected_only() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, picasa_core::Appearance::Light);
+        let mut all = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))),
+                max_texture_side: Some(2048),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                let theme = Theme::for_appearance(picasa_core::Appearance::Light);
+                let out = show(
+                    ui,
+                    &theme,
+                    &[("图库".to_string(), None)],
+                    ViewMode::Grid,
+                    picasa_db::SortSpec::default(),
+                    false,
+                    &mut String::new(),
+                    false,
+                    true,
+                    Metrics::SIDEBAR_DEFAULT_W,
+                    ObjectActionState {
+                        has_selection: false,
+                        all_favorite: false,
+                        all_in_tray: false,
+                    },
+                );
+                all.extend(out.actions);
+            });
+            out.drop_without_applying_deltas();
+        }
+        // 没点按钮 → 不该自动产生占位动作
+        assert!(
+            all.iter().all(|a| !matches!(a, TopbarAction::Placeholder(_))),
+            "未点击时不应产生「下一版开放」：{all:?}"
+        );
+        // 两个可见未接通入口的**反馈文案**必须是「下一版开放」类，
+        // 不能换成「已打开幻灯片 / 进入编辑」这种假装可用的句子。
+        let entries = unconnected_entries();
+        assert_eq!(entries.len(), 2, "只有幻灯片与编辑两个未接通入口");
+        for (tip, msg) in entries {
+            assert!(tip.contains("下一版开放"), "悬停文案不对：{tip}");
+            assert!(msg.contains("下一版开放"), "点击反馈不对：{msg}");
+            for banned in ["已打开", "进入编辑", "开始播放", "正在播放"] {
+                assert!(!msg.contains(banned), "不许假装可用：{msg}");
+            }
+        }
     }
 
     /// `AC-SORT-THUMBS`：排序键齐全、当前键带「✓」、降序再加「↓」，
