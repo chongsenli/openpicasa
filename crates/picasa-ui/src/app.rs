@@ -656,7 +656,10 @@ impl OpenPicasaApp {
         let input = picasa_core::SnapshotInput {
             seq: self.mgmt.seq + 1,
             live: &live,
-            paused_by_system: self.index.is_paused(),
+            // `M5-IDX-03`：这里要的是**系统**暂停（休眠 / 低电量），不是用户在
+            // 「索引进度」里按的全局暂停。后者有「继续索引」，把它说成「恢复由系统
+            // 事件自动发生」就是撒谎 —— 所以取进度板上带 `system_paused` 的任务。
+            paused_by_system: self.progress.snapshot().paused(),
             offline: &self.offline_probe,
             watch: &watch,
             prev_dataset_version: self.mgmt.dataset_version,
@@ -1609,10 +1612,8 @@ impl OpenPicasaApp {
             self.lib.toast = Some((e, 4.0));
             return;
         }
-        let name = format!(
-            "openpicasa-diag-{}.json",
-            chrono::Utc::now().format("%Y%m%d-%H%M%S")
-        );
+        // 文件名与内容同源（`mgmt::diag_filename`）：脱敏 JSON，不是压缩包。
+        let name = picasa_core::mgmt::diag_filename(chrono::Utc::now().timestamp());
         let target = dir.join(name);
         // M4.3 IDX-17：导出的是脱敏后的任务摘要与失败列表 —— 绝不写任何绝对
         // 路径或用户照片名。scope / 失败路径都经 anonymize_path 哈希；取消原因、

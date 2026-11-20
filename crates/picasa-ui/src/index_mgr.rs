@@ -654,7 +654,16 @@ pub fn relative_time(at: Option<i64>, now: i64) -> String {
 /// ⚠️ **没有 ETA**，也不许加：`TC-IDX-003` 是永久禁令。
 /// 分母在扫描期间一直在漂，任何 ETA 都是撒谎。
 pub fn task_progress_text(t: &TaskView) -> String {
-    format!("已处理 {} 张 · 已用 {}", t.discovered, t.elapsed_text)
+    // 「已处理」= 真正处理完的张数（`completed + failed`，扫描阶段退回已入库数），
+    // **不是** `discovered`——生成阶段它是分母，写进这里就等于把总数摊在界面上
+    // （`M5-IDX-03` / `IDX-A-ANTI-V12`）。
+    let processed = t.completed.saturating_add(t.failed);
+    let processed = if t.running && t.stage == "扫描中" {
+        t.discovered.max(processed)
+    } else {
+        processed
+    };
+    format!("已处理 {processed} 张 · 已用 {}", t.elapsed_text)
 }
 
 /// 结束摘要（M4.3 IDX-17）：完成 / 跳过 / 失败，以及取消原因。
@@ -721,6 +730,72 @@ fn delete_index_button(ui: &mut Ui, id: i64, actions: &mut Vec<MgrAction>) {
     }
 }
 
+/// 「关注文件夹」每张卡片的按钮表（`IDX-A-BTNS` / `IDX-A-REMOVED` / `AC-IDX-ROOTS`）。
+///
+/// 四种状态四套按钮，**不能互相借**：
+/// * 离线：只有「连接后刷新」「删除索引」——其余按钮点下去必然失败；
+/// * 索引已移除：只有「重新索引（恢复）」「在 Finder 中显示」「删除索引」，
+///   不画监视 / 刷新 / 强制重扫 / 全量重建 / 关闭；
+/// * 已关闭：在线根那套，但「关闭」换成「重新打开」；
+/// * 正常：刷新 / 重新索引 / 强制重扫 / 全量重建 / 关闭 / 在 Finder 中显示。
+///
+/// 「删除索引」在任何状态都在列表末尾——包括最需要它的「索引已移除」。
+/// 抽成纯函数是为了让「四套按钮不一样」成为可判定的结构，而不是散在绘制闭包里。
+pub fn root_buttons(r: &RootView) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    if r.index_removed {
+        out.extend(["重新索引（恢复）", "在 Finder 中显示", "删除索引"]);
+        return out;
+    }
+    if r.offline {
+        out.extend(["连接后刷新", "删除索引"]);
+        return out;
+    }
+    out.extend(["刷新", "重新索引", "强制重扫", "全量重建"]);
+    out.push(if r.closed { "重新打开" } else { "关闭" });
+    out.push("在 Finder 中显示");
+    out.push("删除索引");
+    out
+}
+
+/// 按 [`root_buttons`] 画一颗根的按钮组（四个状态共用一份实现，避免走样）。
+fn draw_root_buttons(ui: &mut Ui, r: &RootView, actions: &mut Vec<MgrAction>) {
+    ui.horizontal(|ui| {
+        for label in root_buttons(r) {
+            // 删除索引有统一的悬停承诺，走唯一构造点（它要弹二次确认框）。
+            if label == "删除索引" {
+                if delete_index_available(r) {
+                    delete_index_button(ui, r.id, actions);
+                }
+                continue;
+            }
+            if !ui.button(label).clicked() {
+                continue;
+            }
+            if let Some(a) = root_button_action(label, r.id) {
+                actions.push(a);
+            }
+        }
+    });
+}
+
+/// 根卡片按钮 → 动作。`None` = 这个字不是可执行按钮（例如「删除索引」走确认框）。
+///
+/// 与 [`root_buttons`] 成对：按钮表里出现的每一个字都必须能映射到动作，
+/// 否则就是一颗点了没反应的假按钮。
+pub fn root_button_action(label: &str, root_id: i64) -> Option<MgrAction> {
+    Some(match label {
+        "刷新" | "连接后刷新" => MgrAction::RefreshRoot(root_id),
+        "重新索引" | "重新索引（恢复）" => MgrAction::ReindexRoot(root_id),
+        "强制重扫" => MgrAction::ForceRescan(root_id),
+        "全量重建" => MgrAction::RequestRebuild(root_id),
+        "关闭" => MgrAction::CloseRoot(root_id),
+        "重新打开" => MgrAction::ReopenRoot(root_id),
+        "在 Finder 中显示" => MgrAction::RevealRoot(root_id),
+        _ => return None,
+    })
+}
+
 /// 「删除索引」是否对该根可用。
 ///
 /// m10609 的要求是「**不管什么状态**的索引都要能删」：活跃 / 已关闭 /
@@ -763,6 +838,46 @@ pub fn retry_enabled(g: &FailureGroup) -> bool {
     kind.retryable() && g.count > 0
 }
 
+/// 「任务」标签顶部失败分类的一行（`IDX-A-FAIL` / `AC-IDX-FAIL`）。
+///
+/// 抽成纯函数而不是在绘制闭包里现算：五类**固定顺序**、`count + ignored == 0`
+/// 不画、「格式不支持」不给重试按钮这三条都是验收要求，必须能被无窗口测试钉住。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailureRow {
+    pub kind: FailureKind,
+    pub count: u64,
+    pub ignored: u64,
+    /// 给「重试全部」按钮（可重试且有未忽略条目）。
+    pub retry_all: bool,
+    /// 灰字「不支持重试」——**只给真的不可重试的类**。
+    ///
+    /// 早先的实现用 `else` 兜住一切「没给重试按钮」的情况，于是「超时 3 条全部
+    /// 已忽略」也会被写成「不支持重试」，把可重试的类说成永久失败。
+    pub unsupported_hint: bool,
+}
+
+/// 任务标签要画的失败分类行：**五类固定顺序**，空类整行不画。
+pub fn failure_rows(snap: &MgmtSnapshot) -> Vec<FailureRow> {
+    let mut out = Vec::new();
+    for (i, g) in snap.failures_by_kind.iter().enumerate() {
+        let Some(kind) = FailureKind::from_code(i as i64 + 1) else {
+            continue;
+        };
+        if g.count + g.ignored == 0 {
+            continue;
+        }
+        out.push(FailureRow {
+            kind,
+            count: g.count,
+            ignored: g.ignored,
+            // 按钮口径与 [`retry_enabled`] 同一份判定，不另算一遍。
+            retry_all: retry_enabled(g),
+            unsupported_hint: !kind.retryable(),
+        });
+    }
+    out
+}
+
 // ---------------------------------------------------------------- 绘制
 
 /// 画索引管理页。返回本次帧点出的动作（可能有多个）。
@@ -793,7 +908,7 @@ pub fn show(
         .show(ctx, |ui| {
             // ---- M4 总览摘要区（常驻，不随标签切换消失；docs/12 §2）
             // 五字段全部来自同一份 MgmtSnapshot，与主区标题 / 状态栏数字同源。
-            overview_summary(ui, theme, snap, now);
+            overview_summary(ui, theme, snap, failed_tasks, now);
             ui.separator();
             // ---- 五个标签（M4 新增「导入 / 导出」）
             ui.horizontal(|ui| {
@@ -865,31 +980,23 @@ fn tasks_tab(
 
     // ---- 失败分类分组（§4.2 M22-IDX-04）：永远画在最上面
     section(ui, theme, "失败分类");
-    let mut any = false;
-    for (i, g) in snap.failures_by_kind.iter().enumerate() {
-        let Some(kind) = FailureKind::from_code(i as i64 + 1) else {
-            continue;
-        };
-        let total = g.count + g.ignored;
-        if total == 0 {
-            continue;
-        }
-        any = true;
+    let rows = failure_rows(snap);
+    for r in &rows {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(kind.label()).strong());
-            ui.label(format!("{} 条", g.count));
-            if g.ignored > 0 {
+            ui.label(RichText::new(r.kind.label()).strong());
+            ui.label(format!("{} 条", r.count));
+            if r.ignored > 0 {
                 ui.label(
-                    RichText::new(format!("已忽略 {}（仍可见）", g.ignored))
+                    RichText::new(format!("已忽略 {}（仍可见）", r.ignored))
                         .size(11.0)
                         .color(theme.text_secondary),
                 );
             }
-            if retry_enabled(g) {
+            if r.retry_all {
                 if ui.button("重试全部").clicked() {
-                    actions.push(MgrAction::RetryKind(kind));
+                    actions.push(MgrAction::RetryKind(r.kind));
                 }
-            } else {
+            } else if r.unsupported_hint {
                 // 不可重试的分类也**必须给出口**（R-M2-4）：给「忽略」而不是留空
                 ui.label(
                     RichText::new("不支持重试")
@@ -897,15 +1004,15 @@ fn tasks_tab(
                         .color(theme.text_disabled),
                 );
             }
-            if g.count > 0 && ui.button("忽略全部").clicked() {
-                actions.push(MgrAction::IgnoreKind(kind));
+            if r.count > 0 && ui.button("忽略全部").clicked() {
+                actions.push(MgrAction::IgnoreKind(r.kind));
             }
-            if g.ignored > 0 && ui.button("取消忽略").clicked() {
-                actions.push(MgrAction::UnignoreKind(kind));
+            if r.ignored > 0 && ui.button("取消忽略").clicked() {
+                actions.push(MgrAction::UnignoreKind(r.kind));
             }
         });
     }
-    if !any {
+    if rows.is_empty() {
         ui.label(RichText::new("没有失败项").color(theme.text_secondary));
     }
 
@@ -1044,20 +1151,10 @@ fn folders_tab(
                     .size(11.0)
                     .color(theme.warn),
                 );
-                ui.horizontal(|ui| {
-                    if ui.button("重新索引（恢复）").clicked() {
-                        actions.push(MgrAction::ReindexRoot(r.id));
-                    }
-                    if ui.button("在 Finder 中显示").clicked() {
-                        actions.push(MgrAction::RevealRoot(r.id));
-                    }
-                    // 这一行同样要能删——而且这里最需要它：「索引已移除」意味着
-                    // 派生数据已经清空、只剩一条空壳记录，用户想让它从索引管理里
-                    // 消失，只有这个入口。
-                    if delete_index_available(r) {
-                        delete_index_button(ui, r.id, actions);
-                    }
-                });
+                // 这一行同样要能删——而且这里最需要它：「索引已移除」意味着
+                // 派生数据已经清空、只剩一条空壳记录，用户想让它从索引管理里
+                // 消失，只有这个入口。
+                draw_root_buttons(ui, r, actions);
                 return;
             }
 
@@ -1090,42 +1187,9 @@ fn folders_tab(
                 }
             });
 
-            ui.horizontal(|ui| {
-                // 离线根：只给「连接后刷新」（§2.8），其他按钮点了必然失败
-                if r.offline {
-                    if ui.button("连接后刷新").clicked() {
-                        actions.push(MgrAction::RefreshRoot(r.id));
-                    }
-                } else {
-                    if ui.button("刷新").clicked() {
-                        actions.push(MgrAction::RefreshRoot(r.id));
-                    }
-                    if ui.button("重新索引").clicked() {
-                        actions.push(MgrAction::ReindexRoot(r.id));
-                    }
-                    if ui.button("强制重扫").clicked() {
-                        // IDX-13：跳过 L1，强制文件级核对（离线盘期间目录 mtime 可能没变）。
-                        actions.push(MgrAction::ForceRescan(r.id));
-                    }
-                    if ui.button("全量重建").clicked() {
-                        // IDX-11：先弹作用域确认框，不直接执行重建。
-                        actions.push(MgrAction::RequestRebuild(r.id));
-                    }
-                    if r.closed {
-                        if ui.button("重新打开").clicked() {
-                            actions.push(MgrAction::ReopenRoot(r.id));
-                        }
-                    } else if ui.button("关闭").clicked() {
-                        actions.push(MgrAction::CloseRoot(r.id));
-                    }
-                    if ui.button("在 Finder 中显示").clicked() {
-                        actions.push(MgrAction::RevealRoot(r.id));
-                    }
-                }
-                if delete_index_available(r) {
-                    delete_index_button(ui, r.id, actions);
-                }
-            });
+            // 离线根只给「连接后刷新」，其余按钮点了必然失败（§2.8）；
+            // 已关闭的根把「关闭」换成「重新打开」。四套按钮见 `root_buttons`。
+            draw_root_buttons(ui, r, actions);
         });
     }
 }
@@ -1137,14 +1201,18 @@ fn exclusions_tab(ui: &mut Ui, theme: &Theme, snap: &MgmtSnapshot, actions: &mut
         return;
     }
     ui.horizontal(|ui| {
-        // 批量恢复与清理失效项（§4.1 第三行）
+        // 批量恢复与清理失效项（§4.1 第三行）。
+        // 无失效项时**一个**禁用按钮（不是两个同名按钮）——源码里那两个同名
+        // 控件的其中一个根本不读点击，是历史遗留，不是设计目标（`IDX-A-EXCL`）。
         if ui.button("全部恢复").clicked() {
             for e in &snap.exclusions {
                 actions.push(MgrAction::RestoreExclusion(e.id));
             }
         }
-        ui.add_enabled(any_stale, egui::Button::new("清理失效项"));
-        if any_stale && ui.button("清理失效项").clicked() {
+        if ui
+            .add_enabled(any_stale, egui::Button::new("清理失效项"))
+            .clicked()
+        {
             actions.push(MgrAction::PruneStaleExclusions);
         }
     });
@@ -1292,7 +1360,13 @@ fn confirm_dialog(ctx: &Context, state: &mut IndexMgrUi, actions: &mut Vec<MgrAc
 /// 总览摘要区（docs/11 §2.1.1、docs/12 §2）：标签栏之上常驻。
 ///
 /// 数据源**只有** `MgmtSnapshot` 一份，不自行维护任何计数；异常常驻且可点击定位。
-fn overview_summary(ui: &mut Ui, theme: &Theme, snap: &MgmtSnapshot, now: i64) {
+fn overview_summary(
+    ui: &mut Ui,
+    theme: &Theme,
+    snap: &MgmtSnapshot,
+    failed_tasks: u64,
+    now: i64,
+) {
     egui::Frame::new()
         .fill(ui.visuals().extreme_bg_color)
         .corner_radius(6.0)
@@ -1347,8 +1421,10 @@ fn overview_summary(ui: &mut Ui, theme: &Theme, snap: &MgmtSnapshot, now: i64) {
             if snap.badge > 0 {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("⚠").color(theme.warn));
+                    // 异常行与标签行右侧小字必须是**同一组三句**（`IDX-A-OV`）：
+                    // 传 0 会让「N 个任务有失败项」整句消失，明明角标是它撑起来的。
                     ui.label(
-                        RichText::new(snap.badge_tooltip(0).join(" · "))
+                        RichText::new(snap.badge_tooltip(failed_tasks).join(" · "))
                             .color(theme.warn)
                             .size(11.0),
                     );
@@ -2194,7 +2270,7 @@ mod tests {
 
     #[test]
     fn task_progress_text_has_no_eta() {
-        let t = TaskView {
+        let mut t = TaskView {
             task_id: 1,
             running: true,
             scope: "/a".into(),
@@ -2214,8 +2290,22 @@ mod tests {
             cancel_reason: None,
         };
         let s = task_progress_text(&t);
-        assert!(s.contains("120") && s.contains("01:23"), "{s}");
+        // 「已处理」是真正处理完的张数（100 完成 + 1 失败 = 101），
+        // **不是** `discovered`（120）——那是生成阶段的分母。
+        assert!(s.contains("已处理 101 张"), "{s}");
+        assert!(s.contains("01:23"), "{s}");
+        assert!(
+            !s.contains("120"),
+            "已发现总数不得作为「已处理」写出来（分母禁令）：{s}"
+        );
+        assert!(!s.contains("%") && !s.contains("％"), "{s}");
+        assert!(!s.contains('/'), "{s}");
         assert!(!s.contains("预计") && !s.contains("剩余"), "ETA 是永久禁令");
+
+        // 扫描阶段分母未冻结：已入库张数就是真实进展，可以且应当显示。
+        t.stage = "扫描中".into();
+        let scanning = task_progress_text(&t);
+        assert!(scanning.contains("已处理 120 张"), "{scanning}");
     }
 
     /// M4.3 IDX-17：终态行的结束摘要必须同时给出「完成 / 跳过 / 失败 /
@@ -2507,5 +2597,1070 @@ mod tests {
         assert!(!ui.open);
         assert_eq!(ui.tab, MgmtTab::Tasks);
         assert_eq!(ui.io.state, IoState::Idle);
+    }
+}
+
+// ---------------------------------------------------------------- M5-R6 门禁
+
+/// M5-R6 · 索引五标签 + 31 条索引原子项的无窗口门禁。
+///
+/// ⚠️ 这些用例验的是「决定画什么」的纯函数与结构，**不是** macOS 真机验收；
+/// 通过它们不代表真机像素与交互已验证。
+#[cfg(test)]
+mod m5r6_tests {
+    use super::*;
+
+    /// 本文件的**生产代码**（截到第一个 `#[cfg(test)]` 之前）。
+    ///
+    /// 源码级断言必须只看生产代码：注释里解释「为什么不能写某句」、
+    /// 测试里反过来断言「不许出现某句」，都会让「全文件 contains」误判。
+    fn prod_src() -> &'static str {
+        let src = include_str!("index_mgr.rs");
+        match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    fn root_of(id: i64, path: &str) -> RootView {
+        RootView {
+            id,
+            path: path.to_string(),
+            ..Default::default()
+        }
+    }
+
+    // ---- AC-IDX-ENTRY / IDX-A-DEFAULT-TAB
+
+    /// `AC-IDX-ENTRY`：`open_at` 走「失败任务 → 任务；离线 → 关注文件夹；
+    /// 失效排除 → 排除项；否则任务」，且**任何情况都不默认落在导入页**。
+    #[test]
+    fn ac_idx_entry_open_at_never_lands_on_import_export() {
+        use picasa_core::{ExclusionView, MgmtSnapshot};
+
+        // ① 都没问题 → 任务
+        let mut ui = IndexMgrUi::new();
+        let snap = MgmtSnapshot::default();
+        ui.open_at(&snap, 0);
+        assert_eq!(ui.tab, MgmtTab::Tasks);
+
+        // ② 失败任务优先（即使有离线根）
+        let snap = MgmtSnapshot {
+            roots: vec![RootView {
+                id: 1,
+                path: "/a".into(),
+                offline: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        ui.open_at(&snap, 2);
+        assert_eq!(ui.tab, MgmtTab::Tasks, "失败任务优先于离线根");
+
+        // ③ 离线根 → 关注文件夹
+        ui.open_at(&snap, 0);
+        assert_eq!(ui.tab, MgmtTab::Folders);
+
+        // ④ 失效排除 → 排除项
+        let snap = MgmtSnapshot {
+            exclusions: vec![ExclusionView {
+                id: 1,
+                root_id: 1,
+                path: "/a/gone".into(),
+                path_missing: true,
+            }],
+            ..Default::default()
+        };
+        ui.open_at(&snap, 0);
+        assert_eq!(ui.tab, MgmtTab::Exclusions);
+
+        // ⑤ 走遍四个分支，从没落到导入页。
+        for failed in [0u64, 1] {
+            for offline in [false, true] {
+                let mut snap = MgmtSnapshot::default();
+                if offline {
+                    snap.roots = vec![RootView {
+                        id: 1,
+                        path: "/a".into(),
+                        offline: true,
+                        ..Default::default()
+                    }];
+                }
+                ui.open_at(&snap, failed);
+                assert_ne!(ui.tab, MgmtTab::ImportExport);
+            }
+        }
+    }
+
+    /// `IDX-A-WIN`：关窗只清「未确认」的确认框，**不取消**后台任务/导入导出。
+    #[test]
+    fn idx_a_win_closing_the_window_keeps_background_work() {
+        let mut ui = IndexMgrUi::new();
+        ui.open = true;
+        ui.confirm = Confirm::ClearThumbs;
+        // 关窗只影响窗口与未确认的确认框。
+        ui.close();
+        assert!(!ui.open);
+        assert!(ui.confirm.is_none(), "关窗要清掉还没确认的二次确认");
+        // 后台任务与导入导出状态都在 `IndexMgrUi` 之外（App / ImportTask），
+        // 关窗这条路根本不碰它们——这里是结构性证明：close() 只改两个字段。
+        assert_eq!(ui.io.state, IoState::Idle);
+        let src = prod_src();
+        let start = src.find("pub fn close(&mut self) {").expect("close()");
+        let body = &src[start..];
+        let end = body.find('}').expect("close body");
+        let body = &body[..end];
+        for forbidden in ["cancel", "Cancel", "abort", "stop", "delete"] {
+            assert!(
+                !body.contains(forbidden),
+                "close() 不许取消后台任务（出现 {forbidden}）：{body}"
+            );
+        }
+    }
+
+    // ---- AC-IDX-TABS / IDX-A-OV
+
+    /// `AC-IDX-TABS`：五个标签齐全、导入导出在最后；总览根行格式
+    /// 「状态 · N 张[ · 缩略图][ · 失败]」，**没有千分位空格**。
+    #[test]
+    fn ac_idx_tabs_five_tabs_and_overview_root_line_format() {
+        assert_eq!(MgmtTab::ALL.len(), 5);
+        let labels: Vec<&str> = MgmtTab::ALL.iter().map(|t| t.label()).collect();
+        assert_eq!(
+            labels,
+            ["任务", "关注文件夹", "排除项", "存储与诊断", "导入 / 导出"]
+        );
+
+        let mut r = root_of(1, "/photos");
+        r.photo_count = 12345;
+        let line = root_summary_line(&r);
+        assert!(line.starts_with("正常 · 12345 张"), "{line}");
+        assert!(!line.contains("12 345"), "不许千分位空格：{line}");
+        assert!(!line.contains("12,345"), "不许千分位逗号：{line}");
+
+        r.thumb_bytes = 2 * 1024 * 1024;
+        r.failed = 7;
+        let line = root_summary_line(&r);
+        assert!(line.contains("缩略图 2.0 MB"), "{line}");
+        assert!(line.contains("失败 7"), "{line}");
+
+        // 空库警告句（不是空白，也不是「一切正常」）。
+        let empty = MgmtSnapshot::default();
+        assert!(empty.roots.is_empty());
+    }
+
+    /// `IDX-A-OV`：异常行只在 badge > 0 时出现；文案里**不许**出现
+    /// 「N 项异常」或「一切正常」。
+    #[test]
+    fn idx_a_ov_anomaly_line_only_when_badge_and_never_vague_wording() {
+        let src = prod_src();
+        // 只看真正会被画出来的字面量：注释里解释「为什么不写某句」不算。
+        for line in src.lines() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            assert!(!line.contains("项异常"), "总览不许写「N 项异常」：{line}");
+            assert!(
+                !line.contains("一切正常"),
+                "0 异常时整行不画，不写「一切正常」：{line}"
+            );
+        }
+
+        let mut snap = MgmtSnapshot {
+            roots: vec![RootView {
+                id: 1,
+                path: "/Volumes/X".into(),
+                offline: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        snap.compute_badge(0, 0);
+        assert!(snap.badge > 0, "离线根撑起角标");
+        let tip = snap.badge_tooltip(0);
+        assert!(tip.iter().any(|t| t.contains("离线")), "{tip:?}");
+    }
+
+    /// `IDX-A-OV` / `AC-IDX-TABS`：总览异常行与标签行小字**同一组三句**。
+    ///
+    /// 旧实现给 `badge_tooltip(0)` 传死 0，于是「N 个任务有失败项」整句消失——
+    /// 角标明明由失败任务撑起来，异常行却只说离线根。
+    #[test]
+    fn idx_a_ov_anomaly_line_uses_the_same_three_sentences_as_the_tab_label() {
+        let src = prod_src();
+        assert!(
+            !src.contains("badge_tooltip(0)"),
+            "总览异常行不许把 failed_tasks 写死成 0（会丢掉「N 个任务有失败项」）"
+        );
+        // 两处都必须把 failed_tasks 传进去。
+        assert!(src.contains("snap.badge_tooltip(failed_tasks)"));
+        assert!(src.contains("badge_tooltip(failed_tasks).join"), "总览异常行也要传 failed_tasks");
+    }
+
+    // ---- AC-IDX-FAIL
+
+    /// `AC-IDX-FAIL`：五类固定顺序、空类不画、`Unsupported` 不给「重试全部」
+    /// 只给灰字「不支持重试」。
+    #[test]
+    fn ac_idx_fail_rows_are_ordered_and_unsupported_has_no_retry() {
+        let mut snap = MgmtSnapshot::default();
+        // 故意乱序塞：文件损坏(2) / 超时(5) / 格式不支持(4)
+        snap.failures_by_kind[1] = FailureGroup {
+            kind: Some(FailureKind::Corrupt.code()),
+            count: 3,
+            ignored: 0,
+        };
+        snap.failures_by_kind[4] = FailureGroup {
+            kind: Some(FailureKind::Timeout.code()),
+            count: 1,
+            ignored: 2,
+        };
+        snap.failures_by_kind[3] = FailureGroup {
+            kind: Some(FailureKind::Unsupported.code()),
+            count: 5,
+            ignored: 0,
+        };
+        let rows = failure_rows(&snap);
+        assert_eq!(
+            rows.iter().map(|r| r.kind).collect::<Vec<_>>(),
+            vec![
+                FailureKind::Corrupt,
+                FailureKind::Unsupported,
+                FailureKind::Timeout
+            ],
+            "按固定五类顺序（code 序），不按数量排"
+        );
+        assert!(rows[0].retry_all && !rows[0].unsupported_hint);
+        assert!(!rows[1].retry_all, "格式不支持不给「重试全部」");
+        assert!(rows[1].unsupported_hint, "要写灰字「不支持重试」");
+        assert!(rows[2].retry_all, "超时 count>0 可以重试");
+        assert_eq!(rows[2].ignored, 2, "忽略后仍可见");
+
+        // 空类整行不画；全空 → 没有失败项。
+        assert!(failure_rows(&MgmtSnapshot::default()).is_empty());
+    }
+
+    /// `AC-IDX-FAIL`：某类「全部被忽略」（count==0, ignored>0）时，
+    /// **不能**被写成「不支持重试」——那是把可重试的类说成永久失败。
+    #[test]
+    fn ac_idx_fail_all_ignored_retryable_kind_is_not_called_unsupported() {
+        let mut snap = MgmtSnapshot::default();
+        snap.failures_by_kind[4] = FailureGroup {
+            kind: Some(FailureKind::Timeout.code()),
+            count: 0,
+            ignored: 4,
+        };
+        let rows = failure_rows(&snap);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].retry_all, "没有未忽略条目，不给重试按钮");
+        assert!(
+            !rows[0].unsupported_hint,
+            "超时是可重试的，不能因为 count==0 就被写成「不支持重试」"
+        );
+        assert_eq!(rows[0].ignored, 4);
+    }
+
+    // ---- AC-IDX-PAUSE
+
+    /// `AC-IDX-PAUSE` / `IDX-A-TASKS`：系统暂停文案逐字一致，且**没有**「继续」；
+    /// 用户逐任务暂停才有「继续」。
+    #[test]
+    fn ac_idx_pause_system_pause_copy_has_no_continue_button() {
+        let src = prod_src();
+        assert!(
+            src.contains("系统暂停中（休眠 / 低电量），恢复由系统事件自动发生"),
+            "系统暂停文案必须逐字一致"
+        );
+
+        // 系统暂停块里不许出现「继续」按钮。
+        let start = src
+            .find("if snap.paused_by_system {")
+            .expect("系统暂停分支");
+        let rest = &src[start..];
+        let end = rest.find("\n}\n").unwrap_or(rest.len().min(400));
+        let block = &rest[..end];
+        assert!(
+            !block.contains("继续"),
+            "系统暂停不许给人工「继续」：{block}"
+        );
+
+        // 用户逐任务暂停才有「继续」（`task_id != 0` 且 `user_paused`）。
+        assert!(src.contains("if t.user_paused {"));
+        assert!(src.contains("MgrAction::ResumeTask(t.task_id)"));
+    }
+
+    /// `AC-IDX-PAUSE`：进行中只报「已处理 N 张 · 已用 mm:ss」，
+    /// 无百分比、无 ETA、无进度条；`task_id == 0` 不给暂停 / 取消。
+    #[test]
+    fn ac_idx_pause_running_row_reports_processed_count_only() {
+        let snap = MgmtSnapshot {
+            tasks: vec![TaskView {
+            task_id: 0,
+            running: true,
+            scope: "/a".into(),
+            kind: "首次索引".into(),
+            status: "生成缩略图中".into(),
+            discovered: 500,
+            completed: 120,
+            failed: 3,
+            stage: "生成缩略图".into(),
+            batch: Some(1),
+            started_at: Some(0),
+            elapsed_text: "02:34".into(),
+            outcome: None,
+            root_id: None,
+            user_paused: false,
+                skipped: 0,
+                cancel_reason: None,
+            }],
+            ..Default::default()
+        };
+        let text = task_progress_text(&snap.tasks[0]);
+        assert_eq!(text, "已处理 123 张 · 已用 02:34");
+        for banned in ["%", "％", "500", "预计", "剩余", "ETA", "/"] {
+            assert!(!text.contains(banned), "任务行不许出现 {banned}：{text}");
+        }
+        assert_eq!(snap.tasks[0].task_id, 0, "会话内任务没有 id → 不画暂停/取消");
+    }
+
+    // ---- AC-IDX-ROOTS
+
+    /// `AC-IDX-ROOTS`：四种状态四套按钮，严格按审计切换。
+    #[test]
+    fn ac_idx_roots_four_states_have_four_different_button_sets() {
+        let normal = RootView {
+            id: 1,
+            path: "/a".into(),
+            ..Default::default()
+        };
+        let closed = RootView {
+            closed: true,
+            ..normal.clone()
+        };
+        let offline = RootView {
+            offline: true,
+            ..normal.clone()
+        };
+        let removed = RootView {
+            index_removed: true,
+            closed: true,
+            ..normal.clone()
+        };
+
+        let n = root_buttons(&normal);
+        assert_eq!(
+            n,
+            vec![
+                "刷新",
+                "重新索引",
+                "强制重扫",
+                "全量重建",
+                "关闭",
+                "在 Finder 中显示",
+                "删除索引"
+            ],
+            "正常根按钮表（`IDX-A-BTNS`）"
+        );
+
+        let c = root_buttons(&closed);
+        assert!(c.contains(&"重新打开"), "{c:?}");
+        assert!(!c.contains(&"关闭"), "已关闭的根要给「重新打开」：{c:?}");
+
+        let o = root_buttons(&offline);
+        assert_eq!(
+            o,
+            vec!["连接后刷新", "删除索引"],
+            "离线根只有「连接后刷新」「删除索引」（没有全量重建、没有 Finder）"
+        );
+        for banned in ["重新索引", "强制重扫", "全量重建", "重新打开", "关闭"] {
+            assert!(!o.contains(&banned), "离线根不许有「{banned}」：{o:?}");
+        }
+
+        let r = root_buttons(&removed);
+        assert_eq!(
+            r,
+            vec!["重新索引（恢复）", "在 Finder 中显示", "删除索引"],
+            "索引已移除只有三颗按钮"
+        );
+        for banned in ["刷新", "强制重扫", "全量重建", "关闭", "监视"] {
+            assert!(!r.contains(&banned), "已移除行不许有「{banned}」：{r:?}");
+        }
+
+        // 四套互不相同（尤其别把离线与已移除混成一套）。
+        assert_ne!(o, r);
+        assert_ne!(n, c);
+        assert_ne!(n, o);
+    }
+
+    /// `AC-IDX-ROOTS`：按钮表里的每个字都必须映射到真动作（没有点了没反应的假按钮）。
+    #[test]
+    fn ac_idx_roots_every_button_maps_to_a_real_action() {
+        let states = [
+            RootView {
+                id: 7,
+                path: "/a".into(),
+                ..Default::default()
+            },
+            RootView {
+                id: 7,
+                path: "/a".into(),
+                closed: true,
+                ..Default::default()
+            },
+            RootView {
+                id: 7,
+                path: "/a".into(),
+                offline: true,
+                ..Default::default()
+            },
+            RootView {
+                id: 7,
+                path: "/a".into(),
+                index_removed: true,
+                closed: true,
+                ..Default::default()
+            },
+        ];
+        for r in &states {
+            for label in root_buttons(r) {
+                if label == "删除索引" {
+                    continue; // 走二次确认框，单独验
+                }
+                assert!(
+                    root_button_action(label, 7).is_some(),
+                    "「{label}」没有对应动作（假按钮）：{r:?}"
+                );
+            }
+        }
+        assert!(root_button_action("删除索引", 7).is_none(), "删除索引走确认框");
+        // 动作带的是这一行的 root id，不会串到别的根。
+        assert_eq!(root_button_action("刷新", 7), Some(MgrAction::RefreshRoot(7)));
+        assert_ne!(root_button_action("刷新", 7), Some(MgrAction::RefreshRoot(8)));
+        // 全量重建只是「请求确认」，不是执行动作（`IDX-A-CONFIRM`）。
+        assert_eq!(
+            root_button_action("全量重建", 7),
+            Some(MgrAction::RequestRebuild(7))
+        );
+        assert_ne!(
+            root_button_action("全量重建", 7),
+            Some(MgrAction::RebuildRoot(7))
+        );
+    }
+
+    /// `AC-IDX-ROOTS` / `IDX-A-REMOVED`：已移除行的正文必须说清「标记还在、原图未动」，
+    /// 并且**真的画了**「重新索引（恢复）」——不能嘴上说可恢复却没有按钮，
+    /// 也不能说不可恢复却画恢复按钮。
+    #[test]
+    fn ac_idx_roots_removed_row_is_recoverable_and_says_so() {
+        let src = prod_src();
+        assert!(src.contains("重新索引会按身份自动挂回"), "正文要说明标记按身份挂回");
+        assert!(src.contains("原图与磁盘文件从未被动过"), "正文要说明原图未动");
+        let removed = RootView {
+            id: 1,
+            path: "/a".into(),
+            index_removed: true,
+            ..Default::default()
+        };
+        assert!(root_buttons(&removed).contains(&"重新索引（恢复）"));
+        assert_eq!(removed.status_text(), "索引已移除");
+    }
+
+    /// `AC-IDX-ROOTS` / `IDX-A-FOLDERS`：状态字「离线优先于已关闭」，
+    /// 且没有根时给明确空态（不是可展开树）。
+    #[test]
+    fn ac_idx_roots_status_precedence_and_empty_state() {
+        let both = RootView {
+            id: 1,
+            path: "/a".into(),
+            offline: true,
+            closed: true,
+            ..Default::default()
+        };
+        assert_eq!(both.status_text(), "离线", "离线优先于已关闭");
+        let removed_offline = RootView {
+            offline: false,
+            index_removed: true,
+            closed: true,
+            ..Default::default()
+        };
+        assert_eq!(removed_offline.status_text(), "索引已移除");
+        let src = prod_src();
+        assert!(src.contains("还没有关注任何文件夹"));
+    }
+
+    /// `AC-IDX-ROOTS` / `IDX-A-BTNS`：监视行永远画（已移除除外），
+    /// 降级时给可悬停的「为什么？」，并说明「软件不改系统设置」。
+    #[test]
+    fn ac_idx_roots_watch_row_is_always_visible_and_explains_degradation() {
+        let src = prod_src();
+        assert!(
+            src.contains("ui.label(RichText::new(\"监视\")"),
+            "监视行要常驻（不是有问题才出现）"
+        );
+        assert!(src.contains("为什么？"), "降级要给「为什么？」");
+        // 修复建议正文由 core 的 `WatchState::advice()` 提供（唯一措辞来源）。
+        let watcher = include_str!("../../picasa-core/src/watcher.rs");
+        assert!(
+            watcher.contains("软件不会自动修改系统设置"),
+            "修复建议要说清软件不改系统设置"
+        );
+        // 监视降级不进悬停三句（只在关注文件夹顶部与行内说明）。
+        assert!(!MgmtSnapshot::default()
+            .badge_tooltip(0)
+            .iter()
+            .any(|t| t.contains("监视")));
+    }
+
+    // ---- AC-IDX-EXCL
+
+    /// `AC-IDX-EXCL`：全部恢复无二次确认；无失效时「清理失效项」禁用；
+    /// **只有一个**同名按钮（源码的双按钮是历史遗留，不是设计目标）。
+    #[test]
+    fn ac_idx_excl_prune_is_one_button_disabled_without_stale_items() {
+        use picasa_core::ExclusionView;
+        let empty: Vec<ExclusionView> = Vec::new();
+        assert_eq!(exclusion_bulk_state(&empty), (false, false));
+
+        let valid = plain_exclusion();
+        assert_eq!(exclusion_bulk_state(std::slice::from_ref(&valid)), (true, false));
+        let stale = stale_exclusion();
+        assert_eq!(
+            exclusion_bulk_state(&[valid.clone(), stale.clone()]),
+            (true, true)
+        );
+
+        // 源码级：只能有一处 `add_enabled(... "清理失效项")` 加一处点击处理，
+        // 不能出现两个同名按钮（其中一个还不读点击）。
+        let src = prod_src();
+        let buttons = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains("\"清理失效项\""))
+            .count();
+        assert_eq!(buttons, 1, "「清理失效项」只许出现一个按钮");
+        assert!(src.contains("全部恢复"), "要有「全部恢复」");
+        assert!(
+            !src.contains("确认清理失效") || !src.contains("ConfirmPrune"),
+            "全部恢复 / 清理失效项不需要二次确认"
+        );
+    }
+
+    fn plain_exclusion() -> picasa_core::ExclusionView {
+        picasa_core::ExclusionView {
+            id: 1,
+            root_id: 1,
+            path: "/a/b".into(),
+            path_missing: false,
+        }
+    }
+
+    fn stale_exclusion() -> picasa_core::ExclusionView {
+        picasa_core::ExclusionView {
+            id: 2,
+            root_id: 1,
+            path: "/a/gone".into(),
+            path_missing: true,
+        }
+    }
+
+    // ---- AC-IDX-STORAGE
+
+    /// `AC-IDX-STORAGE`：缩略图未算完写「计算中…」不写 0；
+    /// 清理缩略图 / 清空运行日志要确认，VACUUM 不要；帧时间直方图未接通。
+    #[test]
+    fn ac_idx_storage_pending_stats_and_confirm_policy() {
+        use picasa_core::{MgmtSnapshot, StorageView};
+        let unknown = StorageView {
+            thumb_stats_known: false,
+            thumb_count: 0,
+            thumb_bytes: 0,
+            ..Default::default()
+        };
+        assert!(!unknown.thumb_stats_known, "未算完时界面写「计算中…」");
+
+        let src = prod_src();
+        assert!(src.contains("计算中…"), "未算完必须写「计算中…」");
+        assert!(src.contains("Confirm::ClearThumbs"), "清理缩略图要确认");
+        assert!(src.contains("Confirm::ClearRunLog"), "清空运行日志要确认");
+        // VACUUM 直接发动作，不弹确认：按钮靠后两行内必须出现 Vacuum 动作，
+        // 且这段里不许出现 Confirm::。
+        let lines: Vec<&str> = src.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("\"VACUUM\""))
+            .expect("VACUUM 按钮");
+        let window = lines[at..(at + 3).min(lines.len())].join("\n");
+        assert!(
+            window.contains("MgrAction::Vacuum"),
+            "VACUUM 点一次就执行：{window}"
+        );
+        assert!(
+            !window.contains("Confirm::"),
+            "VACUUM 不需要确认：{window}"
+        );
+
+        // 帧时间直方图勾选仍然可见但未接通（XX-02）。
+        assert!(src.contains("显示帧时间直方图"), "复选框要能画出来");
+        let snap = MgmtSnapshot {
+            storage: unknown,
+            ..Default::default()
+        };
+        assert_eq!(snap.storage.thumb_count, 0, "快照给的是原始 0，UI 负责改写");
+    }
+
+    // ---- AC-IDX-FLOAT / IDX-A-FLOAT
+
+    /// `AC-IDX-FLOAT`：浮层阈值是命名常量 1.5 s / 收起 1.0 s，
+    /// 标题固定「正在建立缩略图索引」，且条上不印 ETA。
+    #[test]
+    fn ac_idx_float_thresholds_and_title_are_fixed() {
+        use crate::index_progress::{APPEAR_AFTER, HIDE_AFTER};
+        assert_eq!(APPEAR_AFTER, 1.5);
+        assert_eq!(HIDE_AFTER, 1.0);
+        let src = include_str!("index_progress.rs");
+        assert!(src.contains("正在建立缩略图索引"));
+        assert!(src.contains("关闭（索引会继续）"), "× 关闭后索引继续");
+        // 运行时拼出禁用词，避免用例自己成为「源码里出现该词」的证据。
+        let banned = [
+            "剩余".to_string() + "时间",
+            "预计".to_string() + "完成",
+            "预计".to_string() + "剩余",
+        ];
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with("//") || line.contains("banned") {
+                continue;
+            }
+            for b in &banned {
+                assert!(!line.contains(b.as_str()), "浮层文案不许出现 {b}：{line}");
+            }
+        }
+    }
+
+    // ---- AC-IDX-IO / IDX-A-4STEP / IDX-A-6STATE / IDX-A-EXPORT
+
+    /// `AC-IDX-IO`：正式扩展名是 `.opicasaidx` / `.opicasaidx.zip`，
+    /// 默认文件名 `photo-index.*`，不是原型 JSON。
+    #[test]
+    fn ac_idx_io_uses_formal_index_extensions_only() {
+        let src = include_str!("macos.rs");
+        assert!(src.contains("opicasaidx.zip"));
+        assert!(src.contains("photo-index."));
+        assert!(
+            !src.contains("\"json\"") && !src.contains("demo.json"),
+            "正式产品不得把原型演示 JSON 当索引格式"
+        );
+        // 导入的文件过滤器同时覆盖两种正式扩展名。
+        assert!(src.contains("&[\"opicasaidx\", \"opicasaidx.zip\"]"));
+    }
+
+    /// `AC-IDX-IO`：四步标签逐字固定；合并与替换都必须勾「我已了解上述影响范围」；
+    /// **没有**「暂停导入」；页脚「不修改或移动原始照片」只在本标签底部。
+    #[test]
+    fn ac_idx_io_four_steps_and_no_pause_import() {
+        let src = prod_src();
+        for step in [
+            "① 校验与预览",
+            "② 策略与范围",
+            "③ 执行",
+            "④ 结果与匹配",
+        ] {
+            assert!(src.contains(step), "四步标签缺 {step}");
+        }
+        let checkboxes = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains("我已了解上述影响范围"))
+            .count();
+        assert_eq!(
+            checkboxes, 1,
+            "合并与替换共用一个勾选框（一个控件覆盖两种策略）"
+        );
+        assert!(
+            !src.contains("暂停导入") && !src.contains("PauseImport"),
+            "导入不可暂停（M5-IDX-08 / OUT-PLANNED）"
+        );
+        assert!(src.contains("关闭本窗口不会取消导入"), "关窗不取消导入");
+
+        // 页脚只出现在导入/导出标签的函数里。
+        let footer = "ⓘ 相关操作不修改或移动原始照片";
+        assert!(src.contains(footer));
+        assert_eq!(
+            src.matches(footer).count(),
+            1,
+            "页脚只许有一个落点（不许常驻在所有标签）"
+        );
+        let footer_pos = src.find(footer).unwrap();
+        let import_tab_pos = src.find("fn import_export_tab(").unwrap();
+        assert!(
+            footer_pos > import_tab_pos,
+            "页脚必须在 import_export_tab 里"
+        );
+    }
+
+    /// `AC-IDX-IO` / `IDX-A-6STATE`：六态标签逐字固定；取消正文写「现有索引未改动」。
+    #[test]
+    fn ac_idx_io_six_states_and_cancel_rolls_back_without_touching_the_index() {
+        use IoState::*;
+        assert_eq!(
+            [
+                io_state_label(Idle),
+                io_state_label(Preparing),
+                io_state_label(Running),
+                io_state_label(Success),
+                io_state_label(Failed),
+                io_state_label(Cancelled),
+            ],
+            ["空闲", "准备中", "进行中", "✓ 成功", "⛔ 失败", "⏹ 已取消"]
+        );
+        let src = prod_src();
+        assert!(src.contains("已取消 · 现有索引未改动"));
+        assert!(src.contains("现有索引保持可用"));
+    }
+
+    /// `AC-IDX-IO` / `IDX-A-IMPORT-V`：校验中文案 + 不确定进度条 + 取消校验 + 无 ETA。
+    #[test]
+    fn ac_idx_io_validation_copy_and_no_eta() {
+        let src = prod_src();
+        assert!(src.contains("正在校验索引文件…（后台执行，界面可继续操作）"));
+        assert!(src.contains("大文件需要读两遍做完整性复核"));
+        assert!(src.contains("取消校验"));
+        assert!(src.contains("无 ETA"));
+    }
+
+    /// `IDX-A-4STEP`：预览最多 12 张，只来自包内缩略图（不读原图）。
+    #[test]
+    fn idx_a_4step_preview_is_bounded_and_comes_from_the_package() {
+        let src = prod_src();
+        assert!(src.contains("PREVIEW_THUMB_MAX: usize = 12"));
+        assert!(src.contains("仅来自索引包内缩略图，不读取原图"));
+        // 不画可展开的文件夹树（IDX-03/20 增量，OUT-PLANNED）。
+        assert!(!src.contains("CollapsingHeader"), "预览不许画可展开目录树");
+    }
+
+    /// `IDX-A-RESULT`：结果四计数、失败明细最多 50、浏览本次导入、重新匹配不搬文件。
+    #[test]
+    fn idx_a_result_four_counts_and_bounded_failure_list() {
+        let src = prod_src();
+        for k in ["成功导入", "跳过", "失败", "冲突"] {
+            assert!(src.contains(k), "结果页缺计数 {k}");
+        }
+        let errs: Vec<String> = (0..80).map(|i| format!("错误 {i}")).collect();
+        let text = failure_summary(&errs).expect("有错误就有摘要");
+        assert!(text.contains("另有 30 项"), "失败明细最多 50 条：{text}");
+        assert_eq!(text.lines().count(), 51, "50 条明细 + 1 行「另有」");
+        assert!(src.contains("浏览导入的照片"));
+        assert!(src.contains("重新匹配不会复制、移动或重命名照片"));
+    }
+
+    /// `IDX-A-EXPORT`：最近成功备份显示 SHA-256 前 12 位；文件被挪走有提示。
+    #[test]
+    fn idx_a_export_shows_short_sha_and_moved_file_hint() {
+        let src = prod_src();
+        assert!(src.contains("SHA-256：{"));
+        assert!(src.contains("len().min(12)"), "只显示前 12 位");
+        let app = include_str!("app.rs");
+        assert!(app.contains("备份文件已不在原位置"));
+    }
+
+    // ---- IDX-A-CONFIRM / IDX-A-PURGE-ALL
+
+    /// `IDX-A-CONFIRM` / `IDX-A-PURGE-ALL`：四类确认标题逐字；数量未知写「待计算」
+    /// 不写 0；全库删除的确认钮是「删除索引」而不是「确认」。
+    #[test]
+    fn idx_a_confirm_titles_and_pending_counts() {
+        assert_eq!(Confirm::RebuildRoot {
+            id: 1,
+            path: "/a".into(),
+            photos: None,
+            markers: None
+        }
+        .title(), "确认全量重建");
+        assert_eq!(Confirm::ClearThumbs.title(), "确认清理缩略图");
+        assert_eq!(Confirm::ClearRunLog.title(), "确认清空运行日志");
+        assert_eq!(Confirm::ClearTaskHistory.title(), "确认清空任务历史");
+        assert_eq!(
+            Confirm::DeleteIndex {
+                id: 1,
+                path: "/a".into(),
+                photos: None,
+                markers: None
+            }
+            .title(),
+            "确认删除索引"
+        );
+
+        let pending = Confirm::RebuildRoot {
+            id: 1,
+            path: "/a".into(),
+            photos: None,
+            markers: None,
+        }
+        .body();
+        assert!(pending.contains("待计算"), "{pending}");
+        assert!(!pending.contains("照片数：0"), "未知数量不许填 0：{pending}");
+
+        assert_eq!(crate::copy_text::PURGE_ALL_BUTTON, "删除索引");
+        assert_eq!(crate::copy_text::PURGE_ROOT_BUTTON, "确认");
+        assert_ne!(
+            crate::copy_text::PURGE_ALL_BUTTON,
+            crate::copy_text::PURGE_ROOT_BUTTON,
+            "全库删除与单根删除的确认钮必须不同字"
+        );
+    }
+
+    /// `IDX-A-CONFIRM`：确认框不可缩放、取消在左且默认聚焦、Escape 等于取消。
+    #[test]
+    fn idx_a_confirm_dialog_is_not_resizable_and_defaults_to_cancel() {
+        let src = prod_src();
+        let start = src.find("fn confirm_dialog(").expect("confirm_dialog");
+        let body = &src[start..];
+        assert!(body.contains(".resizable(false)"), "确认框不可缩放");
+        assert!(body.contains("request_focus()"), "默认焦点在取消");
+        assert!(body.contains("Key::Escape"), "Escape 等价于取消");
+        // 「取消」在前：先画取消再画确认。
+        let cancel_pos = body.find("let cancel_btn = ui.button(\"取消\")").expect("取消按钮");
+        let confirm_pos = body.find("if ui.button(confirm_label)").expect("确认按钮");
+        assert!(cancel_pos < confirm_pos, "取消在左、确认在右");
+    }
+
+    // ---- IDX-A-IO-BANNER
+
+    /// `IDX-A-IO-BANNER`：四类条件横幅只在有持久记录时出现，且都内置在导入导出标签里
+    /// （不常驻其他标签）。
+    #[test]
+    fn idx_a_io_banner_only_appears_with_a_persisted_record() {
+        let io = IoUi::default();
+        assert!(io.interrupted_export.is_none(), "正常会话不该冒「上次导出未完成」");
+        assert!(!io.interrupted_import);
+        assert!(io.last_import.is_none());
+        assert!(io.hidden_sources.is_empty());
+
+        // 有记录时才画；三个按钮各自独立动作。
+        let io = IoUi {
+            interrupted_export: Some(InterruptedExport {
+                target: "/tmp/x.opicasaidx".into(),
+                with_thumbs: true,
+            }),
+            ..Default::default()
+        };
+        assert!(io.interrupted_export.is_some());
+        assert_ne!(MgrAction::ReplayExport, MgrAction::DismissInterruptedExport);
+
+        // 横幅正文逐字固定（四类）。
+        let src = prod_src();
+        for copy in [
+            "上次导出未完成（进程中断）· 临时产物已清理，可一键重来",
+            "上次导入在提交前中断 · 已回滚，现有索引未改动，可重新开始",
+            "已从分组隐藏：",
+        ] {
+            assert!(src.contains(copy), "缺少横幅文案：{copy}");
+        }
+    }
+
+    /// `IDX-A-IO-BANNER`：三类横幅 / 页脚都只出现在导入导出标签函数内。
+    #[test]
+    fn idx_a_io_banner_lives_only_inside_the_import_export_tab() {
+        let src = prod_src();
+        let tab = src.find("fn import_export_tab(").expect("import tab fn");
+        let after = &src[tab..];
+        // 该函数之后到文件尾的生产代码里应当包含这些横幅；
+        // 而它们不该出现在 tasks/folders/exclusions/storage 四个标签函数里。
+        for other in [
+            "fn tasks_tab(",
+            "fn folders_tab(",
+            "fn exclusions_tab(",
+            "fn storage_tab(",
+        ] {
+            let at = src.find(other).expect(other);
+            let rest = &src[at..];
+            let end = rest[1..].find("\nfn ").map(|i| i + 1).unwrap_or(rest.len());
+            let body = &rest[..end];
+            assert!(
+                !body.contains("上次导出未完成"),
+                "{other} 里不许出现 IO 横幅"
+            );
+            assert!(
+                !body.contains("上次导入在提交前中断"),
+                "{other} 里不许出现 IO 横幅"
+            );
+        }
+        assert!(after.contains("上次导出未完成"));
+    }
+
+    // ---- IDX-A-ENTRY / IDX-A-BTN4
+
+    /// `IDX-A-ENTRY` / `IDX-A-BTN4`：底栏不再有四态「索引管理」按钮，
+    /// 状态改由底栏左侧只读文案或 1.5 s 浮层表达。
+    #[test]
+    fn idx_a_entry_and_btn4_footer_button_is_gone_and_status_moved() {
+        let bar = include_str!("statusbar.rs");
+        let prod: Vec<&str> = bar
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//") && !t.starts_with("///") && !t.starts_with('|')
+            })
+            .take_while(|l| !l.contains("#[cfg(test)]"))
+            .collect();
+        let prod = prod.join("\n");
+        // 底栏不画「索引管理」四个字（按钮 / 角标 / 悬停三句都没有了）。
+        assert!(
+            !prod.contains("索引管理"),
+            "底栏不许再有「索引管理」按钮或角标"
+        );
+        // 四态字也不在底栏里。
+        for state in ["Idle", "Running", "Failed", "Paused"] {
+            assert!(
+                !prod.contains(&format!("ButtonState::{state}")),
+                "底栏不该再画状态按钮（{state}）"
+            );
+        }
+        // 状态仍在：左侧只读文案。
+        assert!(prod.contains("running_status_text"));
+        // 浮层仍在：右下角 >1.5 s。
+        assert!(include_str!("index_progress.rs").contains("APPEAR_AFTER"));
+    }
+
+    // ---- IDX-A-DEAD
+
+    /// `IDX-A-DEAD`（审计 §5.4–5.5）：过时文案「可在诊断里恢复」不得再出现；
+    /// 诊断窗 / 重建失败索引 / 旧底栏按钮都保持不可达。
+    #[test]
+    fn idx_a_dead_stale_diagnostics_copy_and_unreachable_entries_stay_dead() {
+        for (name, src) in [
+            ("app.rs", include_str!("app.rs")),
+            ("sidebar.rs", include_str!("sidebar.rs")),
+            ("index_mgr.rs", include_str!("index_mgr.rs")),
+            ("copy_text.rs", include_str!("copy_text.rs")),
+        ] {
+            let prod = match src.find("#[cfg(test)]") {
+                Some(i) => &src[..i],
+                None => src,
+            };
+            for line in prod.lines() {
+                let t = line.trim_start();
+                if t.starts_with("//") || t.starts_with("///") {
+                    continue;
+                }
+                assert!(
+                    !line.contains("可在诊断里恢复"),
+                    "{name} 里仍有死路文案「可在诊断里恢复」：{line}"
+                );
+            }
+        }
+        // 三处不可达入口都没有置真赋值。
+        let app = include_str!("app.rs");
+        assert!(!app.contains("self.diagnostics_open = true"));
+        assert!(!app.contains("self.confirm_rebuild_failed = Some"));
+        assert!(!app.contains("IndexProgressUi::status_button("));
+    }
+
+    // ---- IDX-A-DONT
+
+    /// `IDX-A-DONT`（审计 §10）：暂停过渡态、张/秒、按根 12 张预览、自动选中左栏、
+    /// 全库一键重建、导入暂停、离线盘名字段：默认 M5 都不做。
+    #[test]
+    fn idx_a_dont_planned_items_have_no_implementation() {
+        let mgr = prod_src();
+        let imp = include_str!("index_mgr.rs");
+        let import_tab = {
+            let at = imp.find("fn import_export_tab(").expect("import tab");
+            let rest = &imp[at..];
+            let end = rest[1..].find("\nfn ").map(|i| i + 1).unwrap_or(rest.len());
+            &rest[..end]
+        };
+        // 不做「张/秒」吞吐展示，也不做「暂停过渡态」按钮。
+        for banned in ["张/秒", "张 / 秒", "暂停中…", "正在暂停"] {
+            assert!(!mgr.contains(banned), "IDX-A-DONT 规划项不做：{banned}");
+            assert!(!import_tab.contains(banned), "IDX-A-DONT 规划项不做：{banned}");
+        }
+        // 不做按根各 12 张的预览（只有全包最多 12 张）。
+        assert!(!mgr.contains("每个根 12 张"));
+        // 不做全库一键重建。
+        assert!(!mgr.contains("全库重建"));
+        // 不做导入暂停。
+        assert!(!import_tab.contains("暂停导入"));
+    }
+
+    // ---- IDX-A-PITFALL
+
+    /// `IDX-A-PITFALL` ①–④⑦⑨⑩⑫ 逐条抽查（最容易漏的 12 条）。
+    #[test]
+    fn idx_a_pitfall_twelve_gotchas_are_all_guarded() {
+        let mgr = prod_src();
+        let bar = include_str!("statusbar.rs");
+        let progress = include_str!("index_progress.rs");
+
+        // ① 运行状态不写进已删除的底栏按钮文字。
+        let bar_code: String = bar
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//") && !l.trim_start().starts_with('|'))
+            .take_while(|l| !l.contains("#[cfg(test)]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!bar_code.contains("索引管理"), "底栏不许再有索引入口文字");
+        // ② 角标计「几件事」；监视降级不进悬停。
+        let mut snap = MgmtSnapshot::default();
+        snap.compute_badge(1, 0);
+        assert_eq!(snap.badge, 1);
+        assert!(!snap.badge_tooltip(1).iter().any(|t| t.contains("监视")));
+        // ③ 短任务不弹浮层；失败时不自动收。
+        assert!(progress.contains("APPEAR_AFTER: f64 = 1.5"));
+        assert!(progress.contains("has_failures()"));
+        // ④ 两套暂停：面板全局 vs 任务页逐任务。
+        assert!(progress.contains("ProgressAction::PauseIndex"));
+        assert!(mgr.contains("MgrAction::PauseTask(t.task_id)"));
+        // ⑦ 「格式不支持」没有重试；忽略不是隐藏。
+        assert!(mgr.contains("unsupported_hint"));
+        assert!(mgr.contains("已忽略 {}（仍可见）"));
+        // ⑨ 缩略图统计没回来写「计算中…」不是 0。
+        assert!(mgr.contains("计算中…"));
+        // ⑩ 关窗不取消任务；取消导入才回滚。
+        assert!(mgr.contains("关闭本窗口不会取消导入"));
+        assert!(mgr.contains("已取消 · 现有索引未改动"));
+        // ⑫ 帧时间直方图勾选仍可见但不接绘制。
+        assert!(mgr.contains("显示帧时间直方图"));
+        assert!(!mgr.contains("FrameHistogram"), "不得画成可用诊断图");
+    }
+
+    // ---- IDX-A-ADD / IDX-A-SIDE
+
+    /// `IDX-A-ADD`：添加文件夹入口只有顶栏导入 / 索引进度空态 / 设置页来源，
+    /// 不复制照片、不创建演示来源。
+    #[test]
+    fn idx_a_add_has_no_demo_source_and_no_menu_entry() {
+        // 只看菜单项清单函数（注释里会解释「为什么删掉它」）。
+        let menu = include_str!("topbar.rs");
+        let start = menu.find("pub fn more_menu_items(").expect("menu items");
+        let rest = &menu[start..];
+        let end = rest.find("\n}").expect("items fn end");
+        let items = &rest[..end];
+        assert!(
+            !items.contains("添加文件夹"),
+            "更多菜单不许再有「添加文件夹…」（`M5-MN-01`）：{items}"
+        );
+        let src = prod_src();
+        let progress = include_str!("index_progress.rs");
+        assert!(
+            progress.contains("添加关注文件夹"),
+            "索引进度空态仍要能添加（`IDX-A-ADD`）"
+        );
+        // 添加文件夹不是索引选项：五标签里没有「含子文件夹」勾选。
+        assert!(!src.contains("含子文件夹"), "索引管理里没有「含子文件夹」选项");
+    }
+
+    /// `IDX-A-SIDE`：左栏分组顺序固定，且没有「设置」组 / 「索引管理」子项。
+    #[test]
+    fn idx_a_side_has_no_settings_group_or_index_subitem() {
+        let src = include_str!("sidebar.rs");
+        assert!(src.contains("SIDEBAR_GROUPS"));
+        // 只看分组常量本身：注释里会说明「设置组整组删除」，那不算绘制点。
+        let start = src.find("SIDEBAR_GROUPS").expect("group constant");
+        let rest = &src[start..];
+        let end = rest.find(']').expect("array end");
+        let groups = &rest[..=end];
+        assert!(!groups.contains("设置"), "左栏分组里不许有「设置」：{groups}");
+        assert!(!groups.contains("索引管理"), "{groups}");
     }
 }

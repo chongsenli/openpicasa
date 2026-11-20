@@ -714,6 +714,12 @@ pub fn build_snapshot(d: &db::Db, input: &SnapshotInput<'_>) -> Result<MgmtSnaps
         {
             t.task_id = intent.task_id;
             t.user_paused = intent.user_paused;
+            // 类型以库里那条持久意图为准（`IDX-A-STATE-LABEL`：
+            // 首次索引 / 刷新 / 重建 / 恢复 / 回填尺寸 / 校验）。板上没有 kind，
+            // 猜类型是错的，对齐到的这一条就是唯一权威。
+            if let Some(kind) = db::TaskKind::from_code(intent.kind) {
+                t.kind = kind.label().to_string();
+            }
         }
     }
     for t in history {
@@ -812,10 +818,18 @@ fn exclusion_view(row: &ExclusionRow, root: Option<&str>) -> ExclusionView {
 /// （M2.1 的设计：进度每帧变，不该每帧写库）。所以「任务」标签要同时看两个地方，
 /// 而两边的字段形状不同——这个函数就是那个接缝。
 ///
-/// ⚠️ 板上的任务**没有类型**（`TaskSnapshot` 不记 kind），所以这里写「索引」。
-/// 类型精确化要等流水线（M2.2 迭代 2 / M3）把建任务与入板合并，本版不猜。
+/// ⚠️ 板上的任务本身**不带类型**（`TaskSnapshot` 不记 kind），这里先写「索引」；
+/// `build_snapshot` 对齐到库里未完成的持久意图后会把它换成 `TaskKind::label`
+/// （首次索引 / 刷新 / 重建 / 恢复 / 回填尺寸 / 校验）。
 pub fn live_task_views(board: &crate::index::IndexSnapshot) -> Vec<TaskView> {
     let now = crate::index::now_secs();
+    // 「已用」从**批次开始**算，不是从最近一次进度更新算：后者每次都归零，
+    // 界面上表现为「已用 00:00」永远不动（`M5-IDX-03` 的「已用 mm:ss」）。
+    let elapsed_ms = if board.started_at > 0.0 {
+        ((now - board.started_at).max(0.0) * 1000.0) as i64
+    } else {
+        0
+    };
     board
         .tasks
         .iter()
@@ -841,7 +855,7 @@ pub fn live_task_views(board: &crate::index::IndexSnapshot) -> Vec<TaskView> {
             .to_string(),
             batch: Some(t.batch),
             started_at: Some(board.started_at as i64),
-            elapsed_text: format_mmss(((now - t.last_update).max(0.0) * 1000.0) as i64),
+            elapsed_text: format_mmss(elapsed_ms),
             outcome: None,
             // 板上活任务的真实暂停态来自 DB 意图，build_snapshot 里覆盖。
             user_paused: false,
@@ -1022,11 +1036,15 @@ pub fn check_export_dir(dir: &Path, snap: &MgmtSnapshot) -> std::result::Result<
     Ok(())
 }
 
-/// 日志导出的文件名（§4.9）：`openpicasa-diag-yyyyMMdd-HHmmss.zip`。
+/// 诊断日志导出的文件名（§4.9 / `INDEX-AUDIT` §3.5）：
+/// `openpicasa-diag-yyyyMMdd-HHmmss.json`。
+///
+/// 导出内容是脱敏后的 JSON 文本，不是压缩包——扩展名必须与内容一致，
+/// 否则用户在别的程序里双击会被当成 zip 解析失败。
 pub fn diag_filename(unix_secs: i64) -> String {
     // 不引 chrono：只需要一个 UTC 时间戳格式化，手写避免多一个依赖。
     let (y, m, d, hh, mm, ss) = civil_from_unix(unix_secs);
-    format!("openpicasa-diag-{y:04}{m:02}{d:02}-{hh:02}{mm:02}{ss:02}.zip")
+    format!("openpicasa-diag-{y:04}{m:02}{d:02}-{hh:02}{mm:02}{ss:02}.json")
 }
 
 /// Unix 秒 → (年, 月, 日, 时, 分, 秒)（UTC）。Howard Hinnant 的 civil_from_days 算法。
@@ -1426,7 +1444,7 @@ mod tests {
     fn diag_filename_shape() {
         // 2026-11-01 12:34:56 UTC（`date -u -d "2026-11-01 12:34:56" +%s` 得来，别手算）
         let secs = 1_793_536_496;
-        assert_eq!(diag_filename(secs), "openpicasa-diag-20261101-123456.zip");
+        assert_eq!(diag_filename(secs), "openpicasa-diag-20261101-123456.json");
     }
 
     #[test]

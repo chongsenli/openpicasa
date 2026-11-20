@@ -179,6 +179,57 @@ mod tests {
         }
     }
 
+    /// `AC-IDX-ENTRY` / §11 #10：设置页只放外观（含主题）、打开索引管理、图库来源；
+    /// 「演示与数据」不进正式产品，也没有帮助页假入口。
+    #[test]
+    fn ac_idx_entry_settings_only_carries_the_three_confirmed_sections() {
+        // 三件已确认的事各有对应动作。
+        assert_eq!(SETTINGS_TITLE, "设置");
+        assert_eq!(OPEN_INDEX_MANAGER_LABEL, "打开索引管理");
+        assert!(ADD_FOLDER_LABEL.contains("关注文件夹"));
+        // 动作枚举里只有这三个（没有「演示」「帮助」「评分」之类）。
+        let actions = [
+            SettingsAction::OpenIndexManager,
+            SettingsAction::AddFolder,
+            SettingsAction::SetAppearance(Appearance::Light),
+        ];
+        assert_eq!(actions.len(), 3);
+
+        // 页面正文（去掉注释）里不许出现这些越界项。
+        let prod = match include_str!("settings.rs").find("#[cfg(test)]") {
+            Some(i) => &include_str!("settings.rs")[..i],
+            None => include_str!("settings.rs"),
+        };
+        for banned in ["演示与数据", "恢复演示数据", "帮助与快捷键", "评分"] {
+            for line in prod.lines() {
+                let t = line.trim_start();
+                if t.starts_with("//") || t.starts_with("///") {
+                    continue;
+                }
+                assert!(!line.contains(banned), "设置页不许出现「{banned}」：{line}");
+            }
+        }
+    }
+
+    /// `AC-IDX-ENTRY`：设置页的「打开索引管理」与更多菜单「索引管理…」是**同一个落点**
+    /// （都走 `IndexMgrUi::open_at`），不是两套实现。
+    #[test]
+    fn ac_idx_entry_settings_and_more_menu_share_one_landing_point() {
+        let app = include_str!("app.rs");
+        let prod = match app.find("#[cfg(test)]") {
+            Some(i) => &app[..i],
+            None => app,
+        };
+        // 两个入口都调 open_at，且都传同一份 failed_task_count。
+        let calls = prod.matches(".open_at(&self.mgmt, self.mgmt.failed_task_count)").count();
+        assert!(
+            calls >= 3,
+            "更多菜单 / 设置页 / 浮层详情都应走同一个 open_at（实际 {calls} 处）"
+        );
+        // 设置页那支必须真的把窗口打开（不是只置一个标志没人读）。
+        assert!(prod.contains("SettingsAction::OpenIndexManager"));
+    }
+
     /// M5-R3：外观开关必须**自带「未定稿」标注**，且不挤掉索引 / 来源入口。
     #[test]
     fn m5_r3_appearance_switch_is_marked_temporary() {

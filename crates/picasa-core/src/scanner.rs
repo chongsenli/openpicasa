@@ -267,7 +267,8 @@ impl IndexService {
         if let Ok(db) = self.inner.db.lock() {
             let _ = db.set_index_pause_all(true);
         }
-        // 显示层跟着走：面板/状态栏的「已暂停」来自 IndexBoard，不是这里自己记
+        // 显示层跟着走：面板/状态栏的「已暂停」来自 IndexBoard，不是这里自己记。
+        // 这是**用户**发起的全局暂停，有「继续索引」；系统暂停才没有（M5-IDX-03）。
         self.inner.board.pause_all("已手动暂停");
     }
 
@@ -1951,7 +1952,7 @@ fn heartbeat_loop(inner: Arc<Inner>) {
         last = now;
         let running = inner.board.running();
         if running && gap >= Duration::from_secs(6) {
-            inner.board.pause_all("系统休眠 / 进程被挂起");
+            inner.board.pause_all_system("系统休眠 / 进程被挂起");
             tracing::info!(gap = ?gap, "检测到系统挂起，索引暂时标记为暂停");
             paused = true;
             continue;

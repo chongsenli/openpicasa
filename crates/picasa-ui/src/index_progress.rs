@@ -1138,4 +1138,272 @@ mod tests {
         assert_eq!(relative_time(1000.0, 400.0), "10 分钟前");
         assert_eq!(relative_time(10_000.0, 400.0), "2 小时前");
     }
+
+    // ------------------------------------------------------------ M5-R6 门禁
+
+    /// `AC-IDX-FLOAT`：<1.5 s 结束不出浮层；>1.5 s 仍在跑才出现。
+    #[test]
+    fn ac_idx_float_only_appears_after_one_and_a_half_seconds() {
+        assert_eq!(APPEAR_AFTER, 1.5, "阈值是命名常量，不许为了测试好看去改");
+
+        // 快任务：0.4 s 就结束了，连骨架都不画。
+        let b = IndexBoard::new();
+        b.begin_batch(&["/p/a".into()]);
+        b.mark_scanning("/p/a");
+        b.freeze_denominator("/p/a", 1, 0);
+        b.note_thumb_ok("/p/a");
+        b.finish("/p/a");
+        let mut ui = ui_with_snapshot(b.snapshot());
+        ui.appear_at = Some(1.5);
+        ui.advance(1.4);
+        assert!(!ui.shown, "1.4 s 时还没到阈值");
+        ui.advance(1.6);
+        assert!(!ui.shown, "任务已在阈值前结束 → 永不出浮层");
+
+        // 慢任务：一直跑到 2 s，浮层出现。
+        let b = running_board();
+        let mut ui = ui_with_snapshot(b.snapshot());
+        ui.appear_at = Some(APPEAR_AFTER);
+        ui.advance(APPEAR_AFTER + 0.1);
+        assert!(ui.shown, ">1.5 s 仍在跑 → 出现");
+    }
+
+    /// `AC-IDX-FLOAT`：有失败 / 不可访问 / **系统暂停**时浮层不自动收起。
+    #[test]
+    fn ac_idx_float_stays_open_on_failure_unreachable_or_system_pause() {
+        // ① 失败
+        let b = running_board();
+        b.note_thumb_failed(
+            "/p/a",
+            FailureItem {
+                photo_id: 1,
+                name: "bad.jpg".into(),
+                reason: "解码失败".into(),
+            },
+        );
+        b.finish("/p/a");
+        let mut ui = ui_with_snapshot(b.snapshot());
+        ui.shown = true;
+        ui.advance(100.0);
+        assert!(ui.shown, "有失败项时不得自动收起");
+        assert!(ui.hide_at.is_none());
+
+        // ② 系统暂停（没结束，但已暂停）
+        let b = running_board();
+        b.pause_all_system("系统休眠");
+        let mut ui = ui_with_snapshot(b.snapshot());
+        ui.shown = true;
+        ui.advance(100.0);
+        assert!(ui.shown, "系统暂停时不得自动收起");
+
+        // ③ 不可访问
+        let b = IndexBoard::new();
+        b.begin_batch(&["/p/a".into()]);
+        b.mark_scanning("/p/a");
+        b.mark_unreachable("/p/a", "盘拔了");
+        let mut ui = ui_with_snapshot(b.snapshot());
+        ui.shown = true;
+        ui.advance(100.0);
+        assert!(ui.shown, "不可访问时不得自动收起");
+    }
+
+    /// `AC-IDX-FLOAT`：正常结束 1 s 内收起；点 × 后本批次不再弹且索引继续。
+    #[test]
+    fn ac_idx_float_hides_within_one_second_and_close_is_per_batch() {
+        assert_eq!(HIDE_AFTER, 1.0);
+        let b = running_board();
+        let mut ui = ui_with_snapshot(b.snapshot());
+        ui.shown = true;
+        for _ in 0..10 {
+            b.note_thumb_ok("/p/a");
+        }
+        b.finish("/p/a");
+        ui.snapshot = b.snapshot();
+        ui.advance(5.0);
+        assert!(ui.shown, "刚完成的一瞬间还在（等 1 s）");
+        ui.advance(6.1);
+        assert!(!ui.shown, "完成后 1 s 内收起");
+
+        // × 关闭：本批次不再弹（索引继续——关闭只记内存里的批次号）。
+        let batch = b.snapshot().batch;
+        ui.closed.insert(batch);
+        ui.shown = false;
+        ui.advance(100.0);
+        assert!(!ui.shown, "× 之后同批次不再弹出");
+        assert!(ui.closed.contains(&batch), "关闭记忆按批次");
+    }
+
+    /// `show_panel` 的函数体（两套暂停的边界只看这里）。
+    fn panel_fn_body(src: &str) -> &str {
+        let start = src.find("pub fn show_panel(").expect("show_panel");
+        let rest = &src[start..];
+        let end = rest.find("\n    /// 状态栏入口").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// 生产代码行（去掉注释与 `#[cfg(test)]` 之后的测试段）。
+    fn code_lines(src: &str) -> Vec<&str> {
+        src.lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//") && !t.starts_with("///") && !t.starts_with('*')
+            })
+            .collect()
+    }
+
+    /// `AC-IDX-FLOAT` / `IDX-A-FLOAT`：浮层标题固定、宽度约 300、条上不印 ETA。
+    #[test]
+    fn ac_idx_float_title_and_width_are_fixed_and_have_no_eta() {
+        let src = include_str!("index_progress.rs");
+        assert!(src.contains("正在建立缩略图索引"), "标题固定，不随阶段改");
+        assert!(src.contains("TOAST_W: f32 = 300.0"), "宽约 300");
+        // 运行时拼出禁用词，避免用例自己成为「源码里出现该词」的证据。
+        let banned = ["剩余".to_string() + "时间", "预计".to_string() + "完成"];
+        for line in code_lines(src) {
+            if line.contains("banned") {
+                continue;
+            }
+            for b in &banned {
+                assert!(!line.contains(b.as_str()), "浮层不许出现 {b}：{line}");
+            }
+        }
+    }
+
+    /// `AC-IDX-FLOAT` / `IDX-A-PROG`：面板标题「索引进度」、不可缩放、默认宽 440，
+    /// 且有「打开索引管理」「删除索引」「暂停索引 / 继续索引」。
+    #[test]
+    fn idx_a_prog_panel_has_required_buttons_and_is_not_resizable() {
+        let src = include_str!("index_progress.rs");
+        assert!(src.contains("索引进度"), "窗口标题");
+        assert!(src.contains(".resizable(false)"), "面板不可缩放");
+        assert!(src.contains(".default_width(440.0)"), "默认宽 440");
+        for label in [
+            "打开索引管理",
+            "删除索引",
+            "暂停索引",
+            "继续索引",
+            "全部重试",
+            "查看失败项",
+        ] {
+            assert!(src.contains(label), "面板缺「{label}」");
+        }
+        // 失败项最多 50 条。
+        assert!(src.contains(".take(50)"), "失败明细最多 50 条");
+    }
+
+    /// `AC-IDX-PAUSE` / `IDX-A-PITFALL` ④：两套暂停不是同一个控件。
+    ///
+    /// 面板底部是**全局**旗标（`ProgressAction::PauseIndex` / `ResumeIndex`），
+    /// 任务页是**逐任务**的（`MgrAction::PauseTask(id)`）。混成一个就会
+    /// 「暂停一条结果整库停了」。
+    #[test]
+    fn ac_idx_pause_panel_global_pause_is_a_different_control_from_per_task_pause() {
+        let src = include_str!("index_progress.rs");
+        assert!(src.contains("ProgressAction::PauseIndex"));
+        assert!(src.contains("ProgressAction::ResumeIndex"));
+        // 只看面板绘制函数的函数体（注释里会解释「两套暂停不是同一个控件」）。
+        let panel = panel_fn_body(src);
+        assert!(
+            !panel.contains("PauseTask"),
+            "面板不该发逐任务暂停：{panel}"
+        );
+        let mgr = include_str!("index_mgr.rs");
+        let mgr_prod = match mgr.find("#[cfg(test)]") {
+            Some(i) => &mgr[..i],
+            None => mgr,
+        };
+        assert!(mgr_prod.contains("MgrAction::PauseTask(t.task_id)"));
+        assert!(mgr_prod.contains("MgrAction::ResumeTask(t.task_id)"));
+        assert!(
+            !code_lines(mgr_prod).iter().any(|l| l.contains("ProgressAction::PauseIndex")),
+            "任务页不该发全局暂停"
+        );
+    }
+
+    /// `AC-XX-UNREACHABLE`：旧底栏「索引进度」按钮与「诊断」窗没有任何调用点。
+    #[test]
+    fn ac_xx_unreachable_legacy_entries_have_no_call_site() {
+        // `status_button` 只定义、不调用。
+        let progress = include_str!("index_progress.rs");
+        assert!(progress.contains("pub fn status_button("), "旧函数可以留着（不是入口）");
+        let app = include_str!("app.rs");
+        assert!(
+            !app.contains("status_button"),
+            "底栏「索引进度」按钮不许有调用点"
+        );
+        // 诊断窗只有「已打开」分支，没有任何地方把它置真。
+        assert!(
+            !app.contains("self.diagnostics_open = true"),
+            "诊断窗必须保持不可达"
+        );
+        // 「重建失败索引」只有「已存在」分支，没有任何地方把它置 Some。
+        assert!(
+            !app.contains("self.confirm_rebuild_failed = Some"),
+            "「重建失败索引」必须保持不可达"
+        );
+    }
+
+    /// `AC-OUT-PLANNED`：不做全库一键重建、导入暂停、预览展开树、
+    /// 浏览后自动选中左栏、界面化 `OPENPICASA_NO_STARTUP_SCAN`。
+    #[test]
+    fn ac_out_planned_items_are_not_implemented() {
+        let mgr_full = include_str!("index_mgr.rs");
+        let mgr = match mgr_full.find("#[cfg(test)]") {
+            Some(i) => &mgr_full[..i],
+            None => mgr_full,
+        };
+        let app = include_str!("app.rs");
+        let settings = include_str!("settings.rs");
+        for (name, needle) in [
+            ("导入暂停", "暂停导入"),
+            ("预览展开树", "CollapsingHeader"),
+        ] {
+            assert!(!mgr.contains(needle), "OUT-PLANNED 不许实现：{name}");
+        }
+        // 「全库一键重建」：只有按根的 `RebuildRoot(id)`，没有全库版本。
+        assert!(!mgr.contains("RebuildAll"), "不做全库一键重建");
+        // `OPENPICASA_NO_STARTUP_SCAN` 只能是环境变量，不能变成设置项。
+        assert!(
+            !settings.contains("NO_STARTUP_SCAN"),
+            "环境变量不许做成设置项"
+        );
+        // 环境变量只能以「读环境变量 / 说明它只作用于本次启动」的形式出现，
+        // 不得变成设置页里可点的开关。
+        let settings_ui = include_str!("settings.rs");
+        assert!(
+            !settings_ui.contains("NO_STARTUP_SCAN"),
+            "环境变量不许做成设置项"
+        );
+        assert!(
+            app.contains("std::env::var(\"OPENPICASA_NO_STARTUP_SCAN\")"),
+            "环境变量仍应只是启动期诊断开关"
+        );
+        assert!(
+            !app.contains("set_setting_raw(\"OPENPICASA_NO_STARTUP_SCAN\""),
+            "不许把环境变量写进偏好"
+        );
+        // 浏览导入后不自动选中左栏节点（IDX-19 规划）。
+        assert!(!app.contains("auto_select_import_node"));
+    }
+
+    /// `AC-OUT-PLANNED`：`M5-IDX-11` / `M5-IDX-12` 保持「文档规划」，
+    /// 没有可点的「全库重建」「新建索引入口」。
+    #[test]
+    fn ac_out_planned_idx11_and_idx12_have_no_ui_surface() {
+        let mgr = include_str!("index_mgr.rs");
+        // 只看生产代码（测试自己会写出这些词来断言「不存在」）。
+        let prod = match mgr.find("#[cfg(test)]") {
+            Some(i) => &mgr[..i],
+            None => mgr,
+        };
+        // 全库范围的动作只有「清理缩略图」与「删除索引」，没有「全库重建」。
+        for banned in ["全库重建", "一键重建", "新建索引"] {
+            for line in prod.lines() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                assert!(!line.contains(banned), "IDX-11/12 规划项不做：{line}");
+            }
+        }
+    }
 }

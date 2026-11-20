@@ -328,6 +328,7 @@ mod tests {
             reason: None,
             last_update: 0.0,
             failures: Vec::new(),
+            system_paused: state == IndexState::Paused,
         }
     }
 
@@ -514,6 +515,61 @@ mod tests {
     }
 
     use picasa_core::MgmtSnapshot;
+
+    /// `AC-IDX-ENTRY` / `M5-IDX-01`：底栏**没有**可点索引入口，
+    /// 且运行中的只读文案不出现分母 / 百分比 / ETA。
+    #[test]
+    fn ac_idx_entry_footer_is_read_only_and_free_of_denominators() {
+        // 结构事实：入口不存在。
+        assert!(!statusbar_has_clickable_entry());
+        // 只读文案里只有「已处理 N 张」与「已用 mm:ss」。
+        let snap = IndexSnapshot {
+            batch: 1,
+            tasks: vec![task(IndexState::Thumbnailing, 42, 400)],
+            ..Default::default()
+        };
+        let text = running_status_text(&snap, Some(75)).unwrap();
+        assert!(text.contains("已处理 42 张"), "{text}");
+        assert!(text.contains("已用 01:15"), "{text}");
+        for banned in ["/", "%", "％", "400", "预计", "剩余", "ETA"] {
+            assert!(!text.contains(banned), "底栏只读文案不许出现 {banned}：{text}");
+        }
+        // `StatusbarOut` 只有滑块事件——没有任何「索引被点开」的字段。
+        let out = StatusbarOut::default();
+        assert!(out.zoom_px.is_none() && !out.zoom_released);
+    }
+
+    /// `AC-IDX-ENTRY`：底栏只读状态不许把 IO 短进度做成入口，
+    /// IO 终态不常驻（空闲 / 成功 / 失败 / 取消都消失）。
+    #[test]
+    fn ac_idx_entry_io_status_is_only_a_read_only_transient_state() {
+        let mut io = IoUi {
+            state: IoState::Running,
+            snapshot: Some(ProgressSnapshot {
+                stage: "导入".into(),
+                done: 7,
+                total: None,
+                current: String::new(),
+                errors: Vec::new(),
+                revision: 1,
+            }),
+            ..Default::default()
+        };
+        let text = io_status_text(&io).unwrap();
+        assert!(text.contains("已处理 7 项"), "{text}");
+        assert!(!text.contains('%'), "未知总数不许造百分比：{text}");
+        assert!(!text.contains('/'), "未知总数不许造分母：{text}");
+
+        for state in [
+            IoState::Idle,
+            IoState::Success,
+            IoState::Failed,
+            IoState::Cancelled,
+        ] {
+            io.state = state;
+            assert_eq!(io_status_text(&io), None, "{state:?} 不该常驻底栏");
+        }
+    }
 
     /// 悬停文案的三个分量加起来必须等于角标总数（§4.4）。
     ///

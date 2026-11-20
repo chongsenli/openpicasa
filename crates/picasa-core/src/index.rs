@@ -150,9 +150,33 @@ pub struct TaskSnapshot {
     pub last_update: f64,
     /// 失败项明细（给面板展开用；内部已限长，见 [`MAX_FAILURES`]）
     pub failures: Vec<FailureItem>,
+    /// 这条 `Paused` 是不是**系统事件**（休眠 / 低电量 / 进程被挂起）造成的。
+    ///
+    /// 与用户逐任务暂停必须分开：用户暂停有「继续」按钮，点一下就从检查点续跑；
+    /// 系统暂停没有，恢复由系统事件自动发生（`M5-IDX-03` / `P-03`）。
+    /// 只靠 `state == Paused` 分不出是哪一种，界面就会把用户暂停说成
+    /// 「休眠 / 低电量」——文案撒谎，而且用户找不到「继续」。
+    pub system_paused: bool,
 }
 
 impl TaskSnapshot {
+    /// 这条任务**真正处理完**的照片数（`M5-IDX-03` 的「已处理 N 张」）。
+    ///
+    /// 口径与 [`IndexSnapshot::processed_running`] 一致，按阶段分开：
+    /// * 扫描阶段：`discovered` 就是「已入库张数」，取 `max` 不会停在 0；
+    /// * 生成阶段：`discovered` 已经是**分母**，只能用 `completed + failed`。
+    ///
+    /// 任务行文案必须用它而不是 `discovered`：后者在生成阶段是总数，
+    /// 写成「已处理」等于把分母摊在界面上（`IDX-A-ANTI-V12` / 永久禁令）。
+    pub fn processed(&self) -> u64 {
+        let finished = self.completed.saturating_add(self.failed);
+        if self.state == IndexState::Scanning {
+            self.discovered.max(finished)
+        } else {
+            finished
+        }
+    }
+
     /// `已完成 / 已发现` 的文案。分母未知时是「X / 已发现 Y」。
     pub fn counts_text(&self) -> String {
         if self.percent.is_none() && self.state == IndexState::Scanning {
@@ -213,17 +237,7 @@ impl IndexSnapshot {
         self.tasks
             .iter()
             .filter(|t| t.state.is_running())
-            .map(|t| {
-                let finished = t.completed.saturating_add(t.failed);
-                if t.state == IndexState::Scanning {
-                    // 扫描阶段每落库一张照片就是一次真实处理，且此时还没有
-                    // 「总数」这个概念（分母未冻结），不存在泄露分母的问题。
-                    t.discovered.max(finished)
-                } else {
-                    // 生成阶段 `discovered` 已经是分母：只用真正处理完的张数。
-                    finished
-                }
-            })
+            .map(|t| t.processed())
             .sum()
     }
 
@@ -250,8 +264,21 @@ impl IndexSnapshot {
     }
 
     /// 存在系统暂停的任务。
+    ///
+    /// ⚠️ **只数系统暂停**：用户逐任务暂停的任务也有 `state == Paused`，但它的
+    /// 恢复要靠用户点「继续」，不能显示成「恢复由系统事件自动发生」。两套暂停
+    /// 混成一个布尔值会让文案撒谎（`M5-IDX-03` / `AC-IDX-PAUSE`）。
     pub fn paused(&self) -> bool {
-        self.tasks.iter().any(|t| t.state == IndexState::Paused)
+        self.tasks
+            .iter()
+            .any(|t| t.state == IndexState::Paused && t.system_paused)
+    }
+
+    /// 是否存在用户暂停的任务（逐任务或全局「暂停索引」，都有「继续」）。
+    pub fn user_paused(&self) -> bool {
+        self.tasks
+            .iter()
+            .any(|t| t.state == IndexState::Paused && !t.system_paused)
     }
 
     /// 汇总阶段文案。多任务时以「最近活跃」的那个为准，避免出现"汇总说扫描中、实际在生成"。
@@ -322,8 +349,12 @@ struct Task {
     /// 进入 `暂停` 前的状态，恢复时原样回去
     resume_to: Option<IndexState>,
     /// 用户逐任务暂停标记（M4.3）：系统休眠恢复 `resume_all()` 不得越过它。
-    /// 这是内部状态，**不**进 [`TaskSnapshot`]。
     user_paused: bool,
+    /// 这条 `Paused` 是系统事件（休眠 / 挂起）造成的吗。
+    ///
+    /// 与 `user_paused` 分开：手工「暂停索引」也会让任务进入 `Paused`，但它可以
+    /// 由用户点「继续」恢复；只有系统暂停才写「恢复由系统事件自动发生」。
+    system_paused: bool,
 }
 
 impl Task {
@@ -344,6 +375,7 @@ impl Task {
             reason: self.reason.clone(),
             last_update: self.last_update,
             failures: self.failures.clone(),
+            system_paused: self.system_paused,
         }
     }
 
@@ -718,8 +750,24 @@ impl IndexBoard {
         self.bump();
     }
 
-    /// 系统事件（休眠/挂起）导致的暂停：只对还在跑的任务生效。
+    /// 全局「暂停索引」（用户在「索引进度」面板按的）：只对还在跑的任务生效。
+    ///
+    /// ⚠️ 这是**用户**发起的全局暂停，与 [`Self::pause_all_system`] 分开：
+    /// 前者有「继续索引」，后者没有（恢复由系统事件自动发生）。两者都让任务进入
+    /// `Paused`，只靠状态字分不出来，所以 `system_paused` 必须由调用方声明。
     pub fn pause_all(&self, reason: &str) {
+        self.pause_everything(reason, false);
+    }
+
+    /// 系统事件（休眠 / 挂起）导致的暂停：只对还在跑的任务生效。
+    ///
+    /// 与 [`Self::pause_all`] 的区别只有一个：打上 `system_paused`，界面据此写
+    /// 「系统暂停中（休眠 / 低电量），恢复由系统事件自动发生」而**不画「继续」**。
+    pub fn pause_all_system(&self, reason: &str) {
+        self.pause_everything(reason, true);
+    }
+
+    fn pause_everything(&self, reason: &str, by_system: bool) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut changed = false;
         for t in inner.tasks.iter_mut() {
@@ -729,6 +777,7 @@ impl IndexBoard {
                 t.resume_to = Some(t.state);
                 t.state = IndexState::Paused;
                 t.reason = Some(reason.to_string());
+                t.system_paused = by_system;
                 changed = true;
             }
         }
@@ -749,6 +798,7 @@ impl IndexBoard {
             if t.state == IndexState::Paused && !t.user_paused {
                 t.state = t.resume_to.take().unwrap_or(IndexState::Thumbnailing);
                 t.reason = None;
+                t.system_paused = false;
                 t.last_update = now;
                 changed = true;
             }
@@ -775,6 +825,8 @@ impl IndexBoard {
                 // 若此刻已是系统暂停（Paused 且 user_paused=false），
                 // 保留 pause_all 记下的 resume_to，不把 Paused 当成恢复目标。
                 t.user_paused = true;
+                // 用户接管之后恢复要靠他点「继续」，不再算系统暂停。
+                t.system_paused = false;
                 t.state = IndexState::Paused;
                 t.reason = Some(reason.to_string());
                 t.last_update = now;
@@ -797,6 +849,7 @@ impl IndexBoard {
             && t.user_paused
         {
             t.user_paused = false;
+            t.system_paused = false;
             t.state = t.resume_to.take().unwrap_or(IndexState::Thumbnailing);
             t.reason = None;
             t.last_update = now;
@@ -871,6 +924,7 @@ fn new_task(path: String, name: String, batch: u64, now: f64) -> Task {
         last_update: now,
         resume_to: None,
         user_paused: false,
+        system_paused: false,
     }
 }
 
