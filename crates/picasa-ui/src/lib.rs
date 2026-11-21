@@ -81,7 +81,8 @@ pub fn run() -> eframe::Result {
             // titlebar 隐藏系统标题文字（macOS 上栏体自绘）。
             .with_fullsize_content_view(cfg!(target_os = "macos"))
             .with_titlebar_shown(!cfg!(target_os = "macos"))
-            .with_title_shown(!cfg!(target_os = "macos")),
+            // H8：窗口标题始终显示 "OpenPicasa"（macOS 也不隐藏）。
+            .with_title_shown(true),
         // 02 §5.2.2 方案 ①：把 eframe 的 UI 状态指到 Preferences 侧，
         // 不和索引库混在同一个目录语义里。
         persistence_path: Some(paths.ui_state_file()),
