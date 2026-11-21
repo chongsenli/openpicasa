@@ -12,9 +12,8 @@
 //!    `M5-IDX-01`）。这是底栏入口被删之后的正规入口之一。
 //! 2. **图库来源**：按钮「添加关注文件夹…」→ 与顶栏「导入」**同一个**
 //!    `add_folder`（`M5-IM-01`：同一函数、同一系统选目录面板），不是第二套实现。
-//! 3. **外观（验收用临时开关）**：亮色 / 暗色两选一，写入既有 preferences。
-//!    这是为了在固定 Linux / Xvfb 环境里能验收两套主题，**不是**对 §11 #4
-//!    「主题切换入口放在哪里」的裁定——文案里明确写了「入口位置未定稿」。
+//! 3. **外观**：亮色 / 暗色 / 跟随系统三选一，写入既有 preferences。
+//!    这是正式主题入口（只在设置页；更多菜单不放「切换到暗色」）。
 //!
 //! ## 明确不在这里的东西
 //!
@@ -50,18 +49,17 @@ pub const OPEN_INDEX_MANAGER_LABEL: &str = "打开索引管理";
 /// 页内「图库来源」段落的按钮文案。
 pub const ADD_FOLDER_LABEL: &str = "添加关注文件夹…";
 
-/// M5-R3：外观段落的标题。括号里明说「未定稿」，避免看起来像正式产品入口。
-pub const APPEARANCE_SECTION: &str = "外观（入口位置未定稿，仅用于验收）";
+/// 外观段落的标题（正式入口只在设置页）。
+pub const APPEARANCE_SECTION: &str = "外观";
 
 /// 亮色选项文案。
-pub const APPEARANCE_LIGHT_LABEL: &str = "亮色 · 清场";
+pub const APPEARANCE_LIGHT_LABEL: &str = "亮色";
 
 /// 暗色选项文案。
-pub const APPEARANCE_DARK_LABEL: &str = "暗色 · 暗房";
+pub const APPEARANCE_DARK_LABEL: &str = "暗色";
 
-/// 外观段落下方的说明（为什么这里有这个开关）。
-pub const APPEARANCE_NOTE: &str =
-    "仅用于验收两套主题；正式入口放在设置页、更多菜单还是跟随系统仍未定稿。";
+/// 跟随系统选项文案。
+pub const APPEARANCE_SYSTEM_LABEL: &str = "跟随系统";
 
 /// 画设置窗口。`open` 由调用方持有（本模块不负责「关掉之后干什么」）。
 ///
@@ -87,18 +85,13 @@ pub fn show(
             ui.set_width(440.0);
             ui.add_space(4.0);
 
-            // ---- 外观（验收用临时开关；§11 #4 未裁定）----
+            // ---- 外观（亮色 / 暗色 / 跟随系统）----
             section(ui, theme, APPEARANCE_SECTION);
-            ui.label(
-                RichText::new(APPEARANCE_NOTE)
-                    .size(11.0)
-                    .color(theme.text_secondary),
-            );
-            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 for (value, label) in [
                     (Appearance::Light, APPEARANCE_LIGHT_LABEL),
                     (Appearance::Dark, APPEARANCE_DARK_LABEL),
+                    (Appearance::System, APPEARANCE_SYSTEM_LABEL),
                 ] {
                     let selected = appearance == value;
                     let text = if selected {
@@ -115,11 +108,6 @@ pub fn show(
 
             // ---- 图库来源（已确认的入口壳之一；与顶栏「导入」同一 add_folder）----
             section(ui, theme, "图库来源");
-            ui.label(
-                RichText::new("关注文件夹只读扫描，不会修改或移动你的照片。")
-                    .size(11.5)
-                    .color(theme.text_secondary),
-            );
             ui.add_space(4.0);
             if ui.button(ADD_FOLDER_LABEL).clicked() {
                 action = Some(SettingsAction::AddFolder);
@@ -230,25 +218,37 @@ mod tests {
         assert!(prod.contains("SettingsAction::OpenIndexManager"));
     }
 
-    /// M5-R3：外观开关必须**自带「未定稿」标注**，且不挤掉索引 / 来源入口。
+    /// 正式主题：设置页只给「亮色 / 暗色 / 跟随系统」三个选项，
+    /// 不再带「清场 / 暗房 / 入口位置未定稿」这类验收期文案。
     #[test]
-    fn m5_r3_appearance_switch_is_marked_temporary() {
-        assert!(APPEARANCE_SECTION.contains("未定稿"), "{APPEARANCE_SECTION}");
-        assert!(APPEARANCE_SECTION.contains("验收"), "{APPEARANCE_SECTION}");
-        assert!(APPEARANCE_NOTE.contains("未定稿"), "{APPEARANCE_NOTE}");
-        assert!(APPEARANCE_LIGHT_LABEL.contains("清场"));
-        assert!(APPEARANCE_DARK_LABEL.contains("暗房"));
-        // 两个选项是不同的动作值（切换真的会发生）。
+    fn appearance_is_formal_light_dark_and_system() {
+        assert_eq!(APPEARANCE_SECTION, "外观");
+        assert_eq!(APPEARANCE_LIGHT_LABEL, "亮色");
+        assert_eq!(APPEARANCE_DARK_LABEL, "暗色");
+        assert_eq!(APPEARANCE_SYSTEM_LABEL, "跟随系统");
+        // 三个选项是不同的动作值（切换真的会发生）。
         assert_ne!(
             SettingsAction::SetAppearance(Appearance::Light),
             SettingsAction::SetAppearance(Appearance::Dark)
         );
-        // 不出现「演示与数据」；也不写「默认暗色」这类会改产品默认的话。
+        assert_ne!(
+            SettingsAction::SetAppearance(Appearance::Dark),
+            SettingsAction::SetAppearance(Appearance::System)
+        );
+        // 验收期文案彻底退役：用户可见处不再出现这三个词组。
+        let src = match include_str!("settings.rs").find("#[cfg(test)]") {
+            Some(i) => &include_str!("settings.rs")[..i],
+            None => include_str!("settings.rs"),
+        };
+        for banned in ["清场", "暗房", "入口位置未定稿", "仅用于验收"] {
+            assert!(!src.contains(banned), "设置页仍出现验收期文案「{banned}」");
+        }
+        // 也不写「默认暗色」这类会改产品默认的话。
         for text in [
             APPEARANCE_SECTION,
-            APPEARANCE_NOTE,
             APPEARANCE_LIGHT_LABEL,
             APPEARANCE_DARK_LABEL,
+            APPEARANCE_SYSTEM_LABEL,
             OPEN_INDEX_MANAGER_LABEL,
             ADD_FOLDER_LABEL,
         ] {

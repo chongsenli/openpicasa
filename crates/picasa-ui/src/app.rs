@@ -2741,18 +2741,24 @@ impl OpenPicasaApp {
 
     // -------------------------------------------------------------- 绘制
 
-    /// M5-R3：把当前偏好里的外观应用到 egui 全局样式与字体。
+    /// 把当前偏好里的外观应用到 egui 全局样式与字体。
     ///
-    /// 只在**外观真的变了**时重建样式（字体加载是低频动作，不能每帧做）。
-    /// 显式调用 `set_theme`，因此切换不依赖系统深色模式——固定 Linux/Xvfb
-    /// 主题下也能切换两套主题。
+    /// 只在**解析后的亮 / 暗真的变了**时重建样式（字体加载是低频动作，不能每帧做）。
+    /// 「跟随系统」时先读 OS 深浅色再解析；显式调用 `set_theme`，因此切换不依赖
+    /// 系统深色模式——固定 Linux/Xvfb 主题下也能切换两套主题。
     fn sync_theme(&mut self, ctx: &egui::Context) {
-        let target = self.lib.prefs.appearance;
+        let pref = self.lib.prefs.appearance;
+        if pref.is_system()
+            && let Some(system) = ctx.system_theme()
+        {
+            picasa_core::prefs::set_system_dark(system == egui::Theme::Dark);
+        }
+        let target = pref.resolve_system();
         if self.theme.appearance == target {
             return;
         }
-        crate::theme::apply(ctx, target);
-        self.theme = Theme::for_appearance(target);
+        crate::theme::apply(ctx, pref);
+        self.theme = Theme::for_appearance(pref);
         // 纹理本身与主题无关，但缩略图落影 / 圆角在绘制时读取主题，下一帧自然生效。
         ctx.request_repaint();
     }
@@ -3650,8 +3656,8 @@ impl OpenPicasaApp {
                         self.add_folder();
                     }
                     crate::settings::SettingsAction::SetAppearance(appearance) => {
-                        // M5-R3：验收用临时开关 → 写既有 preferences，重启保持。
-                        // §11 #4「正式入口位置」仍未定稿，这里只是让两套主题可验收。
+                        // 正式主题设置：写既有 preferences，重启保持。
+                        // 「跟随系统」在 `sync_theme` 里按 OS 深浅色解析。
                         self.lib.prefs.appearance = appearance;
                         self.lib.mark_prefs_dirty();
                         self.sync_theme(&ctx);

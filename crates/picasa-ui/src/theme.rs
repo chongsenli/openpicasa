@@ -257,11 +257,14 @@ impl Theme {
         Self::from_spec(&DARK)
     }
 
-    /// M5-R3：按偏好返回主题。**默认亮色**（`Appearance::Light`）。
+    /// 按偏好返回主题。**默认亮色**（`Appearance::Light`）。
+    ///
+    /// `Appearance::System` 会先按系统深浅色解析（见 [`Appearance::resolve_system`]），
+    /// 再选亮 / 暗两套 token。
     pub fn for_appearance(appearance: Appearance) -> Self {
-        match appearance {
-            Appearance::Light => Self::light(),
+        match appearance.resolve_system() {
             Appearance::Dark => Self::dark(),
+            _ => Self::light(),
         }
     }
 
@@ -517,6 +520,12 @@ pub fn text_styles(dark: bool) -> Vec<(TextStyle, FontId)> {
 /// 切换主题时**再调一次**即可：样式与字体都是幂等的重建，不依赖系统外观
 /// （Linux / Xvfb 上系统主题固定也不影响两套主题的验收）。
 pub fn apply(ctx: &egui::Context, appearance: Appearance) {
+    // 跟随系统：先读 OS 深浅色，再落成具体主题（无系统信息时按亮色）。
+    if appearance.is_system()
+        && let Some(system) = ctx.system_theme()
+    {
+        picasa_core::prefs::set_system_dark(system == egui::Theme::Dark);
+    }
     let theme = Theme::for_appearance(appearance);
     install_fonts(ctx, appearance);
 

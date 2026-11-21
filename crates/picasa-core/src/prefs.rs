@@ -6,35 +6,75 @@ use crate::{Result, Tier, ViewMode, paths::AppPaths, tag_counts::TagsSort};
 use picasa_db::SortSpec;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const PREFS_VERSION: u32 = 1;
 
-/// 界面外观（M5-R3 §5 的 A / B 两套主题）。
+/// 界面外观：亮色 / 暗色 / 跟随系统。
 ///
-/// **默认亮色（方案 A 清场）**：产品既有默认是浅色，M5 不把默认改成跟系统
-/// 或暗色（§11 #4 未裁定）。这个枚举只描述「用哪套 token」，不描述入口位置——
-/// 入口放在设置页只是**验收用临时开关**，不是对 §11 #4 的定稿。
+/// **默认亮色**：产品既有默认是浅色，M5 不把默认改成跟系统或暗色。
+/// 「跟随系统」在本进程里由 UI 层每帧把 OS 的深浅色写进 [`set_system_dark`]，
+/// 因此 [`Appearance::is_dark`] 对 `System` 也能给出**实际**结果，而不是只看枚举。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
-    /// 方案 A：清场（亮色）。
+    /// 亮色主题。
     #[default]
     Light,
-    /// 方案 B：暗房（暗色）。
+    /// 暗色主题。
     Dark,
+    /// 跟随操作系统外观（UI 层解析；无系统信息时按亮色）。
+    System,
+}
+
+/// 最近一次从系统读到的深浅色（由 UI 层每帧写入；`false` = 亮色）。
+static SYSTEM_DARK: AtomicBool = AtomicBool::new(false);
+
+/// UI 层把系统深浅色同步进来（`true` = 系统暗色）。
+pub fn set_system_dark(dark: bool) {
+    SYSTEM_DARK.store(dark, Ordering::Relaxed);
+}
+
+/// 当前系统是否为暗色（未读到系统信息时按亮色）。
+pub fn system_is_dark() -> bool {
+    SYSTEM_DARK.load(Ordering::Relaxed)
 }
 
 impl Appearance {
-    /// 是否暗色主题。纯函数，便于 UI 与测试共用。
+    /// 是否暗色主题。`System` 按**实际系统外观**解析，不是只看枚举。
     pub fn is_dark(self) -> bool {
-        matches!(self, Self::Dark)
+        match self {
+            Self::Light => false,
+            Self::Dark => true,
+            Self::System => system_is_dark(),
+        }
     }
 
-    /// 偏好里存的值（`"light"` / `"dark"`，与 serde 输出一致）。
+    /// 是否「跟随系统」。
+    pub fn is_system(self) -> bool {
+        matches!(self, Self::System)
+    }
+
+    /// 把 `System` 落到具体的亮 / 暗色（其余值原样返回）。
+    pub fn resolve_system(self) -> Self {
+        match self {
+            Self::System => {
+                if system_is_dark() {
+                    Self::Dark
+                } else {
+                    Self::Light
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// 偏好里存的值（`"light"` / `"dark"` / `"system"`，与 serde 输出一致）。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Light => "light",
             Self::Dark => "dark",
+            Self::System => "system",
         }
     }
 }
@@ -77,9 +117,9 @@ pub struct Preferences {
     pub tags_sort: TagsSort,
     /// M4.3 IDX-22 ⑥：是否在左栏列出 0 计数的标签。默认隐藏。
     pub show_zero_tags: bool,
-    /// M5-R3：界面外观（A 清场 / B 暗房）。默认亮色。
+    /// 界面外观（亮色 / 暗色 / 跟随系统），默认亮色。
     ///
-    /// 仅由设置页的**临时验收开关**写入；§11 #4「正式入口放在哪里」仍未定稿。
+    /// 正式入口在设置页；「跟随系统」由 UI 层解析成实际的亮 / 暗 token。
     pub appearance: Appearance,
     /// 栅格排序时把「已经有缩略图」的照片排在前面（用户要求）。
     ///
@@ -236,6 +276,21 @@ mod tests {
         assert_eq!(back.appearance, Appearance::Dark);
         assert!(back.appearance.is_dark());
         assert_eq!(back.appearance.as_str(), "dark");
+
+        // 2b) 「跟随系统」也能落盘并读回；解析结果按系统深浅色走。
+        let mut prefs = Preferences::default();
+        prefs.appearance = Appearance::System;
+        prefs.save(&p).unwrap();
+        let back = Preferences::load(&p);
+        assert_eq!(back.appearance, Appearance::System);
+        assert!(back.appearance.is_system());
+        assert_eq!(back.appearance.as_str(), "system");
+        set_system_dark(true);
+        assert!(back.appearance.is_dark(), "System 必须按系统暗色解析");
+        assert_eq!(back.appearance.resolve_system(), Appearance::Dark);
+        set_system_dark(false);
+        assert!(!back.appearance.is_dark());
+        assert_eq!(back.appearance.resolve_system(), Appearance::Light);
 
         // 3) 旧偏好文件没有 `appearance` 字段时按默认（亮色）读，不报错。
         let json = std::fs::read_to_string(p.preferences_file()).unwrap();
