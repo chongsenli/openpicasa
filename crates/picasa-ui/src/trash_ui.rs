@@ -15,11 +15,14 @@ use crate::theme::Theme;
 /// 「取消」保持普通（次）按钮样式，并且仍是默认焦点——
 /// 回车 / 空格落在取消上，移动原文件必须再主动点一次。
 pub fn confirm_buttons(theme: &Theme) -> (egui::Button<'static>, egui::Button<'static>) {
-    // 次按钮：芯片底 + 发丝描边，明确弱于红色主按钮。
-    let cancel = egui::Button::new(picasa_core::trash_plan::TRASH_CANCEL)
-        .fill(theme.chip_bg)
-        .stroke(egui::Stroke::new(1.0, theme.hairline))
-        .corner_radius(theme.radius_btn);
+    // 次按钮：卡片底 + 明确可见的描边（原型里「取消」是描边按钮），
+    // 视觉上明确弱于红色主按钮。
+    let cancel = egui::Button::new(
+        egui::RichText::new(picasa_core::trash_plan::TRASH_CANCEL).color(theme.text_primary),
+    )
+    .fill(theme.viewer_card)
+    .stroke(egui::Stroke::new(1.2, theme.text_secondary))
+    .corner_radius(theme.radius_btn);
     // 主按钮：实心危险红 + 白字。
     let confirm = egui::Button::new(
         egui::RichText::new(picasa_core::trash_plan::TRASH_ACTION).color(egui::Color32::WHITE),
@@ -31,10 +34,12 @@ pub fn confirm_buttons(theme: &Theme) -> (egui::Button<'static>, egui::Button<'s
 
 /// 对话框宽度：按屏幕**逻辑像素**取比例的居中卡片。
 ///
-/// 原型的 1280 截图是物理像素，不能直接塞进 1024 逻辑坐标；这里只按比例
-/// （46%，400–520 逻辑像素）适配，所以同一窗口在任意 DPI 下都同样居中。
+/// 原型的 1280 截图是物理像素（2560 宽、DPR 2），不能直接塞进 1024 逻辑
+/// 坐标；原型里卡片约占窗口逻辑宽的 33%（约 417 / 1280），这里取 33%
+/// （下限 380 / 上限 520 逻辑像素），所以同一窗口在任意 DPI 下都同样居中、
+/// 同样比例。
 pub fn dialog_width(screen_w: f32) -> f32 {
-    (screen_w * 0.46).clamp(400.0, 520.0)
+    (screen_w * 0.33).clamp(380.0, 520.0)
 }
 
 /// 确认框一帧的返回值：动作用户点击/按键决定，`open` 仅用于「叉掉」语义
@@ -316,19 +321,26 @@ mod tests {
         }
     }
 
-    /// 原型 v1.4：确认框是按**逻辑像素比例**取宽的居中卡片，不是 420x168 小窗。
+    /// 原型 v1.4：确认框是按**逻辑像素比例**取宽的居中卡片，不是 420x168 横条。
     #[test]
     fn dialog_width_follows_logical_pixels_not_screenshot_pixels() {
-        // 1024 逻辑宽 → 46% ≈ 471；1280 → 封顶 520；窄窗 → 下限 400。
+        // 原型窗口是 1280 逻辑宽（2560 物理 / DPR 2），卡片实测约 417 逻辑宽
+        // （约 33%）。这里 1280 → 422.4，与原型同一比例。
         assert!(
-            (dialog_width(1024.0) - 471.04).abs() < 0.1,
+            (dialog_width(1280.0) - 422.4).abs() < 0.5,
             "{}",
+            dialog_width(1280.0)
+        );
+        assert_eq!(dialog_width(1024.0), 380.0, "1024 逻辑宽应取到下限");
+        assert_eq!(dialog_width(1600.0), 520.0, "超宽窗口封顶");
+        assert_eq!(dialog_width(800.0), 380.0, "窄窗仍不小于下限");
+        // 逻辑像素比例，不是把 1280 截图的物理像素塞进 1024 逻辑坐标：
+        // 若照搬 417 物理像素宽，1024 窗里比例会明显偏离原型。
+        assert!(
+            dialog_width(1024.0) / 1024.0 < 0.45,
+            "卡片不应占掉近半窗口：{}",
             dialog_width(1024.0)
         );
-        assert_eq!(dialog_width(1280.0), 520.0);
-        assert_eq!(dialog_width(800.0), 400.0);
-        // 同一逻辑宽在任意 DPI 下都按逻辑像素算（不与物理像素混用）。
-        assert!((dialog_width(1024.0) - dialog_width(1024.0)).abs() < f32::EPSILON);
     }
 
     /// 对话框结构：居中大圆角卡片、标题在左上、正文分段 + 真实路径、
@@ -597,23 +609,28 @@ mod tests {
             "危险红底应包住「移到废纸篓」文字：{danger_rect:?} vs {:?}",
             confirm_text.1
         );
-        // 取消按钮：次按钮 = 芯片底 + 发丝描边，且绝不是危险红
+        // 取消按钮：次按钮 = 卡片底 + 可见描边，且绝不是危险红
         let cancel_bg = rects
             .iter()
             .find(|(r, _)| r.contains_rect(cancel_text.1))
             .map(|(_, f)| *f);
         assert_ne!(cancel_bg, Some(theme.danger), "「取消」不能是危险红主按钮");
-        assert_eq!(cancel_bg, Some(theme.chip_bg), "「取消」应是芯片底的次按钮");
+        assert_eq!(
+            cancel_bg,
+            Some(theme.viewer_card),
+            "「取消」应是卡片底 + 描边"
+        );
         let cancel_strokes: Vec<egui::Stroke> = strokes
             .iter()
             .filter(|(r, _)| r.contains_rect(cancel_text.1))
             .map(|(_, s)| *s)
             .collect();
+        // 原型里的「取消」是明确可见的描边按钮（不是发丝线，也不是实心主按钮）。
         assert!(
             cancel_strokes
                 .iter()
-                .any(|s| s.color == theme.hairline && s.width > 0.0),
-            "「取消」应有发丝描边（次按钮）：{cancel_strokes:?}"
+                .any(|s| s.color == theme.text_secondary && s.width >= 1.0),
+            "「取消」应有可见描边（次按钮）：{cancel_strokes:?}"
         );
     }
 
