@@ -1275,7 +1275,7 @@ pub fn show(
                 if bar.top() >= clip.bottom() {
                     break;
                 }
-                draw_group_header(&painter, bar, &g.title, theme);
+                draw_group_header(&painter, bar, &g.title, g.count, theme);
             }
         }
 
@@ -1543,7 +1543,7 @@ pub fn show(
                 pos2(clip.left(), clip.top()),
                 pos2(clip.right(), clip.top() + Metrics::GROUP_HEADER_H),
             );
-            draw_group_header(&painter, bar, &g.title, theme);
+            draw_group_header(&painter, bar, &g.title, g.count, theme);
         }
 
         // ---- M4.1 `M41-UI-10`：框选矩形（拖动帧）+ 松开时算命中集 ----
@@ -1631,18 +1631,31 @@ pub fn show(
 }
 
 /// 画一条分组头（普通位置与吸顶位置共用）。
-fn draw_group_header(painter: &egui::Painter, bar: Rect, title: &str, theme: &Theme) {
+///
+/// H6：日期旁边显示该组**真实张数**「N 张」。张数来自 `Group::count`（= 该日期分组
+/// 的照片数），与虚拟滚动无关——只画当前可见的分组头，不遍历全库。
+fn draw_group_header(painter: &egui::Painter, bar: Rect, title: &str, count: usize, theme: &Theme) {
     // M5：内容井里的日期分组头 = 与井同色的透明底 + 一行文字，不再画灰条。
     painter.rect_filled(bar, 0.0, theme.header_bg);
-    painter.text(
-        pos2(bar.left() + Metrics::GRID_PAD, bar.center().y),
+    let font = FontId::new(
+        if theme.dark { 11.0 } else { 13.0 },
+        egui::FontFamily::Proportional,
+    );
+    let left = bar.left() + Metrics::GRID_PAD;
+    let date = painter.text(
+        pos2(left, bar.center().y),
         Align2::LEFT_CENTER,
         title,
-        FontId::new(
-            if theme.dark { 11.0 } else { 13.0 },
-            egui::FontFamily::Proportional,
-        ),
+        font.clone(),
         theme.header_text,
+    );
+    // 张数跟在日期右侧的固定小间距处，颜色弱于日期，避免抢主信息。
+    painter.text(
+        pos2(date.right() + 8.0, bar.center().y),
+        Align2::LEFT_CENTER,
+        format!("{count} 张"),
+        font,
+        theme.text_secondary,
     );
 }
 
@@ -2126,6 +2139,61 @@ mod tests {
         // 空库态没有这条出路（不该把用户往「清筛选」引）
         let library = empty_grid_lines(EmptyReason::Library);
         assert!(!library.1.contains("清除"));
+    }
+
+    /// H6：日期分组头在日期右侧显示该组**真实张数**「N 张」（数字取自 `Group::count`）。
+    #[test]
+    fn h6_group_header_shows_real_count_next_to_date() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, picasa_core::Appearance::Light);
+        let theme = Theme::for_appearance(picasa_core::Appearance::Light);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                vec2(1200.0, 820.0),
+            )),
+            max_texture_side: Some(2048),
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| {
+            let bar = Rect::from_min_size(
+                ui.max_rect().min,
+                vec2(600.0, Metrics::GROUP_HEADER_H),
+            );
+            draw_group_header(ui.painter(), bar, "2020年9月14日", 37, &theme);
+        });
+        let mut texts: Vec<(String, egui::Pos2)> = Vec::new();
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Pos2)>) {
+            match shape {
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, out);
+                    }
+                }
+                egui::Shape::Text(t) => out.push((t.galley.job.text.clone(), t.pos)),
+                _ => {}
+            }
+        }
+        for c in &out.shapes {
+            walk(&c.shape, &mut texts);
+        }
+        out.drop_without_applying_deltas();
+
+        let date = texts
+            .iter()
+            .find(|(t, _)| t == "2020年9月14日")
+            .expect("分组头要有日期");
+        let (count_text, count_pos) = texts
+            .iter()
+            .find(|(t, _)| t == "37 张")
+            .expect("分组头要在日期旁显示真实张数「37 张」");
+        assert_ne!(count_text, "");
+        assert!(
+            count_pos.x > date.1.x,
+            "张数应在日期右侧：date={:?} count={:?}",
+            date.1,
+            count_pos
+        );
     }
 
     /// `M5-GR-10` / `M5-GR-11` / `M5-GR-12`：三种占位格的口径。
