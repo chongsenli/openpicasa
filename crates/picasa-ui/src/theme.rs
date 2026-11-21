@@ -1,4 +1,4 @@
-//! M5 视觉 token：**方案 A 清场（亮）** 与 **方案 B 暗房（暗）** 两套完整主题。
+//! M5 视觉 token：**亮色** 与 **暗色** 两套完整主题。
 //!
 //! ## 事实来源
 //!
@@ -32,13 +32,13 @@ pub struct Theme {
     pub dark: bool,
 
     // ---- 页面 / 窗口 / 内容井 ----
-    /// 窗口外「清场」衬底（`--bg-page`）：亮 `#C8C8CC`，暗 `#050505`。
+    /// 窗口外衬底（`--bg-page`）：亮 `#C8C8CC`，暗 `#050505`。
     pub page_bg: Color32,
     /// 窗口底色（`--win`）：亮 `#f5f5f5`，暗 `#151515`。
     pub chrome_bg: Color32,
     /// 内容井卡片（包住主区的圆角面）：亮 = 近白；暗 = `#1c1c1c` 卡面。
     pub well_bg: Color32,
-    /// 主内容井（井内实际画照片的面）：亮 = 近白；暗 = `#151515` 暗房。
+    /// 主内容井（井内实际画照片的面）：亮 = 近白；暗 = `#151515`。
     pub grid_bg: Color32,
     /// 卡片 / 菜单 / 浮层底色（`--card`）：亮 `#fff`，暗 `#1c1c1c`。
     pub menu_bg: Color32,
@@ -87,8 +87,13 @@ pub struct Theme {
     pub status_text: Color32,
     pub tree_text: Color32,
 
-    // ---- 查看器（R4 不在本轮范围；保留既有 `viewer_bg` 语义）----
+    // ---- 查看器展厅 ----
+    /// 亮色 = 浅灰展厅；暗色 = 暗房。`Bg::Black` 档位读它（V1）。
     pub viewer_bg: Color32,
+    /// 照片卡片 / 顶栏胶囊的浅色底（亮色展厅里的圆角卡片）。
+    pub viewer_card: Color32,
+    /// 展厅控件的实色底（亮色浅、暗色深）。
+    pub viewer_chrome_bg: Color32,
     pub viewer_chrome: Color32,
     pub viewer_text: Color32,
 
@@ -152,7 +157,7 @@ pub struct Theme {
     pub title_uppercase: bool,
 }
 
-/// 亮色方案 A：清场。
+/// 亮色。
 pub const LIGHT: ThemeSpec = ThemeSpec {
     dark: false,
     page: 0xC8C8CC,
@@ -177,7 +182,7 @@ pub const LIGHT: ThemeSpec = ThemeSpec {
     sidebar_ref_w: 228.0,
 };
 
-/// 暗色方案 B：暗房。
+/// 暗色。
 pub const DARK: ThemeSpec = ThemeSpec {
     dark: true,
     page: 0x050505,
@@ -247,12 +252,12 @@ fn rgb(hex: u32) -> Color32 {
 }
 
 impl Theme {
-    /// 亮色方案 A（清场）。产品默认。
+    /// 亮色。产品默认。
     pub fn light() -> Self {
         Self::from_spec(&LIGHT)
     }
 
-    /// 暗色方案 B（暗房）。
+    /// 暗色。
     pub fn dark() -> Self {
         Self::from_spec(&DARK)
     }
@@ -320,7 +325,21 @@ impl Theme {
             header_text: if dark { rgb(s.muted) } else { rgb(s.ink) },
             status_text: rgb(s.muted),
             tree_text: if dark { rgb(0xb8) } else { rgb(0x3f3f46) },
-            viewer_bg: Color32::from_rgb(0x1A, 0x1A, 0x1A),
+            viewer_bg: if dark {
+                Color32::from_rgb(0x1A, 0x1A, 0x1A)
+            } else {
+                Color32::from_rgb(0xEC, 0xEC, 0xEE)
+            },
+            viewer_card: if dark {
+                Color32::from_rgb(0x20, 0x20, 0x20)
+            } else {
+                Color32::from_rgb(0xFF, 0xFF, 0xFF)
+            },
+            viewer_chrome_bg: if dark {
+                Color32::from_rgb(0x2B, 0x2B, 0x2B)
+            } else {
+                Color32::from_rgb(0xF7, 0xF7, 0xF8)
+            },
             viewer_chrome: Color32::from_rgb(0x2B, 0x2B, 0x2B),
             viewer_text: Color32::from_rgb(0xE8, 0xE8, 0xE8),
             progress: rgb(s.accent),

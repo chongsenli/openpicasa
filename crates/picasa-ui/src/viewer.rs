@@ -46,16 +46,16 @@ use picasa_db::PhotoRow;
 use crate::icons::{self, Icon};
 use crate::theme::Theme;
 
-/// 顶栏高度（逻辑像素）。
-pub const TOP_H: f32 = 34.0;
+/// 顶栏高度（逻辑像素）。V4：两端都有「返回」胶囊，留 44 px。
+pub const TOP_H: f32 = 44.0;
 /// 底栏高度。
 pub const STATUS_H: f32 = 27.0;
-/// 主图下方说明条高度（只读，不是编辑台）。
-pub const CAPTION_H: f32 = 56.0;
+/// 主图下方说明条高度（只读，不是编辑台）。V3：标题 + 日期 + 收藏/标签行。
+pub const CAPTION_H: f32 = 78.0;
 /// 胶片条高度。
 pub const FILM_H: f32 = 82.0;
-/// 右侧「照片信息」栏宽度。打开时**推动**主图与胶片条。
-pub const INFO_W: f32 = 300.0;
+/// 右侧「照片信息」栏宽度。打开时**推动**主图与胶片条（V2 要放缩略图 + 四宫格）。
+pub const INFO_W: f32 = 336.0;
 /// 缩放上下限（说明书 §4.5：约 5%–800%）。
 pub const ZOOM_MIN: f32 = 0.05;
 pub const ZOOM_MAX: f32 = 8.0;
@@ -115,6 +115,8 @@ pub struct StageLayout {
     pub status: Rect,
     /// 主图 + 说明条 + 胶片条所在的列。信息栏打开时变窄。
     pub stage: Rect,
+    /// 照片卡片（V1：圆角浅色卡片，照片与卡片边缘留白）。
+    pub card: Rect,
     /// 主图可用区域（比较模式下仍是整个画布）。
     pub canvas: Rect,
     /// 比较模式下主图占的左窗格；非比较模式 = [`Self::canvas`]。
@@ -162,10 +164,13 @@ pub fn layout(rect: Rect, info_open: bool, compare: bool) -> StageLayout {
         pos2(stage.left(), (filmstrip.top() - caption_h).max(stage.top())),
         vec2(stage.width(), caption_h),
     );
-    let canvas = Rect::from_min_max(
+    // V1：照片放在圆角卡片上，卡片四周留白（亮色展厅不能把图贴到浅灰底上）。
+    let canvas_outer = Rect::from_min_max(
         pos2(stage.left() + 8.0, stage.top() + 6.0),
         pos2(stage.right() - 8.0, caption.top() - 2.0),
     );
+    let card = canvas_outer.shrink2(vec2(10.0, 8.0));
+    let canvas = card.shrink(18.0);
     let main_pane = if compare {
         Rect::from_min_max(
             canvas.min,
@@ -186,6 +191,7 @@ pub fn layout(rect: Rect, info_open: bool, compare: bool) -> StageLayout {
         top,
         status,
         stage,
+        card,
         canvas,
         main_pane,
         compare_pane,
@@ -200,17 +206,19 @@ pub fn layout(rect: Rect, info_open: bool, compare: bool) -> StageLayout {
 /// 返回 `(zoom_out, zoom_in)`。查看器工具条必须始终保留这两个按钮
 /// （说明书 §4.5：不能把适合 / 100% / 200% 三按钮作为唯一缩放）。
 pub fn zoom_button_rects(top: Rect) -> (Rect, Rect) {
-    let x = top.left() + 8.0 + 76.0 + 98.0 + 58.0 + 62.0 + 54.0 + 54.0;
-    let y = top.top() + 5.0;
+    // 左端：返回胶囊 78 + 间距 10 + 收藏 32 + 显示位置 94 + 比较 58 + 背景 62
+    //       + 适合 54 + 100% 54 → 起点 442。
+    let x = top.left() + 10.0 + 78.0 + 10.0 + 32.0 + 94.0 + 58.0 + 62.0 + 54.0 + 54.0;
+    let y = top.top() + 10.0;
     (
         Rect::from_min_size(pos2(x, y), vec2(28.0, 24.0)),
         Rect::from_min_size(pos2(x + 32.0, y), vec2(28.0, 24.0)),
     )
 }
 
-/// 顶栏「照片信息」开关的矩形。
+/// 顶栏「照片信息」开关的矩形（右端「返回」胶囊左侧）。
 pub fn info_toggle_rect(top: Rect) -> Rect {
-    Rect::from_min_size(pos2(top.right() - 104.0, top.top() + 5.0), vec2(96.0, 24.0))
+    Rect::from_min_size(pos2(top.right() - 200.0, top.top() + 10.0), vec2(96.0, 24.0))
 }
 
 /// 胶片条的一个槽位：照片下标 + 屏幕矩形。
@@ -534,6 +542,21 @@ pub fn show(
     let compare_active = viewer.compare_active(photos.len());
     let lay = layout(rect, viewer.info_open, compare_active);
 
+    // ---- V1：照片卡片（圆角 + 留白；亮色是浅色展厅，暗色是暗房） ----
+    if is_bright(bg) {
+        // 浅色展厅：卡片白底 + 极淡描边，照片不直接贴在浅灰底上。
+        painter.rect_filled(lay.card, theme.radius_card, theme.viewer_card);
+        painter.rect_stroke(
+            lay.card,
+            theme.radius_card,
+            Stroke::new(1.0, theme.hairline),
+            egui::StrokeKind::Inside,
+        );
+    } else {
+        // 暗房：卡片比背景略深一档，仍是圆角（不改成黑/灰/白/棋盘）。
+        painter.rect_filled(lay.card, theme.radius_card, theme.viewer_card);
+    }
+
     // ---- 主图尺寸 / 适合 ----
     let (iw, ih) = if viewer.tex_size.x > 0.0 {
         (viewer.tex_size.x, viewer.tex_size.y)
@@ -718,6 +741,7 @@ pub fn show(
                 panel,
                 viewer,
                 theme,
+                row,
                 ui.scope_id().with("viewer-info"),
             )
         {
@@ -756,46 +780,73 @@ fn draw_topbar(
     action: &mut Option<ViewerAction>,
 ) {
     let top = lay.top;
-    painter.rect_filled(top, 0.0, Color32::from_black_alpha(160));
-    let fg = Color32::from_white_alpha(225);
-    let mut x = top.left() + 8.0;
+    let light = theme.dark == false;
+    // V1：亮色展厅的顶栏是浅色（浅底 + 深字），不再叠一块深色暗房画布。
+    let (bar_bg, fg) = if light {
+        (theme.viewer_chrome_bg, Color32::from_black_alpha(215))
+    } else {
+        (Color32::from_black_alpha(160), Color32::from_white_alpha(225))
+    };
+    painter.rect_filled(top, 0.0, bar_bg);
+    painter.line_segment(
+        [top.left_bottom(), top.right_bottom()],
+        Stroke::new(1.0, theme.hairline),
+    );
+    let mut x = top.left() + 10.0;
 
-    if slim_button(
-        painter,
-        ui,
-        ui.scope_id().with("viewer-back"),
-        Rect::from_min_size(pos2(x, top.top() + 5.0), vec2(70.0, 24.0)),
-        Icon::Back,
-        "返回",
-        fg,
-    )
-    .clicked()
+    // V4：左右两端各一枚「返回」胶囊（左端回库，右端同样可退出）。
+    let left_back = Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(78.0, 24.0));
+    draw_back_pill(painter, ui, ui.scope_id().with("viewer-back"), left_back, theme, fg);
+    if ui
+        .interact(
+            left_back,
+            ui.scope_id().with("viewer-back-hit"),
+            Sense::click(),
+        )
+        .clicked()
     {
         *action = Some(ViewerAction::Close);
     }
-    x += 76.0;
+    x = left_back.right() + 10.0;
+
+    // 收藏（只读状态）+ 显示位置
+    let fav = Rect::from_center_size(pos2(x + 14.0, top.center().y), vec2(28.0, 24.0));
+    icons::draw(
+        painter,
+        Icon::Heart,
+        fav.shrink(7.0),
+        if row.starred { theme.star } else { fg },
+        1.5,
+    );
+    let fav_resp = ui.interact(fav, ui.scope_id().with("viewer-fav"), Sense::hover());
+    fav_resp.on_hover_text(if row.starred {
+        "已收藏（只读展示）"
+    } else {
+        "未收藏"
+    });
+    x += 32.0;
 
     if slim_button(
         painter,
         ui,
         ui.scope_id().with("viewer-reveal"),
-        Rect::from_min_size(pos2(x, top.top() + 5.0), vec2(92.0, 24.0)),
+        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(88.0, 24.0)),
         Icon::Reveal,
-        "显示位置",
+        reveal_label(),
         fg,
     )
     .clicked()
     {
         *action = Some(ViewerAction::Reveal);
     }
-    x += 98.0;
+    x += 94.0;
 
     // 比较：只有至少两张时才点亮；状态如实反映当前是否并排。
     if text_button(
         painter,
         ui,
         ui.scope_id().with("viewer-compare"),
-        Rect::from_min_size(pos2(x, top.top() + 5.0), vec2(52.0, 24.0)),
+        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(52.0, 24.0)),
         "比较",
         viewer.compare,
         fg,
@@ -810,7 +861,7 @@ fn draw_topbar(
         painter,
         ui,
         ui.scope_id().with("viewer-bg"),
-        Rect::from_min_size(pos2(x, top.top() + 5.0), vec2(52.0, 24.0)),
+        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(52.0, 24.0)),
         "背景",
         false,
         fg,
@@ -822,12 +873,12 @@ fn draw_topbar(
     }
     x += 62.0;
 
-    // 缩放簇：适合 / 100% / − / +（连续缩放不是只有三个按钮）
+    // 缩放簇：适合 / 100% / − / +
     if text_button(
         painter,
         ui,
         ui.scope_id().with("viewer-fit"),
-        Rect::from_min_size(pos2(x, top.top() + 5.0), vec2(50.0, 24.0)),
+        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(50.0, 24.0)),
         "适合",
         viewer.fit_pending,
         fg,
@@ -842,7 +893,7 @@ fn draw_topbar(
         painter,
         ui,
         ui.scope_id().with("viewer-actual"),
-        Rect::from_min_size(pos2(x, top.top() + 5.0), vec2(50.0, 24.0)),
+        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(50.0, 24.0)),
         "100%",
         (viewer.zoom - 1.0).abs() < 0.001,
         fg,
@@ -884,7 +935,7 @@ fn draw_topbar(
     }
     let _ = x;
 
-    // 右侧：文件名（裁剪在可用区内）+「照片信息」开关
+    // 右端：「照片信息」开关 + 同名「返回」胶囊（V4 两端都有返回）。
     let info_btn = info_toggle_rect(top);
     if text_button(
         painter,
@@ -900,9 +951,22 @@ fn draw_topbar(
     {
         *action = Some(ViewerAction::ToggleInfo);
     }
+    let right_back = right_back_rect(top);
+    draw_back_pill(painter, ui, ui.scope_id().with("viewer-back-right"), right_back, theme, fg);
+    if ui
+        .interact(
+            right_back,
+            ui.scope_id().with("viewer-back-right-hit"),
+            Sense::click(),
+        )
+        .clicked()
+    {
+        *action = Some(ViewerAction::Close);
+    }
 
+    // 文件名（居中裁剪在缩放簇与右侧控件之间）
     let name_clip = Rect::from_min_max(
-        pos2(x + 12.0, top.top()),
+        pos2((x + 12.0).max(info_btn.left() - 240.0), top.top()),
         pos2(info_btn.left() - 12.0, top.bottom()),
     );
     if name_clip.width() > 20.0 {
@@ -911,8 +975,59 @@ fn draw_topbar(
             Align2::RIGHT_CENTER,
             &row.name,
             FontId::new(12.0, egui::FontFamily::Proportional),
-            Color32::from_white_alpha(210),
+            fg,
         );
+    }
+}
+
+/// 右端「返回」胶囊的矩形（与左端同款，绘制与测试共用）。
+pub fn right_back_rect(top: Rect) -> Rect {
+    Rect::from_min_size(pos2(top.right() - 92.0, top.top() + 10.0), vec2(78.0, 24.0))
+}
+
+/// 两端统一的「返回」胶囊：圆角浅片 + 左箭头 + 文字。
+fn draw_back_pill(
+    painter: &egui::Painter,
+    ui: &Ui,
+    id: egui::Id,
+    rect: Rect,
+    theme: &Theme,
+    fg: Color32,
+) {
+    let resp = ui.interact(rect, id, Sense::click());
+    let fill = if resp.hovered() {
+        theme.sidebar_hover
+    } else {
+        theme.viewer_chrome_bg
+    };
+    painter.rect_filled(rect, rect.height() / 2.0, fill);
+    painter.rect_stroke(
+        rect,
+        rect.height() / 2.0,
+        Stroke::new(1.0, theme.hairline),
+        egui::StrokeKind::Inside,
+    );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    let icon_rect = Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(12.0, 12.0));
+    icons::draw(painter, Icon::Back, icon_rect, fg, 1.5);
+    painter.text(
+        pos2(rect.left() + 24.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        "返回",
+        FontId::new(11.5, egui::FontFamily::Proportional),
+        fg,
+    );
+    resp.on_hover_text("返回图库 · Esc");
+}
+
+/// 「显示位置」按平台命名（I3：非 macOS 不写 Finder）。
+fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "在 Finder 中显示"
+    } else {
+        "在文件管理器中显示"
     }
 }
 
@@ -928,48 +1043,68 @@ fn draw_caption(
         return;
     }
     let bg = viewer.bg.color(theme);
-    let ink = stage_ink(bg);
-    let soft = stage_ink_soft(bg);
+    let ink = if is_bright(bg) {
+        theme.text_primary
+    } else {
+        Color32::from_white_alpha(230)
+    };
+    let soft = if is_bright(bg) {
+        theme.text_secondary
+    } else {
+        Color32::from_white_alpha(150)
+    };
 
+    // V3：标题 + 日期 + 收藏/标签行，紧贴照片正下方。
     let title = display_title(row);
     painter.text(
-        pos2(caption.left() + 2.0, caption.top() + 10.0),
+        pos2(caption.left() + 2.0, caption.top() + 8.0),
         Align2::LEFT_TOP,
         title,
-        FontId::new(15.0, egui::FontFamily::Proportional),
+        FontId::new(16.0, egui::FontFamily::Proportional),
         ink,
     );
+    let mut line2 = String::new();
+    if let Some(date) = format_taken_date(row.eff_taken_at) {
+        line2.push_str(&date);
+    }
     if !viewer.caption_text.trim().is_empty() {
-        let clip = Rect::from_min_max(
-            pos2(caption.left(), caption.top() + 30.0),
-            pos2(caption.right(), caption.bottom()),
-        );
-        painter.with_clip_rect(clip).text(
-            pos2(caption.left() + 2.0, caption.top() + 31.0),
-            Align2::LEFT_TOP,
-            viewer.caption_text.trim(),
-            FontId::new(11.0, egui::FontFamily::Proportional),
-            soft,
-        );
-    } else if let Some(date) = format_taken_date(row.eff_taken_at) {
+        if !line2.is_empty() {
+            line2.push_str("   ");
+        }
+        line2.push_str(viewer.caption_text.trim());
+    }
+    if !line2.is_empty() {
         painter.text(
-            pos2(caption.left() + 2.0, caption.top() + 31.0),
+            pos2(caption.left() + 2.0, caption.top() + 30.0),
             Align2::LEFT_TOP,
-            date,
-            FontId::new(11.0, egui::FontFamily::Proportional),
+            line2,
+            FontId::new(11.5, egui::FontFamily::Proportional),
             soft,
         );
     }
+
+    // 收藏 / 标签行（只读，显示在标题与日期下方）
+    carve_star_and_tags(
+        painter,
+        Rect::from_min_max(
+            pos2(caption.left() + 2.0, caption.top() + 48.0),
+            pos2(caption.left() + caption.width() * 0.5, caption.bottom() - 4.0),
+        ),
+        row.starred,
+        &viewer.tags,
+        theme,
+        bg,
+    );
 
     // 右侧元数据摘要（只读，不编辑）
     let summary = caption_summary(viewer);
     if !summary.is_empty() {
         let clip = Rect::from_min_max(
             pos2(caption.left() + caption.width() * 0.45, caption.top()),
-            pos2(caption.right(), caption.bottom()),
+            pos2(caption.right(), caption.top() + 34.0),
         );
         painter.with_clip_rect(clip).text(
-            pos2(caption.right() - 2.0, caption.top() + 12.0),
+            pos2(caption.right() - 2.0, caption.top() + 14.0),
             Align2::RIGHT_TOP,
             summary,
             FontId::new(11.0, egui::FontFamily::Proportional),
@@ -978,7 +1113,82 @@ fn draw_caption(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// 说明条里的「收藏 / 标签」一行（V3）。
+fn carve_star_and_tags(
+    painter: &egui::Painter,
+    area: Rect,
+    starred: bool,
+    tags: &[String],
+    theme: &Theme,
+    bg: Color32,
+) {
+    if area.height() < 12.0 {
+        return;
+    }
+    let font = FontId::new(11.0, egui::FontFamily::Proportional);
+    let ink = if is_bright(bg) {
+        theme.text_secondary
+    } else {
+        Color32::from_white_alpha(160)
+    };
+    let chip_color = if is_bright(bg) {
+        Color32::from_black_alpha(18)
+    } else {
+        Color32::from_white_alpha(36)
+    };
+    let cy = area.center().y;
+    let mut x = area.left();
+    if starred {
+        let c = pos2(x + 6.0, cy);
+        icons::draw_star(painter, c, 6.0, theme.star);
+        x += 18.0;
+        painter.text(
+            pos2(x, cy),
+            Align2::LEFT_CENTER,
+            "收藏",
+            font.clone(),
+            ink,
+        );
+        x += 30.0;
+    }
+    if tags.is_empty() && !starred {
+        painter.text(
+            pos2(x, cy),
+            Align2::LEFT_CENTER,
+            "未收藏 · 无标签",
+            font,
+            ink,
+        );
+        return;
+    }
+    let mut shown = 0usize;
+    for label in tags {
+        let galley = painter.layout_no_wrap(label.clone(), font.clone(), ink);
+        let w = galley.size().x + 14.0;
+        if x + w > area.right() {
+            break;
+        }
+        let chip = Rect::from_min_size(pos2(x, cy - 9.0), vec2(w, 18.0));
+        painter.rect_filled(chip, 9.0, chip_color);
+        painter.galley(
+            pos2(x + 7.0, cy - galley.size().y / 2.0),
+            galley,
+            ink,
+        );
+        x += w + 5.0;
+        shown += 1;
+    }
+    if shown < tags.len() {
+        painter.text(
+            pos2(x, cy),
+            Align2::LEFT_CENTER,
+            format!("+{}", tags.len() - shown),
+            font,
+            ink,
+        );
+    }
+}
+
 fn draw_filmstrip(
     painter: &egui::Painter,
     ui: &Ui,
@@ -1088,7 +1298,28 @@ fn draw_statusbar(
     bg: Color32,
 ) {
     let bar = lay.status;
-    painter.rect_filled(bar, 0.0, Color32::from_black_alpha(160));
+    // V1：亮色展厅的底栏也是浅色（深字）；暗色保持深底浅字。
+    let light = is_bright(bg);
+    let bar_bg = if light {
+        theme.viewer_chrome_bg
+    } else {
+        Color32::from_rgba_premultiplied(0, 0, 0, 160)
+    };
+    let ink = if light {
+        theme.text_primary
+    } else {
+        Color32::from_white_alpha(215)
+    };
+    let ink_soft = if light {
+        theme.text_secondary
+    } else {
+        Color32::from_white_alpha(150)
+    };
+    painter.rect_filled(bar, 0.0, bar_bg);
+    painter.line_segment(
+        [bar.left_top(), bar.right_top()],
+        Stroke::new(1.0, theme.hairline),
+    );
     let dims = viewer.dims.map(|(w, h)| format!("{w} × {h}")).unwrap_or_else(|| {
         format!(
             "{} × {}",
@@ -1111,7 +1342,7 @@ fn draw_statusbar(
         zoom_text
     );
     let left_w = painter
-        .layout_no_wrap(left_text.clone(), left_font.clone(), Color32::WHITE)
+        .layout_no_wrap(left_text.clone(), left_font.clone(), ink)
         .size()
         .x;
     painter.text(
@@ -1119,7 +1350,7 @@ fn draw_statusbar(
         Align2::LEFT_CENTER,
         left_text,
         left_font,
-        Color32::from_white_alpha(215),
+        ink,
     );
 
     let hint = if viewer.info_open {
@@ -1129,7 +1360,7 @@ fn draw_statusbar(
     };
     let hint_font = FontId::new(11.0, egui::FontFamily::Proportional);
     let hint_w = painter
-        .layout_no_wrap(hint.to_string(), hint_font.clone(), Color32::WHITE)
+        .layout_no_wrap(hint.to_string(), hint_font.clone(), ink_soft)
         .size()
         .x;
     painter.text(
@@ -1137,7 +1368,7 @@ fn draw_statusbar(
         Align2::RIGHT_CENTER,
         hint,
         hint_font,
-        Color32::from_white_alpha(150),
+        ink_soft,
     );
 
     draw_star_and_tags(
@@ -1158,6 +1389,7 @@ fn draw_info_panel(
     panel: Rect,
     viewer: &Viewer,
     theme: &Theme,
+    row: &PhotoRow,
     id: egui::Id,
 ) -> bool {
     painter.rect_filled(panel, 0.0, theme.menu_bg);
@@ -1166,16 +1398,17 @@ fn draw_info_panel(
         Stroke::new(1.0, theme.separator),
     );
 
-    let font = FontId::new(11.5, egui::FontFamily::Proportional);
+    let pad = 16.0;
+    let inner_w = panel.width() - pad * 2.0;
     painter.text(
-        pos2(panel.left() + 16.0, panel.top() + 16.0),
+        pos2(panel.left() + pad, panel.top() + 16.0),
         Align2::LEFT_TOP,
         "照片信息",
         FontId::new(13.0, egui::FontFamily::Proportional),
         theme.text_primary,
     );
 
-    let close = Rect::from_min_size(pos2(panel.right() - 32.0, panel.top() + 10.0), vec2(22.0, 22.0));
+    let close = Rect::from_min_size(pos2(panel.right() - 34.0, panel.top() + 12.0), vec2(22.0, 22.0));
     let close_resp = ui.interact(close, id.with("close"), Sense::click());
     if close_resp.hovered() {
         painter.rect_filled(close, 5.0, theme.sidebar_hover);
@@ -1187,52 +1420,156 @@ fn draw_info_panel(
         theme.text_secondary,
         1.3,
     );
+    close_resp.clone().on_hover_text("关闭照片信息");
 
     let e = &viewer.exif;
+    let mut y = panel.top() + 46.0;
+
+    // ---- V2 头部：缩略图 + 标题 + 文件名 ----
+    let thumb = Rect::from_min_size(pos2(panel.left() + pad, y), vec2(48.0, 48.0));
+    if let Some(tex) = viewer.tex.as_ref() {
+        let fitted = fit_rect(thumb, viewer.tex_size);
+        painter.image(
+            tex.id(),
+            fitted,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    } else {
+        painter.rect_filled(thumb, 8.0, theme.chip_bg);
+    }
+    let text_x = thumb.right() + 12.0;
+    painter.text(
+        pos2(text_x, y + 4.0),
+        Align2::LEFT_TOP,
+        truncate_to_width(painter, &display_title(row), 13.0, panel.right() - pad - text_x, theme.text_primary),
+        FontId::new(13.5, egui::FontFamily::Proportional),
+        theme.text_primary,
+    );
+    painter.text(
+        pos2(text_x, y + 24.0),
+        Align2::LEFT_TOP,
+        truncate_to_width(painter, &row.name, 11.0, panel.right() - pad - text_x, theme.text_secondary),
+        FontId::new(11.0, egui::FontFamily::Proportional),
+        theme.text_secondary,
+    );
+    y += 60.0;
+
+    // ---- V2 曝光四宫格：ISO / 焦距 / 光圈 / 快门（缺就「—」，不编造） ----
+    let cells = [
+        (e.iso.clone(), "ISO"),
+        (e.focal_length.clone(), "焦距"),
+        (e.f_number.clone(), "光圈"),
+        (e.exposure_time.clone(), "快门"),
+    ];
+    let cell_w = (inner_w - 8.0) / 2.0;
+    let cell_h = 44.0;
+    for (i, (value, label)) in cells.iter().enumerate() {
+        let col = i % 2;
+        let row = i / 2;
+        let cell = Rect::from_min_size(
+            pos2(panel.left() + pad + col as f32 * (cell_w + 8.0), y + row as f32 * (cell_h + 6.0)),
+            vec2(cell_w, cell_h),
+        );
+        painter.rect_filled(cell, 8.0, theme.chip_bg);
+        painter.text(
+            cell.left_top() + vec2(10.0, 7.0),
+            Align2::LEFT_TOP,
+            truncate_to_width(painter, value.as_deref().unwrap_or("—"), 13.0, cell_w - 20.0, theme.text_primary),
+            FontId::new(13.0, egui::FontFamily::Proportional),
+            theme.text_primary,
+        );
+        painter.text(
+            cell.left_bottom() + vec2(10.0, -15.0),
+            Align2::LEFT_BOTTOM,
+            *label,
+            FontId::new(10.5, egui::FontFamily::Proportional),
+            theme.text_secondary,
+        );
+    }
+    y += cell_h * 2.0 + 12.0;
+
+    // ---- V2 逐行信息：文件 / 尺寸 / 大小 / 日期 / 相机 / 镜头 / 路径 ----
     let rows: Vec<(&str, Option<String>)> = vec![
+        ("文件", Some(row.name.clone()).filter(|s| !s.is_empty())),
+        ("尺寸", Some(dims_text(row, viewer)).filter(|s| !s.is_empty())),
+        ("大小", Some(human_bytes(row.size_bytes)).filter(|s| !s.is_empty())),
+        ("日期", format_taken_date(row.eff_taken_at)),
         ("相机", join_opt(&e.make, &e.model)),
         ("镜头", e.lens.clone()),
-        ("焦距", e.focal_length.clone()),
-        ("光圈", e.f_number.clone()),
-        ("快门", e.exposure_time.clone()),
-        ("ISO", e.iso.clone()),
-        ("拍摄时间", e.taken_at_text.clone()),
-        ("时间来源", Some(viewer.taken_src.clone())),
-        ("色彩空间", e.color_space.clone()),
-        ("位置", e.gps.clone()),
-        ("元数据", Some(viewer.exif_status.clone())),
+        ("路径", Some(shorten_path(&row.folder_path)).filter(|s| !s.is_empty())),
+        (
+            "说明",
+            Some(viewer.caption_text.trim().to_string()).filter(|s| !s.is_empty()),
+        ),
     ];
-
-    let mut y = panel.top() + 46.0;
+    let label_w = 46.0;
     let clip = Rect::from_min_max(
-        pos2(panel.left() + 16.0, y),
-        pos2(panel.right() - 14.0, panel.bottom() - 8.0),
+        pos2(panel.left() + pad, y),
+        pos2(panel.right() - pad, panel.bottom() - 8.0),
     );
     let clipped = painter.with_clip_rect(clip);
     for (label, value) in rows {
+        if y > panel.bottom() - 18.0 {
+            break;
+        }
         clipped.text(
-            pos2(panel.left() + 16.0, y),
+            pos2(panel.left() + pad, y),
             Align2::LEFT_TOP,
             label,
             FontId::new(11.0, egui::FontFamily::Proportional),
             theme.text_secondary,
         );
         clipped.text(
-            pos2(panel.left() + 82.0, y),
-            Align2::LEFT_TOP,
-            value.unwrap_or_else(|| "—".to_string()),
+            pos2(panel.right() - pad, y),
+            Align2::RIGHT_TOP,
+            truncate_to_width(
+                painter,
+                value.as_deref().unwrap_or("—"),
+                11.0,
+                inner_w - label_w,
+                theme.text_primary,
+            ),
             FontId::new(11.0, egui::FontFamily::Proportional),
             theme.text_primary,
         );
-        y += 21.0;
+        y += 20.0;
+    }
+    y += 6.0;
+
+    // ---- 来源 / 状态（只读） ----
+    for (label, value) in [
+        ("时间来源", viewer.taken_src.clone()),
+        ("色彩空间", e.color_space.clone().unwrap_or_else(|| "—".into())),
+        ("元数据", viewer.exif_status.clone()),
+    ] {
+        if y > panel.bottom() - 18.0 {
+            break;
+        }
+        clipped.text(
+            pos2(panel.left() + pad, y),
+            Align2::LEFT_TOP,
+            label,
+            FontId::new(11.0, egui::FontFamily::Proportional),
+            theme.text_secondary,
+        );
+        let shown = if value.trim().is_empty() { "—" } else { value.as_str() };
+        clipped.text(
+            pos2(panel.right() - pad, y),
+            Align2::RIGHT_TOP,
+            truncate_to_width(painter, shown, 11.0, inner_w - label_w, theme.text_primary),
+            FontId::new(11.0, egui::FontFamily::Proportional),
+            theme.text_primary,
+        );
+        y += 20.0;
     }
 
     // ---- RGB 直方图（VW-09：自动出现，不是索引页的帧时间勾选） ----
-    let hist_h = 104.0;
-    let hist_y = (y + 12.0).min(panel.bottom() - hist_h - 10.0);
-    if hist_y > y - 4.0 && panel.bottom() - hist_y > 40.0 {
+    let hist_h = 96.0;
+    let hist_y = y + 8.0;
+    if panel.bottom() - hist_y > hist_h {
         painter.text(
-            pos2(panel.left() + 16.0, hist_y),
+            pos2(panel.left() + pad, hist_y),
             Align2::LEFT_TOP,
             "RGB 直方图",
             FontId::new(11.0, egui::FontFamily::Proportional),
@@ -1240,13 +1577,13 @@ fn draw_info_panel(
         );
         if let Some(hist) = &viewer.histogram {
             let bar = Rect::from_min_size(
-                pos2(panel.left() + 16.0, hist_y + 20.0),
-                vec2(panel.width() - 32.0, 66.0),
+                pos2(panel.left() + pad, hist_y + 18.0),
+                vec2(inner_w, 62.0),
             );
             draw_histogram(painter, bar, hist, theme);
         } else {
             painter.text(
-                pos2(panel.left() + 16.0, hist_y + 22.0),
+                pos2(panel.left() + pad, hist_y + 20.0),
                 Align2::LEFT_TOP,
                 "原图载入后显示",
                 FontId::new(10.5, egui::FontFamily::Proportional),
@@ -1255,8 +1592,82 @@ fn draw_info_panel(
         }
     }
 
-    let _ = font;
     close_resp.clicked()
+}
+
+/// 尺寸文案：优先原图真实尺寸，读不到就回落到库里的宽高。
+fn dims_text(row: &PhotoRow, viewer: &Viewer) -> String {
+    match viewer.dims {
+        Some((w, h)) => format!("{w} × {h}"),
+        None => match (row.width, row.height) {
+            (Some(w), Some(h)) => format!("{w} × {h}"),
+            _ => String::new(),
+        },
+    }
+}
+
+/// 文件大小（二进制单位，与索引管理页同一口径）。
+fn human_bytes(n: i64) -> String {
+    const KB: f64 = 1024.0;
+    let f = n.max(0) as f64;
+    if f >= KB * KB * KB {
+        format!("{:.2} GB", f / KB / KB / KB)
+    } else if f >= KB * KB {
+        format!("{:.1} MB", f / KB / KB)
+    } else if f >= KB {
+        format!("{:.0} KB", f / KB)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// 路径缩短：家目录换成 `~`，长路径中段省略（只影响展示，不改真实路径）。
+fn shorten_path(path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    let mut p = path.to_string();
+    if let Some(home) = std::env::var_os("HOME")
+        && let Some(home) = home.to_str()
+        && let Some(rest) = p.strip_prefix(home)
+    {
+        p = format!("~{rest}");
+    }
+    p
+}
+
+/// 单行裁剪：超出宽度就截断补 `…`（信息栏窄，不能画到栏外）。
+fn truncate_to_width(
+    painter: &egui::Painter,
+    text: &str,
+    size: f32,
+    max_w: f32,
+    color: Color32,
+) -> String {
+    let font = FontId::new(size, egui::FontFamily::Proportional);
+    let full = painter.layout_no_wrap(text.to_string(), font.clone(), color);
+    if full.size().x <= max_w {
+        return text.to_string();
+    }
+    let ell_w = painter
+        .layout_no_wrap("…".to_string(), font.clone(), color)
+        .size()
+        .x;
+    let mut out = String::new();
+    let mut w = 0.0;
+    for ch in text.chars() {
+        let cw = painter
+            .layout_no_wrap(ch.to_string(), font.clone(), color)
+            .size()
+            .x;
+        if w + cw + ell_w > max_w {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
 }
 
 fn compare_badge(
@@ -2085,6 +2496,90 @@ mod tests {
         assert!(format_taken_date(row.eff_taken_at).is_some());
         assert!(format_taken_date(0).is_none());
         assert_eq!(display_title(&photos(1)[0]), "IMG_0001");
+    }
+
+    /// V1：亮色主题下展厅必须是浅色（浅灰底 + 白卡片 + 浅色控件），
+    /// 不能把大块深色暗房画布带进亮色；暗色仍是对应的深色。
+    #[test]
+    fn light_viewer_is_a_light_gallery() {
+        let light = Theme::for_appearance(Appearance::Light);
+        let dark = Theme::for_appearance(Appearance::Dark);
+        let light_bg = Bg::Black.color(&light);
+        assert!(is_bright(light_bg), "亮色展厅底色必须浅：{light_bg:?}");
+        assert!(is_bright(light.viewer_chrome_bg), "亮色顶栏/底栏必须浅");
+        assert!(is_bright(light.viewer_card), "照片卡片必须浅");
+        let dark_bg = Bg::Black.color(&dark);
+        assert!(!is_bright(dark_bg), "暗色展厅仍必须是暗房");
+    }
+
+    /// V2：「照片信息」要有缩略图 + 标题 + 文件名、曝光四宫格，
+    /// 以及文件 / 尺寸 / 大小 / 日期 / 相机 / 镜头 / 路径等逐行信息。
+    #[test]
+    fn info_panel_has_thumbnail_title_and_exposure_grid() {
+        let rows = photos(3);
+        let mut v = Viewer::new(0);
+        let (_a, texts) = run_stage(&mut v, &rows, Appearance::Light, &[]);
+        let all = texts.join("\n");
+        for needle in [
+            "照片信息",
+            "IMG_0001",
+            "ISO",
+            "焦距",
+            "光圈",
+            "快门",
+            "文件",
+            "尺寸",
+            "大小",
+            "日期",
+            "相机",
+            "镜头",
+            "路径",
+        ] {
+            assert!(all.contains(needle), "信息栏缺少「{needle}」：{all}");
+        }
+        // 缺 EXIF 时用「—」占位，不编造数据
+        assert!(all.contains("—"), "缺字段应显示占位：{all}");
+    }
+
+    /// V3：照片正下方有标题、日期与收藏/标签行。
+    #[test]
+    fn caption_shows_title_date_and_favorite_tag_line() {
+        let rows = photos(3);
+        let mut v = Viewer::new(0);
+        v.tags = vec!["旅行".into()];
+        let (_a, texts) = run_stage(&mut v, &rows, Appearance::Light, &[]);
+        let all = texts.join("\n");
+        assert!(all.contains("IMG_0001"), "{all}");
+        // 日期形如 2020年9月14日
+        assert!(all.contains('年') && all.contains('月') && all.contains('日'), "{all}");
+        assert!(all.contains("旅行"), "标签行应显示标签：{all}");
+        // 第 1 张是 photo(2)：starred=true → 收藏行真的显示「收藏」
+        let mut v2 = Viewer::new(1);
+        v2.tags = vec!["旅行".into()];
+        let (_a2, texts2) = run_stage(&mut v2, &rows, Appearance::Light, &[]);
+        let all2 = texts2.join("\n");
+        assert!(all2.contains("收藏"), "收藏照片应显示收藏行：{all2}");
+        assert!(all2.contains("旅行"), "{all2}");
+    }
+
+    /// V4：看图顶栏左右两端都要有「返回」胶囊。
+    #[test]
+    fn topbar_has_back_pills_on_both_ends() {
+        let lay = layout(stage_rect(), true, false);
+        let right = right_back_rect(lay.top);
+        assert!(lay.top.contains_rect(right), "右端返回胶囊必须在顶栏内");
+        assert!(right.left() > lay.top.center().x, "右端胶囊应在右半区");
+        // 左端胶囊从左边距开始
+        let rows = photos(3);
+        let mut v = Viewer::new(0);
+        let (_a, texts) = run_stage(&mut v, &rows, Appearance::Light, &[]);
+        let backs = texts.iter().filter(|t| t.as_str() == "返回").count();
+        assert!(backs >= 2, "两端各一枚「返回」，实际 {backs}：{texts:?}");
+        // 两端胶囊与「照片信息」/缩放按钮不重叠
+        let info = info_toggle_rect(lay.top);
+        assert!(!right.intersects(info));
+        let (minus, plus) = zoom_button_rects(lay.top);
+        assert!(!right.intersects(minus) && !right.intersects(plus));
     }
 
     /// 换页重置缩放与适合标记（翻到下一张应回「适合」，不残留上一张的 400%）。
