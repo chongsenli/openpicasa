@@ -67,22 +67,7 @@ pub fn run() -> eframe::Result {
     }
 
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            // U-01：首次打开是横向偏宽、非最大化的窗口（⚠️待核对具体尺寸）
-            .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([900.0, 600.0])
-            .with_title("OpenPicasa")
-            .with_app_id("app.openpicasa")
-            .with_icon(window_icon())
-            // M3.1：macOS「照片」风格——红绿灯嵌进自绘顶栏。
-            // fullsize_content_view 让窗口内容延伸到标题栏区域；
-            // 每帧用 `Frame::set_traffic_lights_position` 把三枚按钮
-            // 摆在顶栏（TOPBAR_H）的垂直中线、左侧留白处。
-            // titlebar 隐藏系统标题文字（macOS 上栏体自绘）。
-            .with_fullsize_content_view(cfg!(target_os = "macos"))
-            .with_titlebar_shown(!cfg!(target_os = "macos"))
-            // H8：窗口标题始终显示 "OpenPicasa"（macOS 也不隐藏）。
-            .with_title_shown(true),
+        viewport: viewport_builder(),
         // 02 §5.2.2 方案 ①：把 eframe 的 UI 状态指到 Preferences 侧，
         // 不和索引库混在同一个目录语义里。
         persistence_path: Some(paths.ui_state_file()),
@@ -94,6 +79,28 @@ pub fn run() -> eframe::Result {
         native_options,
         Box::new(move |cc| Ok(Box::new(OpenPicasaApp::new(cc, paths)))),
     )
+}
+
+/// 窗口 viewport：尺寸 / 标题 / app_id / 图标 / macOS 自绘顶栏。
+///
+/// H8：标题**始终显示** `OpenPicasa`（`with_title_shown(true)`），macOS 也不再隐藏；
+/// 其余窗口行为（fullsize content view、titlebar、红绿灯位置）保持不变。
+fn viewport_builder() -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        // U-01：首次打开是横向偏宽、非最大化的窗口（⚠️待核对具体尺寸）
+        .with_inner_size([1280.0, 820.0])
+        .with_min_inner_size([900.0, 600.0])
+        .with_title("OpenPicasa")
+        .with_app_id("app.openpicasa")
+        .with_icon(window_icon())
+        // M3.1：macOS「照片」风格——红绿灯嵌进自绘顶栏。
+        // fullsize_content_view 让窗口内容延伸到标题栏区域；
+        // 每帧用 `Frame::set_traffic_lights_position` 把三枚按钮
+        // 摆在顶栏（TOPBAR_H）的垂直中线、左侧留白处。
+        .with_fullsize_content_view(cfg!(target_os = "macos"))
+        .with_titlebar_shown(!cfg!(target_os = "macos"))
+        // H8：窗口标题始终显示 "OpenPicasa"（macOS 也不隐藏）。
+        .with_title_shown(true)
 }
 
 /// 窗口图标。图来自 `packaging/logo.png`，由 `packaging/make_icons.py --single`
@@ -231,6 +238,32 @@ pub fn clear_log_file() -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// H8：窗口标题始终是 `OpenPicasa` 且**显示**（macOS 也不再隐藏），
+    /// 其余窗口行为（fullsize content view / titlebar / 尺寸）保持原样。
+    #[test]
+    fn h8_window_title_is_openpicasa_and_always_shown() {
+        let vp = viewport_builder();
+        assert_eq!(vp.title.as_deref(), Some("OpenPicasa"), "窗口标题");
+        assert_eq!(vp.title_shown, Some(true), "标题必须显示（macOS 也不隐藏）");
+        assert_eq!(
+            vp.fullsize_content_view,
+            Some(cfg!(target_os = "macos")),
+            "macOS 自绘顶栏行为不变"
+        );
+        assert_eq!(
+            vp.titlebar_shown,
+            Some(!cfg!(target_os = "macos")),
+            "titlebar 行为不变"
+        );
+        assert_eq!(vp.inner_size, Some([1280.0, 820.0].into()), "初始尺寸不变");
+        assert_eq!(
+            vp.min_inner_size,
+            Some([900.0, 600.0].into()),
+            "最小尺寸不变"
+        );
+        assert_eq!(vp.app_id.as_deref(), Some("app.openpicasa"), "app_id 不变");
+    }
 
     /// m10756：清空运行日志必须**真的把文件截到 0**，而且要把写游标一起归零。
     ///
