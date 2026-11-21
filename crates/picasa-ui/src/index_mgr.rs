@@ -81,7 +81,7 @@ pub enum MgrAction {
     // ---- M4「导入 / 导出」标签（docs/12 S2～S7）
     /// 打开系统保存对话框 → 导出（携带是否含缩略图）
     ExportIndex { with_thumbs: bool },
-    /// IDX-06：在 Finder 中显示最近一次成功备份文件的位置。
+    /// IDX-06：在系统文件管理器中显示最近一次成功备份文件的位置。
     RevealBackup,
     /// 打开系统文件对话框 → 选择索引文件并校验/预览
     PickImportFile,
@@ -744,7 +744,7 @@ fn delete_index_button(ui: &mut Ui, id: i64, actions: &mut Vec<MgrAction>) {
 pub fn root_buttons(r: &RootView) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     if r.index_removed {
-        out.extend(["重新索引（恢复）", "在 Finder 中显示", "删除索引"]);
+        out.extend(["重新索引（恢复）", reveal_label(), "删除索引"]);
         return out;
     }
     if r.offline {
@@ -753,9 +753,21 @@ pub fn root_buttons(r: &RootView) -> Vec<&'static str> {
     }
     out.extend(["刷新", "重新索引", "强制重扫", "全量重建"]);
     out.push(if r.closed { "重新打开" } else { "关闭" });
-    out.push("在 Finder 中显示");
+    out.push(reveal_label());
     out.push("删除索引");
     out
+}
+
+/// I3：「在 Finder 中显示」在非 macOS 上叫「在文件管理器中显示」。
+///
+/// macOS 保留 Finder 的官方叫法；其他平台用通用、准确的本地说法，
+/// 不硬编某个桌面环境的文件管理器名称。
+pub fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "在 Finder 中显示"
+    } else {
+        "在文件管理器中显示"
+    }
 }
 
 /// 按 [`root_buttons`] 画一颗根的按钮组（四个状态共用一份实现，避免走样）。
@@ -791,7 +803,7 @@ pub fn root_button_action(label: &str, root_id: i64) -> Option<MgrAction> {
         "全量重建" => MgrAction::RequestRebuild(root_id),
         "关闭" => MgrAction::CloseRoot(root_id),
         "重新打开" => MgrAction::ReopenRoot(root_id),
-        "在 Finder 中显示" => MgrAction::RevealRoot(root_id),
+        l if l == reveal_label() => MgrAction::RevealRoot(root_id),
         _ => return None,
     })
 }
@@ -1538,7 +1550,7 @@ fn import_export_tab(
                     .color(theme.text_secondary)
                     .size(10.5),
             );
-            if ui.button("在 Finder 中显示").clicked() {
+            if ui.button(reveal_label()).clicked() {
                 actions.push(MgrAction::RevealBackup);
             }
         });
@@ -1611,7 +1623,7 @@ fn import_export_tab(
     ui.separator();
     io_state_area(ui, theme, io);
     ui.label(
-        RichText::new("ⓘ 相关操作不修改或移动原始照片 · 导入采用事务保护，失败可回滚")
+        RichText::new("ⓘ 导入采用事务保护，失败可回滚")
             .color(theme.text_secondary)
             .size(10.5),
     );
@@ -1880,7 +1892,7 @@ fn import_step_result(ui: &mut Ui, theme: &Theme, io: &mut IoUi, actions: &mut V
                 actions.push(MgrAction::BrowseImportedPhotos(batch));
             }
             ui.label(
-                RichText::new("只读索引与缩略图；原图按原路径读取，不写照片目录")
+                RichText::new("索引与缩略图来自独立索引；原图仍按原路径读取")
                     .color(theme.text_secondary)
                     .size(10.5),
             );
@@ -2956,7 +2968,7 @@ mod m5r6_tests {
                 "强制重扫",
                 "全量重建",
                 "关闭",
-                "在 Finder 中显示",
+                reveal_label(),
                 "删除索引"
             ],
             "正常根按钮表（`IDX-A-BTNS`）"
@@ -2979,7 +2991,7 @@ mod m5r6_tests {
         let r = root_buttons(&removed);
         assert_eq!(
             r,
-            vec!["重新索引（恢复）", "在 Finder 中显示", "删除索引"],
+            vec!["重新索引（恢复）", reveal_label(), "删除索引"],
             "索引已移除只有三颗按钮"
         );
         for banned in ["刷新", "强制重扫", "全量重建", "关闭", "监视"] {
@@ -3255,7 +3267,7 @@ mod m5r6_tests {
     }
 
     /// `AC-IDX-IO`：四步标签逐字固定；合并与替换都必须勾「我已了解上述影响范围」；
-    /// **没有**「暂停导入」；页脚「不修改或移动原始照片」只在本标签底部。
+    /// **没有**「暂停导入」；页脚只在本标签底部，且不带「不改原始照片」承诺。
     #[test]
     fn ac_idx_io_four_steps_and_no_pause_import() {
         let src = prod_src();
@@ -3282,8 +3294,8 @@ mod m5r6_tests {
         );
         assert!(src.contains("关闭本窗口不会取消导入"), "关窗不取消导入");
 
-        // 页脚只出现在导入/导出标签的函数里。
-        let footer = "ⓘ 相关操作不修改或移动原始照片";
+        // 页脚只出现在导入/导出标签的函数里；不再附带「不改原始照片」承诺。
+        let footer = "ⓘ 导入采用事务保护，失败可回滚";
         assert!(src.contains(footer));
         assert_eq!(
             src.matches(footer).count(),

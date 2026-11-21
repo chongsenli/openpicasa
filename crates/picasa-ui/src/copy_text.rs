@@ -67,7 +67,8 @@ pub enum IndexDeleteKind {
 mod tests {
     use super::*;
 
-    /// `AC-ABOUT`：不得再出现旧的全称承诺，且必须能区分「组织动作」与「废纸篓」。
+    /// `AC-ABOUT`：不得再出现旧的「只读不改原文件」全称承诺，
+    /// 且必须能区分「组织动作」与「废纸篓」。
     #[test]
     fn about_copy_no_longer_promises_read_only_never_touches_originals() {
         let t = about_text("0.4.2-beta.1");
@@ -76,6 +77,8 @@ mod tests {
             "所有操作都不改原图",
             "所有操作都不动原图",
             "不改原图",
+            "只读，不会修改你的文件",
+            "只读",
         ] {
             assert!(!t.contains(banned), "关于文案仍在承诺「{banned}」：{t}");
         }

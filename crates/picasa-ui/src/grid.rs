@@ -1914,8 +1914,7 @@ pub fn empty_reason(search: &str, filter: Option<&picasa_db::PhotoFilter>) -> Em
 /// 「点顶栏「…」→「添加文件夹…」」会指向一个不存在的菜单项。
 /// 添加关注文件夹的事实入口是顶栏「导入」（以及索引进度空态 / 设置壳里的
 /// 同源入口），三者都调同一个 `add_folder`。
-const EMPTY_GRID_HINT: &str =
-    "点顶栏「导入」添加照片文件夹，选一个放照片的目录（只读，不会修改你的文件）";
+const EMPTY_GRID_HINT: &str = "点顶栏「导入」添加照片文件夹，选一个放照片的目录";
 
 const NO_MATCH_TITLE: &str = "没有符合条件的照片";
 const NO_MATCH_HINT: &str = "当前搜索或筛选没有结果";
@@ -2193,8 +2192,10 @@ mod tests {
         assert!(!hint.contains("「…」"), "不许再指更多菜单：{hint}");
         assert!(!hint.contains("添加文件夹"), "不许再写「添加文件夹…」：{hint}");
         assert!(!hint.contains("点上方"));
-        // 只描述选目录这个动作，不是对整个应用的全称承诺。
-        assert!(hint.contains("只读"), "{hint}");
+        // 只描述选目录这个动作，**不许**再带「只读 / 不会修改你的文件」承诺。
+        for banned in ["只读", "不会修改", "不改原文件"] {
+            assert!(!hint.contains(banned), "空库文案不许再承诺「{banned}」：{hint}");
+        }
     }
 
     #[test]

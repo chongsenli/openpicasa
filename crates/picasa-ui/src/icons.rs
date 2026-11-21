@@ -19,7 +19,7 @@ pub enum Icon {
     Back,
     /// 添加文件夹（folder + plus）
     AddFolder,
-    /// 在 Finder 中显示（放大镜）
+    /// 在文件管理器中显示（放大镜）
     Reveal,
     /// 排序（长短竖条）
     Sort,

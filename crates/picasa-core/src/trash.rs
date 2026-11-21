@@ -15,6 +15,24 @@
 use crate::{CoreError, Result};
 use std::path::{Path, PathBuf};
 
+/// 本平台文件管理器的用户可见叫法（I3/T1：非 macOS 不写 Finder）。
+pub fn file_manager_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Finder"
+    } else {
+        "文件管理器"
+    }
+}
+
+/// 跨卷失败的说明。抽出来只为让平台用词可测。
+fn cross_volume_message(path: &Path) -> String {
+    format!(
+        "无法移动到回收站（跨卷）：{}。请在{}中删除这张照片。",
+        path.display(),
+        file_manager_name()
+    )
+}
+
 /// 把文件移到回收站，返回它在回收站里的最终路径。
 ///
 /// 失败时**不改动原文件**（rename 要么成功要么不生效），并把原因说清楚。
@@ -25,8 +43,9 @@ pub fn move_to_trash(path: &Path) -> Result<PathBuf> {
     let trash_dir = trash_dir_for(path)?;
     std::fs::create_dir_all(&trash_dir).map_err(|e| {
         CoreError::Other(format!(
-            "无法创建回收站目录 {}：{e}（外接盘可能需要先在 Finder 里删除一次）",
-            trash_dir.display()
+            "无法创建回收站目录 {}：{e}（外接盘可能需要先在{}里删除一次）",
+            trash_dir.display(),
+            file_manager_name()
         ))
     })?;
 
@@ -35,10 +54,9 @@ pub fn move_to_trash(path: &Path) -> Result<PathBuf> {
         Ok(()) => Ok(dest),
         // EXDEV = 18（macOS/Linux 一致）。用 errno 判断而不是 `ErrorKind::CrossesDevices`，
         // 后者在稳定版里的可用性随版本变化，而 errno 是 POSIX 常量，永远不会变。
-        Err(e) if e.raw_os_error() == Some(18) => Err(CoreError::Other(format!(
-            "无法移动到回收站（跨卷）：{}。请在 Finder 中删除这张照片。",
-            path.display()
-        ))),
+        Err(e) if e.raw_os_error() == Some(18) => {
+            Err(CoreError::Other(cross_volume_message(path)))
+        }
         Err(e) => Err(CoreError::Other(format!(
             "移动到回收站失败：{}（{e}）",
             path.display()
@@ -123,6 +141,19 @@ unsafe fn libc_getuid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T1：错误信息里的文件管理器叫法按平台区分，非 macOS 不得出现 Finder。
+    #[test]
+    fn error_copy_names_the_platform_file_manager() {
+        let msg = cross_volume_message(Path::new("/tmp/a.jpg"));
+        assert!(msg.contains("请在文件管理器"), "说明要可读：{msg}");
+        if !cfg!(target_os = "macos") {
+            assert!(!msg.contains("Finder"), "非 macOS 错误信息仍写 Finder：{msg}");
+            assert!(msg.contains("文件管理器"), "{msg}");
+        } else {
+            assert!(msg.contains("Finder"), "{msg}");
+        }
+    }
 
     #[test]
     fn unique_destination_appends_suffix() {

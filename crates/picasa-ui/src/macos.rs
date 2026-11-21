@@ -138,7 +138,7 @@ pub fn pick_folder_outcome(start: Option<&Path>) -> PickFolderOutcome {
 /// 尤其安静）。调用方必须给出可见提示，文案用 [`pick_folder_none_toast`]；
 /// 需要区分时用 [`pick_folder_outcome`]。
 pub fn pick_folder(start: Option<&Path>) -> Option<PathBuf> {
-    let mut dialog = rfd::FileDialog::new().set_title("选择照片文件夹（只读，不会修改你的文件）");
+    let mut dialog = rfd::FileDialog::new().set_title("选择照片文件夹");
     if let Some(dir) = start {
         dialog = dialog.set_directory(dir);
     }

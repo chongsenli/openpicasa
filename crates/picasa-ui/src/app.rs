@@ -1875,7 +1875,7 @@ impl OpenPicasaApp {
         }
     }
 
-    /// IDX-06：在 Finder 中显示最近一次成功备份文件的位置。
+    /// IDX-06：在系统文件管理器中显示最近一次成功备份文件的位置。
     fn reveal_last_backup(&mut self) {
         let Some(info) = &self.index_mgr.io.last_backup else {
             return;
@@ -3806,7 +3806,7 @@ impl OpenPicasaApp {
                     if multi {
                         ui.label(
                             egui::RichText::new(format!(
-                                "将保存到选中的 {n} 张照片（只写应用索引，不改原图）"
+                                "将保存到选中的 {n} 张照片（只写应用索引）"
                             ))
                             .size(11.0)
                             .color(egui::Color32::GRAY),
@@ -4006,7 +4006,7 @@ impl OpenPicasaApp {
                         .show(ui, |ui| {
                             ui.set_min_width(200.0);
                             if ui
-                                .add(egui::Button::new("在 Finder 中打开").frame(false))
+                                .add(egui::Button::new(crate::index_mgr::reveal_label()).frame(false))
                                 .clicked()
                             {
                                 let _ = crate::macos::open_folder(std::path::Path::new(&path));
@@ -4482,13 +4482,20 @@ impl OpenPicasaApp {
                     .collapsible(false)
                     .resizable(false)
                     .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                    // T1：正文要可读，不能被挤在窄框里乱换行（两行 + 一条还原说明）。
+                    .fixed_size(vec2(420.0, 168.0))
                     .open(&mut open)
                     .show(&ctx, |ui| {
-                        ui.label(picasa_core::trash_plan::confirm_body(shown.len()));
-                        ui.add_space(8.0);
+                        ui.set_max_width(388.0);
+                        ui.label(
+                            egui::RichText::new(picasa_core::trash_plan::confirm_body(shown.len()))
+                                .size(12.5),
+                        );
+                        ui.add_space(10.0);
                         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             action = crate::trash_ui::UserAction::Dismiss;
                         }
+                        // T2：破坏性主按钮红色（取消仍是默认焦点、默认样式）。
                         ui.horizontal(|ui| {
                             // 默认焦点在「取消」：回车 / 空格落在取消上，
                             // 移动原文件必须再主动点一次（`M5-FS-01`）。
@@ -4497,7 +4504,13 @@ impl OpenPicasaApp {
                             if cancel_btn.clicked() {
                                 action = crate::trash_ui::UserAction::Cancel;
                             }
-                            if ui.button(picasa_core::trash_plan::TRASH_ACTION).clicked() {
+                            let confirm = egui::Button::new(
+                                egui::RichText::new(picasa_core::trash_plan::TRASH_ACTION)
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(theme.danger)
+                            .corner_radius(theme.radius_btn);
+                            if ui.add(confirm).clicked() {
                                 action = crate::trash_ui::UserAction::Confirm;
                             }
                         });
@@ -5402,7 +5415,7 @@ pub fn error_banner_visible(viewer_open: bool, last_error: Option<&str>) -> bool
 /// 「关闭关注文件夹（保留索引）」与「从图库移除」——两条路径的作用范围不同，
 /// 混在一起就会让用户在错误的层级执行危险动作。
 pub fn folder_ctx_items(is_root: bool) -> Vec<&'static str> {
-    let mut items = vec!["在 Finder 中打开", "刷新此文件夹"];
+    let mut items = vec![crate::index_mgr::reveal_label(), "刷新此文件夹"];
     if is_root {
         items.push("关闭关注文件夹（保留索引）");
         items.push(crate::copy_text::REMOVE_ROOT_LABEL);
@@ -5434,7 +5447,7 @@ mod m5r5_tests {
     #[test]
     fn folder_context_menu_splits_root_and_child_actions() {
         let root = folder_ctx_items(true);
-        assert!(root.contains(&"在 Finder 中打开"), "{root:?}");
+        assert!(root.contains(&crate::index_mgr::reveal_label()), "{root:?}");
         assert!(root.contains(&"刷新此文件夹"), "{root:?}");
         assert!(
             root.contains(&"关闭关注文件夹（保留索引）"),
@@ -5452,7 +5465,7 @@ mod m5r5_tests {
         );
 
         let child = folder_ctx_items(false);
-        assert!(child.contains(&"在 Finder 中打开"), "{child:?}");
+        assert!(child.contains(&crate::index_mgr::reveal_label()), "{child:?}");
         assert!(child.contains(&"刷新此文件夹"), "{child:?}");
         assert!(
             child.contains(&"关闭此文件夹（不再显示）"),

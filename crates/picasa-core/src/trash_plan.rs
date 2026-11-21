@@ -22,10 +22,30 @@ pub const TRASH_CANCEL: &str = "取消";
 /// 执行按钮。
 pub const TRASH_ACTION: &str = "移到废纸篓";
 
+/// 本平台对「系统废纸篓」的用户可见叫法（T1：非 macOS 用「回收站」）。
+pub fn system_trash_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "系统废纸篓"
+    } else {
+        "系统回收站"
+    }
+}
+
+/// 还原路径说明（T1：非 macOS 不得出现 Finder）。
+pub fn trash_recovery_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "可以在 Finder 的废纸篓里还原，我们不会直接删除文件。"
+    } else {
+        "需要时可以在系统的回收站里还原，我们不会直接删除文件。"
+    }
+}
+
 /// 确认框正文。`n` 必须等于执行集合大小。
 pub fn confirm_body(n: usize) -> String {
     format!(
-        "将把 {n} 张照片移到系统废纸篓。\n\n可以在 Finder 的废纸篓里还原，我们不会直接删除文件。"
+        "将把 {n} 张照片移到{}。\n\n{}",
+        system_trash_name(),
+        trash_recovery_hint()
     )
 }
 
@@ -95,9 +115,17 @@ mod tests {
     #[test]
     fn body_uses_the_exact_count_and_says_files_are_recoverable() {
         let body = confirm_body(3);
-        assert!(body.starts_with("将把 3 张照片移到系统废纸篓。"), "{body}");
-        assert!(body.contains("可以在 Finder 的废纸篓里还原"), "{body}");
+        assert!(
+            body.starts_with(&format!("将把 3 张照片移到{}。", system_trash_name())),
+            "{body}"
+        );
+        assert!(body.contains(trash_recovery_hint()), "{body}");
         assert!(body.contains("我们不会直接删除文件"), "{body}");
+        // T1：非 macOS 的确认框不得出现 Finder（用户机器上根本没有这个名字）。
+        if !cfg!(target_os = "macos") {
+            assert!(!body.contains("Finder"), "非 macOS 确认框仍写 Finder：{body}");
+            assert_eq!(system_trash_name(), "系统回收站", "{body}");
+        }
         // 不能出现「只删索引」一类说法——那是另一条路径（M5-FS-02）。
         assert!(!body.contains("索引"), "{body}");
         assert_eq!(TRASH_TITLE, "移到废纸篓？");
