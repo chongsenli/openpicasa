@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, pos2, vec2};
+use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, vec2};
 use picasa_core::thumbs::JobKind;
 use picasa_core::{
     AppPaths, CoreEvent, DimsService, IndexBoard, IndexService, Library, ThumbJob, ThumbService,
@@ -574,7 +574,9 @@ impl OpenPicasaApp {
                 .unwrap_or(0);
             if n > 0 {
                 app.lib.toast = Some((
-                    format!("检测到 {n} 个上次未完成的索引任务，已自动续跑（暂停/取消的任务保持原状）"),
+                    format!(
+                        "检测到 {n} 个上次未完成的索引任务，已自动续跑（暂停/取消的任务保持原状）"
+                    ),
                     5.0,
                 ));
             }
@@ -1063,10 +1065,8 @@ impl OpenPicasaApp {
                 }
                 MgrAction::CancelTask(id) => {
                     if id != 0 && self.index.cancel_task(id, "用户取消") {
-                        self.lib.toast = Some((
-                            "该索引任务已取消（已建索引与用户标记保留）".into(),
-                            3.0,
-                        ));
+                        self.lib.toast =
+                            Some(("该索引任务已取消（已建索引与用户标记保留）".into(), 3.0));
                         self.mgmt_next_refresh = std::time::Instant::now();
                     }
                 }
@@ -1161,7 +1161,8 @@ impl OpenPicasaApp {
                 MgrAction::BrowseImportedPhotos(batch) => self.browse_imported_photos(batch),
                 MgrAction::UnhideImportSource(id) => {
                     let done = self.lib.db().map_err(|e| e.to_string()).and_then(|db| {
-                        db.set_import_source_hidden(id, false).map_err(|e| e.to_string())
+                        db.set_import_source_hidden(id, false)
+                            .map_err(|e| e.to_string())
                     });
                     match done {
                         Ok(()) => {
@@ -1169,8 +1170,7 @@ impl OpenPicasaApp {
                             self.sidebar_groups_dirty = true;
                         }
                         Err(e) => {
-                            self.lib.toast =
-                                Some((format!("恢复分组显示失败：{e}"), 4.0));
+                            self.lib.toast = Some((format!("恢复分组显示失败：{e}"), 4.0));
                         }
                     }
                 }
@@ -1206,13 +1206,9 @@ impl OpenPicasaApp {
     /// 「清除筛选」全都自动正确，也不需要把「本次导入」这种一次性状态塞进偏好。
     /// 空批次**不**降级成「不过滤」——那会把整个图库显示出来。
     fn browse_imported_photos(&mut self, batch_id: i64) {
-        let ids = self
-            .lib
-            .db()
-            .map_err(|e| e.to_string())
-            .and_then(|db| {
-                picasa_db::import_batch_photo_ids(&db, batch_id).map_err(|e| e.to_string())
-            });
+        let ids = self.lib.db().map_err(|e| e.to_string()).and_then(|db| {
+            picasa_db::import_batch_photo_ids(&db, batch_id).map_err(|e| e.to_string())
+        });
         let ids = match ids {
             Ok(ids) => ids,
             Err(e) => {
@@ -1312,7 +1308,12 @@ impl OpenPicasaApp {
             return;
         };
         // 目标目录不得落在任何已注册图库根目录内（R-M2-1）
-        let roots: Vec<String> = self.lib.root_paths().iter().map(|p| p.to_string_lossy().to_string()).collect();
+        let roots: Vec<String> = self
+            .lib
+            .root_paths()
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
         let dir = target.parent().unwrap_or(&start);
         if let Err(e) = picasa_db::check_export_dir(dir, &roots) {
             io.state = crate::index_mgr::IoState::Failed;
@@ -1367,11 +1368,7 @@ impl OpenPicasaApp {
             return;
         };
         let work = self.paths.support.clone();
-        let task = crate::import_task::ImportTask::start_inspect(
-            self.paths.db_file(),
-            src,
-            work,
-        );
+        let task = crate::import_task::ImportTask::start_inspect(self.paths.db_file(), src, work);
         let io = &mut self.index_mgr.io;
         io.state = crate::index_mgr::IoState::Preparing;
         io.message.clear();
@@ -1406,12 +1403,8 @@ impl OpenPicasaApp {
         // `execute_import`（会阻塞 UI 帧）。改后台线程 + 真取消标志；成功后
         // `reload_tree/reload_photos/侧栏脏/EXIF/toast` 以 `TaskEffects` 纯数据
         // 返回，由 `ui()` 的 tick 消费（碰不到 app 私有字段的兄弟模块）。
-        let task = crate::import_task::ImportTask::start_import(
-            self.paths.db_file(),
-            src,
-            work,
-            strategy,
-        );
+        let task =
+            crate::import_task::ImportTask::start_import(self.paths.db_file(), src, work, strategy);
         io.cancel = Some(task.cancel_flag()); // 与「取消导入」按钮同一个 Arc
         io.fraction = None;
         // M4.3 §3A ⑦：落「导入进行中」标记。导入是单事务：提交成功才算数，
@@ -1475,10 +1468,7 @@ impl OpenPicasaApp {
             let albums = db.all_albums().unwrap_or_default();
             // M4.2 `M42-UI-05`：同时留一份 name→id，供改名/删除/加入照片调用
             // Core 的 `*_album(id, ..)`；`sidebar_albums` 仍只画 (name,count)。
-            self.sidebar_album_ids = albums
-                .iter()
-                .map(|a| (a.name.clone(), a.id))
-                .collect();
+            self.sidebar_album_ids = albums.iter().map(|a| (a.name.clone(), a.id)).collect();
             self.sidebar_albums = albums
                 .into_iter()
                 .map(|a| (a.name, a.photo_count))
@@ -1673,8 +1663,13 @@ impl OpenPicasaApp {
             },
             "badge": self.mgmt.badge,
         });
-        match std::fs::write(&target, serde_json::to_string_pretty(&payload).unwrap_or_default()) {
-            Ok(()) => self.lib.toast = Some((format!("✓ 已导出诊断日志：{}", target.display()), 3.0)),
+        match std::fs::write(
+            &target,
+            serde_json::to_string_pretty(&payload).unwrap_or_default(),
+        ) {
+            Ok(()) => {
+                self.lib.toast = Some((format!("✓ 已导出诊断日志：{}", target.display()), 3.0))
+            }
             Err(e) => self.lib.toast = Some((format!("诊断日志导出失败：{e}"), 4.0)),
         }
     }
@@ -1775,13 +1770,10 @@ impl OpenPicasaApp {
             .unwrap_or_default();
         let (photos, markers) = match self.lib.db() {
             Ok(db) => {
-                let photos = db.photo_count_for_root(id).ok().and_then(|n| {
-                    if n >= 0 {
-                        Some(n as u64)
-                    } else {
-                        None
-                    }
-                });
+                let photos = db
+                    .photo_count_for_root(id)
+                    .ok()
+                    .and_then(|n| if n >= 0 { Some(n as u64) } else { None });
                 // marker_count_for_root 本身用 Option 区分「确实 0」与「查不到」。
                 let markers = db.marker_count_for_root(id).ok().flatten();
                 (photos, markers)
@@ -2816,6 +2808,7 @@ impl OpenPicasaApp {
                     &theme,
                     self.zoom.cell_px(),
                     &self.view_breadcrumb,
+                    &self.view_header_subtitle,
                     self.lib.sort,
                     !self.lib.selection.is_empty(),
                     &mut self.search_buf,
@@ -2913,14 +2906,11 @@ impl OpenPicasaApp {
                                 // 面板打开时把现有筛选读进草稿
                                 let f = self.lib.filter.clone().unwrap_or_default();
                                 self.filter_draft_tag = f.tag.clone().unwrap_or_default();
-                                self.filter_draft_camera =
-                                    f.camera.clone().unwrap_or_default();
+                                self.filter_draft_camera = f.camera.clone().unwrap_or_default();
                                 self.filter_draft_lens = f.lens.clone().unwrap_or_default();
                                 let (lo, hi) = f
                                     .size_bytes
-                                    .map(|(a, b)| {
-                                        ((a / 1024).to_string(), (b / 1024).to_string())
-                                    })
+                                    .map(|(a, b)| ((a / 1024).to_string(), (b / 1024).to_string()))
                                     .unwrap_or_default();
                                 self.filter_draft_size_lo = lo;
                                 self.filter_draft_size_hi = hi;
@@ -3012,8 +3002,7 @@ impl OpenPicasaApp {
                 // 这两个字段（M5-IA-02 已确认，不再作为待定）。索引管理改由
                 // 更多「设置…」→「打开索引管理」与更多「索引管理…」到达。
                 if let Some(px) = out.zoom_px {
-                    self.zoom
-                        .set_cell_px(px, std::time::Instant::now());
+                    self.zoom.set_cell_px(px, std::time::Instant::now());
                     ctx.request_repaint();
                 }
                 if out.zoom_released {
@@ -3052,11 +3041,7 @@ impl OpenPicasaApp {
                         albums: &self.sidebar_albums,
                         // IDX-22 ②：当前生效的标签筛选 → 行高亮。
                         // `self.lib.filter` 是 `Option<PhotoFilter>`，这里借出。
-                        tags_active: self
-                            .lib
-                            .filter
-                            .as_ref()
-                            .and_then(|f| f.tag.as_deref()),
+                        tags_active: self.lib.filter.as_ref().and_then(|f| f.tag.as_deref()),
                         tags_sort: self.lib.tags_sort(),
                         show_zero_tags: self.lib.show_zero_tags(),
                         tags_in_view: &self.sidebar_tags_in_view,
@@ -3091,29 +3076,7 @@ impl OpenPicasaApp {
             }
         }
 
-        // ③ 主区顶部标题行（M32-UI-04 v1.2：标题迁到主区顶部，两行左对齐；
-        // 修订 docs/09 §7.3「标题区在左栏」——左栏只保留文件树与托盘）
-        egui::Panel::top("view-header-panel")
-            .exact_size(Metrics::VIEW_HEADER_H)
-            .frame(egui::Frame::new().fill(theme.chrome_bg))
-            .show(ui, |ui| {
-                let rect = ui.max_rect();
-                let painter = ui.painter_at(rect);
-                painter.text(
-                    pos2(rect.left() + 10.0 + Metrics::GRID_PAD, rect.top() + 12.0),
-                    egui::Align2::LEFT_CENTER,
-                    &self.view_header_title,
-                    egui::FontId::new(15.0, egui::FontFamily::Proportional),
-                    theme.text_primary,
-                );
-                painter.text(
-                    pos2(rect.left() + 10.0 + Metrics::GRID_PAD, rect.bottom() - 12.0),
-                    egui::Align2::LEFT_CENTER,
-                    &self.view_header_subtitle,
-                    egui::FontId::new(11.0, egui::FontFamily::Proportional),
-                    theme.text_secondary,
-                );
-            });
+        // ③ 主区顶部不再放标题行（H1：库名/路径、张数与拍摄时间起止已回到顶栏）。
 
         // ④ 中央栅格
         // M5 §5.1：主内容井 = 浅灰窗体上的圆角卡片（亮：白井；暗：暗房内井）。
@@ -3180,9 +3143,7 @@ impl OpenPicasaApp {
                     self.perf_first_screen_done = true;
                 }
                 // 可见区首张出图：第一帧出现真实缩略图（不是全部占位）时记一次。
-                if !self.perf_first_visible_done
-                    && out.visible > 0
-                    && out.blank_cells < out.visible
+                if !self.perf_first_visible_done && out.visible > 0 && out.blank_cells < out.visible
                 {
                     self.perf
                         .note_first_visible(self.perf_start.elapsed().as_secs_f32() * 1000.0);
@@ -3304,8 +3265,7 @@ impl OpenPicasaApp {
                 } else if title == "导入的索引" {
                     // 折叠状态重启后保留（IDX-21）：走 Library 的哨兵键，
                     // 不为此扩一份偏好字段。
-                    self.imported_collapsed =
-                        self.lib.toggle_section_collapsed("imported-index");
+                    self.imported_collapsed = self.lib.toggle_section_collapsed("imported-index");
                 }
             }
             // ---- M4：标签 / 相册分组 ----
@@ -3545,11 +3505,8 @@ impl OpenPicasaApp {
             // `TextureCache` 的每帧预算），拿不到就画占位格，不做假图。
             let photo_count = self.lib.photos.len();
             let slots = {
-                let (info_open, compare_active, index) = (
-                    v.info_open,
-                    v.compare_active(photo_count),
-                    v.index,
-                );
+                let (info_open, compare_active, index) =
+                    (v.info_open, v.compare_active(photo_count), v.index);
                 let lay = viewer::layout(ui.max_rect(), info_open, compare_active);
                 viewer::filmstrip_slots(lay.filmstrip, photo_count, index)
             };
@@ -3562,10 +3519,7 @@ impl OpenPicasaApp {
                     let Some(p) = self.lib.photos.get(slot.index) else {
                         continue;
                     };
-                    let tex = match self
-                        .cache
-                        .get(ui.ctx(), &db, &self.service, p, &mut budget)
-                    {
+                    let tex = match self.cache.get(ui.ctx(), &db, &self.service, p, &mut budget) {
                         TexState::Ready(t, s) => Some((t, s)),
                         _ => None,
                     };
@@ -3792,10 +3746,8 @@ impl OpenPicasaApp {
                     // ② 用户显式「移到废纸篓」会把原图移到系统废纸篓。
                     // 最终字句是 §11 #8，本轮只用这组准确含义，不另立品牌口号。
                     crate::topbar::TopbarAction::More(MoreAction::About) => {
-                        self.lib.toast = Some((
-                            crate::copy_text::about_text(env!("CARGO_PKG_VERSION")),
-                            7.0,
-                        ));
+                        self.lib.toast =
+                            Some((crate::copy_text::about_text(env!("CARGO_PKG_VERSION")), 7.0));
                     }
                     // M4-BUG-01：菜单动作在 draw_overlays 消费，不能落进 `_ => {}`。
                     // 之前漏接这一支，导致「✓ 方格显示文件名」点击无效果（032-beta4
@@ -3814,9 +3766,8 @@ impl OpenPicasaApp {
                 // M5-R3 缺陷修复：「点空白关闭」的命中区取菜单**实际**矩形。
                 // 以前写死 `220×260`：菜单真宽 598 px 时，点右半边菜单项会被它
                 // 当成「点空白」抢关；菜单变窄后固定高度又会盖住下方空白。
-                let menu_rect = crate::topbar::more_menu_rect(&ctx).unwrap_or_else(|| {
-                    Rect::from_min_size(self.more_menu_pos, vec2(220.0, 260.0))
-                });
+                let menu_rect = crate::topbar::more_menu_rect(&ctx)
+                    .unwrap_or_else(|| Rect::from_min_size(self.more_menu_pos, vec2(220.0, 260.0)));
                 if let Some(p) = pos
                     && !menu_rect.contains(p)
                 {
@@ -3908,53 +3859,59 @@ impl OpenPicasaApp {
             let mut open = true;
             let mut changed = false;
             let mut toast_msg: Option<String> = None;
-            egui::Window::new(if n > 1 { format!("批量标签 · {n} 张照片") } else { "批量标签".into() })
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .order(egui::Order::Foreground)
-                .show(ui, |ui| {
-                    for (label, _count) in &all_tags {
-                        let with = *tag_counts.get(label).unwrap_or(&0);
-                        let mark = if with == n && n > 0 {
-                            "☑"
-                        } else if with > 0 {
-                            "▣"
-                        } else {
-                            "☐"
-                        };
-                        if ui.button(format!("{mark} {label}")).clicked() {
-                            if with == n && n > 0 {
-                                if let Ok(k) = self.lib.batch_remove_tag(label) { changed |= k > 0; }
-                            } else if let Ok(k) = self.lib.batch_add_tag(label) {
+            egui::Window::new(if n > 1 {
+                format!("批量标签 · {n} 张照片")
+            } else {
+                "批量标签".into()
+            })
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .order(egui::Order::Foreground)
+            .show(ui, |ui| {
+                for (label, _count) in &all_tags {
+                    let with = *tag_counts.get(label).unwrap_or(&0);
+                    let mark = if with == n && n > 0 {
+                        "☑"
+                    } else if with > 0 {
+                        "▣"
+                    } else {
+                        "☐"
+                    };
+                    if ui.button(format!("{mark} {label}")).clicked() {
+                        if with == n && n > 0 {
+                            if let Ok(k) = self.lib.batch_remove_tag(label) {
+                                changed |= k > 0;
+                            }
+                        } else if let Ok(k) = self.lib.batch_add_tag(label) {
+                            changed |= k > 0;
+                            toast_msg = Some(format!("已为 {k} 张打上「{label}」"));
+                        }
+                    }
+                }
+                if all_tags.is_empty() {
+                    ui.label("（还没有标签，可在下方新建）");
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.tag_buf);
+                    if ui.button("新建并添加").clicked() {
+                        let label = self.tag_buf.trim().to_string();
+                        if !label.is_empty() {
+                            if let Ok(k) = self.lib.batch_add_tag(&label) {
                                 changed |= k > 0;
                                 toast_msg = Some(format!("已为 {k} 张打上「{label}」"));
                             }
+                            self.tag_buf.clear();
                         }
                     }
-                    if all_tags.is_empty() {
-                        ui.label("（还没有标签，可在下方新建）");
-                    }
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.tag_buf);
-                        if ui.button("新建并添加").clicked() {
-                            let label = self.tag_buf.trim().to_string();
-                            if !label.is_empty() {
-                                if let Ok(k) = self.lib.batch_add_tag(&label) {
-                                    changed |= k > 0;
-                                    toast_msg = Some(format!("已为 {k} 张打上「{label}」"));
-                                }
-                                self.tag_buf.clear();
-                            }
-                        }
-                    });
-                    ui.label(
-                        egui::RichText::new("取消勾选 = 从选中集同步移除该标签")
-                            .size(11.0)
-                            .color(egui::Color32::GRAY),
-                    );
                 });
+                ui.label(
+                    egui::RichText::new("取消勾选 = 从选中集同步移除该标签")
+                        .size(11.0)
+                        .color(egui::Color32::GRAY),
+                );
+            });
             if changed {
                 // M4.2 `M42-UI-06`：标签写操作后失效缓存，下一帧浮层重算一次，
                 // 保证重开时三态正确（AC-02）；左栏分组也一并失效重取。
@@ -4130,8 +4087,10 @@ impl OpenPicasaApp {
                                             ));
                                         }
                                         Ok(false) => {
-                                            self.lib.toast =
-                                                Some((crate::copy_text::CLOSE_ROOT_REFUSED_TOAST.into(), 3.0));
+                                            self.lib.toast = Some((
+                                                crate::copy_text::CLOSE_ROOT_REFUSED_TOAST.into(),
+                                                3.0,
+                                            ));
                                         }
                                         Err(e) => {
                                             tracing::warn!(error = %e, "关闭子目录失败");
@@ -4212,8 +4171,7 @@ impl OpenPicasaApp {
                             let now = chrono::Utc::now().timestamp();
                             match self.lib.create_album(&name, now) {
                                 Ok(_) => {
-                                    self.lib.toast =
-                                        Some((format!("已创建相册「{name}」"), 2.0));
+                                    self.lib.toast = Some((format!("已创建相册「{name}」"), 2.0));
                                     self.sidebar_groups_dirty = true;
                                     self.new_item = None;
                                 }
@@ -4224,21 +4182,17 @@ impl OpenPicasaApp {
                         }
                         NewItemKind::Tag => {
                             if self.lib.selection.is_empty() {
-                                self.lib.toast =
-                                    Some(("先选中照片再新建标签".into(), 3.0));
+                                self.lib.toast = Some(("先选中照片再新建标签".into(), 3.0));
                             } else {
                                 match self.lib.batch_add_tag(&name) {
                                     Ok(k) => {
-                                        self.lib.toast = Some((
-                                            format!("已为 {k} 张打上「{name}」"),
-                                            2.0,
-                                        ));
+                                        self.lib.toast =
+                                            Some((format!("已为 {k} 张打上「{name}」"), 2.0));
                                         self.sidebar_groups_dirty = true;
                                         self.new_item = None;
                                     }
                                     Err(e) => {
-                                        self.lib.toast =
-                                            Some((format!("新建失败：{e}"), 3.0));
+                                        self.lib.toast = Some((format!("新建失败：{e}"), 3.0));
                                     }
                                 }
                             }
@@ -4296,16 +4250,16 @@ impl OpenPicasaApp {
                                 close = true;
                             }
                             ui.label(
-                                egui::RichText::new("只删索引与缩略图；收藏/标签/说明/相册保留，原图不动")
-                                    .size(10.0)
-                                    .color(theme.text_disabled),
+                                egui::RichText::new(
+                                    "只删索引与缩略图；收藏/标签/说明/相册保留，原图不动",
+                                )
+                                .size(10.0)
+                                .color(theme.text_disabled),
                             );
                         });
                 });
-            let opened_this_frame = context_menu_open_frame_exempt(
-                self.import_ctx_frame,
-                ctx.cumulative_frame_nr(),
-            );
+            let opened_this_frame =
+                context_menu_open_frame_exempt(self.import_ctx_frame, ctx.cumulative_frame_nr());
             if !opened_this_frame {
                 let menu_rect = area.response.rect;
                 let clicked_outside = ctx.input(|i| i.pointer.any_click())
@@ -4345,10 +4299,7 @@ impl OpenPicasaApp {
                         .inner_margin(egui::Margin::same(6))
                         .show(ui, |ui| {
                             ui.set_min_width(210.0);
-                            if ui
-                                .add(egui::Button::new("改名").frame(false))
-                                .clicked()
-                            {
+                            if ui.add(egui::Button::new("改名").frame(false)).clicked() {
                                 do_rename = true;
                                 close = true;
                             }
@@ -4356,10 +4307,8 @@ impl OpenPicasaApp {
                             if ui
                                 .add_enabled(
                                     n_sel > 0,
-                                    egui::Button::new(format!(
-                                        "加入当前选中的 {n_sel} 张照片"
-                                    ))
-                                    .frame(false),
+                                    egui::Button::new(format!("加入当前选中的 {n_sel} 张照片"))
+                                        .frame(false),
                                 )
                                 .clicked()
                             {
@@ -4367,19 +4316,14 @@ impl OpenPicasaApp {
                                 close = true;
                             }
                             ui.separator();
-                            if ui
-                                .add(egui::Button::new("删除…").frame(false))
-                                .clicked()
-                            {
+                            if ui.add(egui::Button::new("删除…").frame(false)).clicked() {
                                 do_delete = true;
                                 close = true;
                             }
                         });
                 });
-            let opened_this_frame = context_menu_open_frame_exempt(
-                self.album_ctx_frame,
-                ctx.cumulative_frame_nr(),
-            );
+            let opened_this_frame =
+                context_menu_open_frame_exempt(self.album_ctx_frame, ctx.cumulative_frame_nr());
             if !opened_this_frame {
                 let menu_rect = area.response.rect;
                 let clicked_outside = ctx.input(|i| i.pointer.any_click())
@@ -4403,8 +4347,7 @@ impl OpenPicasaApp {
                     let now = chrono::Utc::now().timestamp();
                     match self.lib.add_to_album(id, &ids, now) {
                         Ok(k) => {
-                            self.lib.toast =
-                                Some((format!("已加入 {k} 张到「{name}」"), 2.0));
+                            self.lib.toast = Some((format!("已加入 {k} 张到「{name}」"), 2.0));
                             self.sidebar_groups_dirty = true;
                         }
                         Err(e) => {
@@ -4441,13 +4384,10 @@ impl OpenPicasaApp {
             if let Some(new_name) = pending {
                 if !new_item_name_valid(&new_name) {
                     self.lib.toast = Some(("名称不能为空".into(), 2.0));
-                } else if let Some(id) =
-                    album_id_by_name(&self.sidebar_album_ids, &old_name)
-                {
+                } else if let Some(id) = album_id_by_name(&self.sidebar_album_ids, &old_name) {
                     match self.lib.rename_album(id, &new_name) {
                         Ok(()) => {
-                            self.lib.toast =
-                                Some((format!("已改名为「{new_name}」"), 2.0));
+                            self.lib.toast = Some((format!("已改名为「{new_name}」"), 2.0));
                             self.sidebar_groups_dirty = true;
                             self.rename_album = None;
                         }
@@ -4519,11 +4459,8 @@ impl OpenPicasaApp {
         if let Some(confirmed) = self.confirm_trash.clone() {
             let current = self.current_trash_scope();
             // 先按「用户还没动作」过一遍决策表：范围变了就在画之前作废重画。
-            let mut decision = crate::trash_ui::decide(
-                crate::trash_ui::UserAction::None,
-                &confirmed,
-                &current,
-            );
+            let mut decision =
+                crate::trash_ui::decide(crate::trash_ui::UserAction::None, &confirmed, &current);
             if let crate::trash_ui::Decision::Close = decision {
                 self.confirm_trash = None;
             }
@@ -4549,16 +4486,12 @@ impl OpenPicasaApp {
                         ui.horizontal(|ui| {
                             // 默认焦点在「取消」：回车 / 空格落在取消上，
                             // 移动原文件必须再主动点一次（`M5-FS-01`）。
-                            let cancel_btn =
-                                ui.button(picasa_core::trash_plan::TRASH_CANCEL);
+                            let cancel_btn = ui.button(picasa_core::trash_plan::TRASH_CANCEL);
                             cancel_btn.request_focus();
                             if cancel_btn.clicked() {
                                 action = crate::trash_ui::UserAction::Cancel;
                             }
-                            if ui
-                                .button(picasa_core::trash_plan::TRASH_ACTION)
-                                .clicked()
-                            {
+                            if ui.button(picasa_core::trash_plan::TRASH_ACTION).clicked() {
                                 action = crate::trash_ui::UserAction::Confirm;
                             }
                         });
@@ -4583,29 +4516,21 @@ impl OpenPicasaApp {
                         self.restore_scroll = None;
                         if !errors.is_empty() {
                             self.lib.toast = Some((
-                                format!(
-                                    "{ok} 张成功，{} 张失败：{}",
-                                    errors.len(),
-                                    errors[0]
-                                ),
+                                format!("{ok} 张成功，{} 张失败：{}", errors.len(), errors[0]),
                                 6.0,
                             ));
                         }
                     }
                     crate::trash_ui::Decision::Rearm(next) => {
                         self.confirm_trash = Some(next);
-                        self.lib.toast = Some((
-                            picasa_core::trash_plan::SCOPE_CHANGED.into(),
-                            4.0,
-                        ));
+                        self.lib.toast = Some((picasa_core::trash_plan::SCOPE_CHANGED.into(), 4.0));
                     }
                     crate::trash_ui::Decision::Close => self.confirm_trash = None,
                     crate::trash_ui::Decision::Keep => {}
                 }
             } else if let crate::trash_ui::Decision::Rearm(next) = decision {
                 self.confirm_trash = Some(next);
-                self.lib.toast =
-                    Some((picasa_core::trash_plan::SCOPE_CHANGED.into(), 4.0));
+                self.lib.toast = Some((picasa_core::trash_plan::SCOPE_CHANGED.into(), 4.0));
             }
         }
 
@@ -4937,13 +4862,9 @@ impl OpenPicasaApp {
             });
         if go {
             self.confirm_import_source = None;
-            let outcome = self
-                .lib
-                .db()
-                .map_err(|e| e.to_string())
-                .and_then(|db| {
-                    picasa_db::remove_import_source(&db, source_id).map_err(|e| e.to_string())
-                });
+            let outcome = self.lib.db().map_err(|e| e.to_string()).and_then(|db| {
+                picasa_db::remove_import_source(&db, source_id).map_err(|e| e.to_string())
+            });
             match outcome {
                 Ok((photos, thumbs)) => {
                     self.lib.toast = Some((
@@ -5184,7 +5105,10 @@ impl OpenPicasaApp {
             ));
         } else if let picasa_core::RootIntake::ChildOf(parent) = &intake {
             tracing::info!(dir = %wanted, parent = %parent, "新根在已关注范围内");
-            self.lib.toast = Some(("已添加；它的照片本来也在关注范围内，不会重复计数".into(), 5.0));
+            self.lib.toast = Some((
+                "已添加；它的照片本来也在关注范围内，不会重复计数".into(),
+                5.0,
+            ));
         }
         // 新关注文件夹 = **新批次**，且只索引它（不重扫已有文件夹）：
         // 重扫全部会让已完成的任务重新排队，进度条凭空回到 0（`04` §1.2.1）。
@@ -5255,7 +5179,7 @@ fn photo_date_span(photos: &[PhotoRow]) -> Option<String> {
     let fmt = |secs: i64| {
         chrono::DateTime::from_timestamp(secs, 0).map(|dt| {
             dt.with_timezone(&chrono::Local)
-                .format("%Y年%-m月")
+                .format("%Y-%m-%d")
                 .to_string()
         })
     };
@@ -5263,7 +5187,7 @@ fn photo_date_span(photos: &[PhotoRow]) -> Option<String> {
     let b = fmt(hi);
     match (a, b) {
         (Some(a), Some(b)) if a == b => Some(a),
-        (Some(a), Some(b)) => Some(format!("{a} – {b}")),
+        (Some(a), Some(b)) => Some(format!("{a}—{b}")),
         _ => None,
     }
 }
@@ -5342,7 +5266,8 @@ impl eframe::App for OpenPicasaApp {
                 // IDX-06：仅导出成功后持久化「最近成功备份」，重启后仍显示。
                 if let Some(json) = eff.last_backup_json
                     && let Ok(db) = self.lib.db()
-                    && let Err(e) = db.set_setting_raw(crate::index_mgr::LAST_BACKUP_KEY, Some(&json))
+                    && let Err(e) =
+                        db.set_setting_raw(crate::index_mgr::LAST_BACKUP_KEY, Some(&json))
                 {
                     tracing::warn!(error = %e, "记录最近成功备份失败");
                 }
@@ -5357,9 +5282,7 @@ impl eframe::App for OpenPicasaApp {
                     self.index_mgr.io.last_import = Some(summary);
                 }
             }
-            if terminal
-                && let Some(kind) = io_kind
-            {
+            if terminal && let Some(kind) = io_kind {
                 match kind {
                     crate::import_task::IoJobKind::Export => {
                         self.clear_io_marker("m43_export_pending");
@@ -5513,7 +5436,8 @@ mod m5r5_tests {
         );
         assert!(
             root.iter().any(|i| i.contains("从图库移除")
-                && i.contains("删索引") && i.contains("不删文件")),
+                && i.contains("删索引")
+                && i.contains("不删文件")),
             "「从图库移除」必须写明只删索引：{root:?}"
         );
         assert!(
@@ -5606,7 +5530,11 @@ mod m4_tests {
         by_photo.insert(1, vec!["旅行".into(), "人物".into()]);
         by_photo.insert(2, vec!["旅行".into()]);
         // 3 号没有任何标签
-        let all_labels = vec![("旅行".to_string(), 2), ("人物".to_string(), 1), ("风景".to_string(), 0)];
+        let all_labels = vec![
+            ("旅行".to_string(), 2),
+            ("人物".to_string(), 1),
+            ("风景".to_string(), 0),
+        ];
         let counts = picasa_core::Library::tri_state_counts(&ids, &by_photo, &all_labels);
         // 旅行：2/3 → ▣（部分）；人物：1/3 → ▣；风景：0 → ☐
         assert_eq!(counts.get("旅行"), Some(&2));

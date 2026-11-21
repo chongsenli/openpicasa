@@ -28,6 +28,7 @@ pub fn show(
     theme: &crate::theme::Theme,
     _cell_px: f32,
     breadcrumb: &[(String, Option<i64>)],
+    meta: &str,
     sort: picasa_db::SortSpec,
     _has_selection: bool,
     search: &mut String,
@@ -47,6 +48,7 @@ pub fn show(
         ui,
         theme,
         breadcrumb,
+        meta,
         view_mode,
         sort,
         filter_active,
@@ -254,8 +256,16 @@ pub fn filter_menu(
                     ui.label("相机 / 镜头");
                     ui.horizontal(|ui| {
                         // M5-SF-08：输入只改草稿，**点「应用」才生效**。
-                        ui.add(egui::TextEdit::singleline(draft_camera).hint_text("相机型号").desired_width(90.0));
-                        ui.add(egui::TextEdit::singleline(draft_lens).hint_text("镜头").desired_width(80.0));
+                        ui.add(
+                            egui::TextEdit::singleline(draft_camera)
+                                .hint_text("相机型号")
+                                .desired_width(90.0),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(draft_lens)
+                                .hint_text("镜头")
+                                .desired_width(80.0),
+                        );
                         if ui.button("应用").clicked() {
                             let cam = draft_camera.trim();
                             draft.camera = (!cam.is_empty()).then(|| cam.to_string());
@@ -310,7 +320,10 @@ mod m5r5_filter_tests {
     fn m5_size_bounds_follow_the_spec_and_empty_is_not_a_filter() {
         assert_eq!(parse_size_bounds("", ""), None, "两格都空不该变成筛选");
         assert_eq!(parse_size_bounds("  ", "  "), None);
-        assert_eq!(parse_size_bounds("100", "2048"), Some((100 * 1024, 2048 * 1024)));
+        assert_eq!(
+            parse_size_bounds("100", "2048"),
+            Some((100 * 1024, 2048 * 1024))
+        );
         // 解析失败：下界 0、上界极大（不是整条丢掉）
         let (lo, hi) = parse_size_bounds("abc", "xyz").expect("有输入就算一维");
         assert_eq!(lo, 0);
@@ -388,7 +401,18 @@ mod m5r5_filter_tests {
             );
         }
         // 该有的维度都在
-        for need in ["只看收藏", "类型", "尺寸", "标签", "相机", "镜头", "缺拍摄时间", "缺元数据", "文件大小", "清除全部筛选"] {
+        for need in [
+            "只看收藏",
+            "类型",
+            "尺寸",
+            "标签",
+            "相机",
+            "镜头",
+            "缺拍摄时间",
+            "缺元数据",
+            "文件大小",
+            "清除全部筛选",
+        ] {
             assert!(
                 texts.iter().any(|t| t.contains(need)),
                 "筛选面板缺「{need}」：{joined}"

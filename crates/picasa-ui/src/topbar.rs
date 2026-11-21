@@ -1,24 +1,21 @@
-//! M3.1 §7 定稿顶栏：**双行**——上行双语境路径面包屑，下行图标工具栏。
-//!
-//! 布局（M32-UI-01/02 三段式，仅调按钮位置；量自用户实机截图）：
+//! M5 v1.4 顶栏：**单行**——左段操作图标、中段路径 + 张数/拍摄时间、右簇排布/搜索/排序/筛选/…
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────────────────────────────────┐
-//! │ ●●●  图库 / 旅行 / 京都                                        （上行）  │
-//! │ [侧栏][导入][幻灯片][编辑]      [方格|纵瀑|横瀑]     [🔍][⇅][≡][…]（下行）│
-//! └──────────────────────────────────────────────────────────────────────────┘
+//! ┌──────────────────────────────────────────────────────────────────────────────┐
+//! │ ●●● [侧栏][导入][幻灯片][编辑][♥][ⓘ][⌗][▣] │ 图库 / 旅行 / 京都 · 22 张 · 拍摄时间：… │ [方格|纵瀑|横瀑][搜索框][⇅][≡][…] │
+//! └──────────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! 关键约定（`docs/10` M32-UI-01/02 v1.1）：
+//! 关键约定（`docs/10` M32-UI-01/02 v1.1，M5 v1.4 修订）：
 //!
-//! * 上行：红绿灯 + **双语境面包屑**——文件夹语境画「图库 / 祖先… / 当前」
-//!   （祖先段可点击跳转），根语境弱化为单段「图库」；
-//! * 下行分**三段**：左段 = 侧栏开关 + 导入/幻灯片/编辑（对象操作）；
-//!   中段 = 排布胶囊（图库浏览，居中）；右段 = 搜索/排序/筛选/…（右对齐）；
+//! * 中段：**双语境面包屑**——文件夹语境画「图库 / 祖先… / 当前」
+//!   （祖先段可点击跳转），根语境弱化为单段「图库」；其后接
+//!   「N 张 · 拍摄时间：起—止」（H1）。
+//! * 左段 = 侧栏开关 + 导入/幻灯片/编辑（对象操作），四枚对象钮紧随其后；
+//! * 右簇（靠右、从左到右）= 排布胶囊 → **常驻搜索框** → 排序 → 筛选 → …（H2/H3）；
 //! * 排布是**无文字三图标连体胶囊**，选中片为**淡橙圆**（定稿截图采样）；
 //! * **M5-TB-10**：顶栏缩略图 −/+ 连同占位一起退役，缩略图尺寸改到底栏
-//!   最右侧的线性滑块（22–512 px，step=1）；搜索在右段首位
-//!   （点开后输入框在上行右侧原地展开，不挤压下行控件）。
+//!   最右侧的线性滑块（22–512 px，step=1）。
 //!
 //! 排序 / 筛选 / 「…」保留为右侧图标组：它们是既有功能，不能在版式重排里丢。
 
@@ -131,6 +128,34 @@ fn object_button_rects(edit_right: f32, center_y: f32, d: f32) -> [Rect; 4] {
     })
 }
 
+/// 顶栏右簇（H3）：**排布胶囊 → 搜索框 → 排序 → 筛选 → 更多**。
+///
+/// 胶囊紧贴搜索框左侧、整簇靠右（v1.4 定稿）；搜索框常驻可见（H2），
+/// 宽度随窗口收窄，但不会低于 170 px。
+fn topbar_right_rects(rect: Rect, d: f32) -> (Rect, Rect, Rect, Rect, Rect) {
+    let cy = rect.center().y;
+    let margin = 14.0;
+    let circle_at =
+        |right_x: f32| -> Rect { Rect::from_center_size(pos2(right_x - d / 2.0, cy), vec2(d, d)) };
+    let more = circle_at(rect.right() - margin);
+    let filter = circle_at(more.left() - 4.0);
+    let sort = circle_at(filter.left() - 4.0);
+    let search_w = (rect.width() * 0.20).clamp(170.0, 260.0);
+    let search = Rect::from_min_size(
+        pos2(sort.left() - 12.0 - search_w, cy - 16.0),
+        vec2(search_w, 32.0),
+    );
+    let layout_w = 3.0 * 34.0;
+    let layout = Rect::from_min_size(
+        pos2(
+            search.left() - 10.0 - layout_w,
+            cy - Metrics::ZOOM_PILL_H / 2.0,
+        ),
+        vec2(layout_w, Metrics::ZOOM_PILL_H),
+    );
+    (layout, search, sort, filter, more)
+}
+
 /// 顶栏入参。
 #[allow(clippy::too_many_arguments)]
 pub fn show(
@@ -138,6 +163,8 @@ pub fn show(
     theme: &Theme,
     // 双语境面包屑：`(名称, folder_id)`；根段 id 为 None，最后一段是当前语境
     breadcrumb: &[(String, Option<i64>)],
+    // 张数与拍摄时间起止（H1，如 `22 张 · 拍摄时间：2023-11-02—2024-05-21`）
+    meta: &str,
     // 排布当前值
     view_mode: ViewMode,
     // 排序（按钮上要显示当前排序的语义）
@@ -146,7 +173,7 @@ pub fn show(
     filter_active: bool,
     // 搜索
     search: &mut String,
-    search_open: bool,
+    _search_open: bool,
     search_in_current: bool,
     // 左栏当前宽度（M32-UI-01/02 v1.3：左段右缘与文件夹树右缘对齐）
     sidebar_w: f32,
@@ -177,76 +204,41 @@ pub fn show(
         egui::Stroke::new(1.0, theme.toolbar_border),
     );
 
-    // 两行分区：上行 = 红绿灯 + 面包屑；下行 = 图标工具栏（右对齐）。
-    let line1 = Rect::from_min_max(rect.left_top(), pos2(rect.right(), rect.top() + Metrics::TOPBAR_LINE1_H));
-    let line2 = Rect::from_min_max(
-        pos2(rect.left(), rect.top() + Metrics::TOPBAR_LINE1_H),
-        pos2(rect.right(), rect.bottom()),
-    );
-
-    // macOS 下红绿灯占左侧约 80pt。非 macOS 或未启用 fullsize content view 时
-    // 这段空间是空的，但也无碍——顶栏是自绘的。
+    // 单行顶栏：左段图标 · 中段（路径 + 张数/拍摄时间）· 右簇（排布/搜索/排序/筛选/…）。
+    // macOS 红绿灯嵌在这一行的左端，所以左段起点让出 `traffic_w`。
     #[cfg(target_os = "macos")]
     let traffic_w = 78.0;
     #[cfg(not(target_os = "macos"))]
-    let traffic_w = 8.0;
+    let traffic_w = 0.0;
 
-    // ---- 上行：双语境路径面包屑 ----
-    draw_breadcrumb(ui, &painter, line1, theme, breadcrumb, traffic_w, &mut out);
-
-    // ---- 下行：三段式图标工具栏（M32-UI-01/02，只调整按钮位置）----
-    // 左段：侧栏开关 + 导入/幻灯片/编辑；中段：排布胶囊 + −/+；右段：搜索/排序/筛选/…。
     let d = Metrics::TOPBAR_ICON_D;
     let margin = 14.0;
-    let bar2_center = line2.center().y;
-    let circle_at = |right_x: f32| -> Rect {
-        Rect::from_center_size(pos2(right_x - d / 2.0, bar2_center), vec2(d, d))
-    };
+    let cy = rect.center().y;
 
-    // ---- 右段（从右往左）：… 筛选 排序 搜索 ----
-    let more_r = circle_at(rect.right() - margin);
-    let filter_r = circle_at(more_r.left() - 4.0);
-    let sort_r = circle_at(filter_r.left() - 4.0);
+    // ---- 右簇（从右往左）：… 筛选 排序 搜索 排布 ----
+    let (layout_rect, search_rect, sort_r, filter_r, more_r) = topbar_right_rects(rect, d);
     out.more_button = Some(more_r);
     out.filter_button = Some(filter_r);
     out.sort_button = Some(sort_r);
-    let search_r = circle_at(sort_r.left() - 14.0);
 
     // ---- 左段（从左往右）：侧栏开关 导入 …… 幻灯片 编辑 ----
     // M32-UI-01/02 v1.4：
-    // * 侧栏开关、导入贴窗口最左（红绿灯在上行，下行不必让位）；
+    // * 侧栏开关、导入贴窗口最左（红绿灯在上方的标题带，单行顶栏不必让位；
+    //   `traffic_w` 只在把顶栏压到标题带时兜底）；
     // * 幻灯片、编辑两个按钮的**左沿**（幻灯片的 left）= 侧栏右缘，
     //   即与文件夹树的最右侧**始终保持对齐**——按钮组骑在侧栏边界右侧，
     //   侧栏拖宽时同步移动；侧栏隐藏时退回默认宽度。
-    let left_x = rect.left() + margin;
-    let side_r = Rect::from_center_size(pos2(left_x + d / 2.0, bar2_center), vec2(d, d));
-    let import_r = Rect::from_center_size(pos2(side_r.right() + 6.0 + d / 2.0, bar2_center), vec2(d, d));
+    let left_x = rect.left() + traffic_w + margin;
+    let side_r = Rect::from_center_size(pos2(left_x + d / 2.0, cy), vec2(d, d));
+    let import_r = Rect::from_center_size(pos2(side_r.right() + 6.0 + d / 2.0, cy), vec2(d, d));
     // 幻灯片左沿 = 侧栏右缘（Clamp 防窄侧栏时与导入重叠）
     let seg_left = (rect.left() + sidebar_w).max(import_r.right() + 6.0);
-    let slide_r = Rect::from_center_size(pos2(seg_left + d / 2.0, bar2_center), vec2(d, d));
-    let edit_r = Rect::from_center_size(pos2(slide_r.right() + 6.0 + d / 2.0, bar2_center), vec2(d, d));
+    let slide_r = Rect::from_center_size(pos2(seg_left + d / 2.0, cy), vec2(d, d));
+    let edit_r = Rect::from_center_size(pos2(slide_r.right() + 6.0 + d / 2.0, cy), vec2(d, d));
     // M4.1 `M41-UI-01`（用户 #4 定稿）：四枚对象操作钮放在「编辑」之后。
-    // 纯函数算 rect，便于单测「不与中段重叠」（窗口最窄 900 时也要守住）。
-    let obj_rects = object_button_rects(edit_r.right(), bar2_center, d);
+    // 纯函数算 rect，便于单测「不与右簇重叠」（窗口最窄 900 时也要守住）。
+    let obj_rects = object_button_rects(edit_r.right(), cy, d);
     let [fav_r, cap_r, tag_r, tray_r] = obj_rects;
-    // ---- 中段（排布胶囊）：默认居中；窄窗口让左段优先 ----
-    // M5-TB-10：顶栏缩略图 −/+ 及其占位已去掉，中段只剩三枚排布图标。
-    // 左段在「编辑」之后有四枚对象操作钮；窗口最窄 900 时绝对居中会与它们
-    // 重叠——把中段右移到四按钮组之后（1280 默认值仍居中）。
-    let layout_w = 3.0 * 34.0;
-    let mid_w = layout_w;
-    let centered_mid_left = rect.left() + (rect.width() - mid_w) / 2.0;
-    let after_objects = obj_rects[3].right() + 18.0;
-    let mid_left = centered_mid_left
-        .max(after_objects)
-        // 右移后不能顶出右段（搜索/排序/筛选/…）
-        .min(search_r.left() - mid_w - 12.0)
-        .max(centered_mid_left);
-    let layout_rect = Rect::from_min_size(
-        pos2(mid_left, bar2_center - Metrics::ZOOM_PILL_H / 2.0),
-        vec2(layout_w, Metrics::ZOOM_PILL_H),
-    );
-
 
     // ---- ① 侧栏开关 ----
     if icon_btn(
@@ -274,7 +266,7 @@ pub fn show(
             import_r,
             Icon::Import,
             // M5-IM-01 / M5-TB-02：顶栏导入是添加关注文件夹的主入口。
-            // 打开的是系统选目录面板（标题「选择照片文件夹（只读，不会修改你的文件）」）。
+            // 打开的是系统选目录面板。
             "导入：添加照片文件夹…",
             Some(TopbarAction::AddFolder),
         ),
@@ -312,10 +304,22 @@ pub fn show(
         "照片托盘 · ⌘H"
     };
     let obj_btns: &[(Rect, Icon, &str, TopbarAction, bool)] = &[
-        (fav_r, Icon::Heart, fav_tip, TopbarAction::Favorite, obj.all_favorite && obj.has_selection),
+        (
+            fav_r,
+            Icon::Heart,
+            fav_tip,
+            TopbarAction::Favorite,
+            obj.all_favorite && obj.has_selection,
+        ),
         (cap_r, Icon::Caption, "说明", TopbarAction::Caption, false),
         (tag_r, Icon::Tag, "标签", TopbarAction::Tag, false),
-        (tray_r, Icon::Tray, tray_tip, TopbarAction::Tray, obj.all_in_tray && obj.has_selection),
+        (
+            tray_r,
+            Icon::Tray,
+            tray_tip,
+            TopbarAction::Tray,
+            obj.all_in_tray && obj.has_selection,
+        ),
     ];
     for (r, icon, tip, action, selected) in obj_btns {
         if icon_btn_ex(ui, &painter, *r, *icon, theme, true, *selected, tip).clicked() {
@@ -325,36 +329,41 @@ pub fn show(
     // 组分隔虚线（提示「对象操作组」结束，不影响交互）
     painter.line_segment(
         [
-            pos2(tray_r.right() + 8.0, bar2_center - 10.0),
-            pos2(tray_r.right() + 8.0, bar2_center + 10.0),
+            pos2(tray_r.right() + 8.0, cy - 10.0),
+            pos2(tray_r.right() + 8.0, cy + 10.0),
         ],
         egui::Stroke::new(1.0, Color32::from_black_alpha(24)),
     );
 
-    // ---- ③ 排布：无文字三图标连体胶囊 ----
-    draw_layout_pill(ui, &painter, layout_rect, theme, view_mode, &mut out);
-
-    // ---- ⑤ 搜索：紧接在 + 之后（展开时输入框画到上行右侧）----
-    if search_open {
-        let w = 240.0_f32.min((rect.right() - margin - 240.0).max(160.0));
-        let search_rect = Rect::from_min_size(
-            pos2(rect.right() - margin - w, line1.center().y - 15.0),
-            vec2(w, 30.0),
-        );
-        draw_search(
+    // ---- ③ 中段：双语境路径 + 张数 / 拍摄时间起止（H1）----
+    // 位置固定在「对象操作组」与右簇的排布胶囊之间，窄窗口下截断而不是压按钮。
+    let crumb_left = tray_r.right() + 18.0;
+    let crumb_right = layout_rect.left() - 16.0;
+    if crumb_right > crumb_left + 24.0 {
+        draw_breadcrumb(
             ui,
             &painter,
-            search_rect,
+            Rect::from_min_max(pos2(crumb_left, cy - 12.0), pos2(crumb_right, cy + 12.0)),
             theme,
-            search,
-            search_in_current,
+            breadcrumb,
+            meta,
             &mut out,
         );
-    } else if icon_btn(ui, &painter, search_r, Icon::Search, theme, true, "搜索 · ⌘F")
-        .clicked()
-    {
-        out.actions.push(TopbarAction::ToggleSearch);
     }
+
+    // ---- ④ 排布：无文字三图标连体胶囊（右簇最左，紧贴搜索）----
+    draw_layout_pill(ui, &painter, layout_rect, theme, view_mode, &mut out);
+
+    // ---- ⑤ 搜索：常驻可见的圆角输入框（H2），不依赖 search_open ----
+    draw_search(
+        ui,
+        &painter,
+        search_rect,
+        theme,
+        search,
+        search_in_current,
+        &mut out,
+    );
 
     // ---- ⑥ 排序 / 筛选 / 更多 ----
     let sort_resp = icon_btn(
@@ -417,32 +426,39 @@ pub fn show(
     out
 }
 
-/// 上行双语境路径面包屑（§7.3）。
+/// 双语境路径 + 张数 / 拍摄时间起止（H1）。
 ///
 /// * 文件夹语境：`图库 / 祖先… / 当前`——根段与分隔符用次级灰，路径段用主色，
 ///   祖先段可点击（悬停变选中色 + 手型光标）；
-/// * 根语境：弱化成单段 `图库`（次级灰，不可点）。
+/// * 路径后接 `· 22 张 · 拍摄时间：…`（次级灰，不参与点击）；
+/// * 空间不足时先截断元信息，再截断路径段，绝不压到两侧按钮。
 fn draw_breadcrumb(
     ui: &mut Ui,
     painter: &egui::Painter,
-    line: Rect,
+    area: Rect,
     theme: &Theme,
     breadcrumb: &[(String, Option<i64>)],
-    traffic_w: f32,
+    meta: &str,
     out: &mut TopbarOutput,
 ) {
     let font = FontId::new(12.5, egui::FontFamily::Proportional);
-    let mut x = line.left() + traffic_w + 16.0;
-    let cy = line.center().y;
+    let meta_font = FontId::new(11.5, egui::FontFamily::Proportional);
+    let mut x = area.left();
+    let cy = area.center().y;
     let n = breadcrumb.len();
     for (i, (name, folder_id)) in breadcrumb.iter().enumerate() {
         let current = i + 1 == n;
+        let remaining = area.right() - x;
+        if remaining < 12.0 {
+            return;
+        }
         let color = if current || folder_id.is_some() {
             theme.text_primary
         } else {
             theme.text_secondary
         };
-        let galley = painter.layout_no_wrap(name.clone(), font.clone(), color);
+        let text = fit_text(painter, name, &font, remaining);
+        let galley = painter.layout_no_wrap(text, font.clone(), color);
         let seg_rect = Rect::from_min_size(pos2(x, cy - 10.0), galley.size());
         painter.galley(pos2(x, cy - 10.0), galley, color);
 
@@ -482,6 +498,63 @@ fn draw_breadcrumb(
                 + 6.0;
         }
     }
+
+    // 张数 / 拍摄时间起止（缺 EXIF 时 App 只给张数，不编造日期）。
+    if meta.is_empty() || area.right() - x < 24.0 {
+        return;
+    }
+    let sep = "  ·  ";
+    let sep_w = painter
+        .layout_no_wrap(sep.to_string(), meta_font.clone(), theme.text_secondary)
+        .size()
+        .x;
+    if area.right() - x < sep_w + 24.0 {
+        return;
+    }
+    painter.text(
+        pos2(x, cy),
+        Align2::LEFT_CENTER,
+        sep,
+        meta_font.clone(),
+        theme.text_disabled,
+    );
+    let text = fit_text(painter, meta, &meta_font, area.right() - x - sep_w);
+    painter.text(
+        pos2(x + sep_w, cy),
+        Align2::LEFT_CENTER,
+        text,
+        meta_font,
+        theme.text_secondary,
+    );
+}
+
+/// 单行文本按可用宽度截断（超出补 `…`），保证不画到相邻控件上。
+fn fit_text(painter: &egui::Painter, text: &str, font: &FontId, max_w: f32) -> String {
+    let color = Color32::PLACEHOLDER;
+    let full = painter.layout_no_wrap(text.to_string(), font.clone(), color);
+    if full.size().x <= max_w {
+        return text.to_string();
+    }
+    let ell = "…";
+    let ell_w = painter
+        .layout_no_wrap(ell.to_string(), font.clone(), color)
+        .size()
+        .x;
+    let mut out = String::new();
+    let mut w = 0.0_f32;
+    for ch in text.chars() {
+        let cw = painter
+            .layout_no_wrap(ch.to_string(), font.clone(), color)
+            .size()
+            .x;
+        if w + cw + ell_w > max_w {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push_str(ell);
+    out
 }
 
 /// 圆形图标按钮（M5 §5.3）：**线性图标直接落在顶栏上**，不是一排白圆钮。
@@ -578,8 +651,8 @@ fn draw_layout_pill(
     }
     let modes = [
         (ViewMode::Grid, Icon::LayoutGrid, "方格"),
-        (ViewMode::MasonryV, Icon::LayoutMasonryV, "纵向瀑布流"),
-        (ViewMode::MasonryH, Icon::LayoutMasonryH, "横向瀑布流"),
+        (ViewMode::MasonryV, Icon::LayoutMasonryV, "纵向瀑布"),
+        (ViewMode::MasonryH, Icon::LayoutMasonryH, "横向瀑布"),
     ];
     for (i, (mode, icon, label)) in modes.iter().enumerate() {
         let piece = Rect::from_min_size(
@@ -670,7 +743,10 @@ fn draw_search(
 
     let edit_rect = Rect::from_min_max(
         pos2(mag.right() + 4.0, rect.top() + 3.0),
-        pos2(rect.right() - 22.0, rect.bottom() - 3.0),
+        pos2(
+            rect.right() - (if search.is_empty() { 8.0 } else { 24.0 }),
+            rect.bottom() - 3.0,
+        ),
     );
     let id = egui::Id::unique("topbar-search");
     let mut buf = search.clone();
@@ -688,26 +764,29 @@ fn draw_search(
         out.actions.push(TopbarAction::SearchChanged(buf));
     }
 
-    // 右端收起按钮（不把搜索词带进「清空」歧义：收起只是隐藏输入框）
-    let close =
-        Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y), vec2(14.0, 14.0));
-    let close_resp = ui.interact(close, ui.scope_id().with("search-close"), Sense::click());
-    if close_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    icons::draw(
-        painter,
-        Icon::Close,
-        close.shrink(2.0),
-        if close_resp.hovered() {
-            theme.toolbar_icon
-        } else {
-            theme.text_secondary
-        },
-        1.2,
-    );
-    if close_resp.clicked() {
-        out.actions.push(TopbarAction::ToggleSearch);
+    // 右端清空按钮（H2：搜索框常驻，这里不再「收起」，只清空搜索词）
+    if !search.is_empty() {
+        let clear =
+            Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y), vec2(14.0, 14.0));
+        let clear_resp = ui.interact(clear, ui.scope_id().with("search-clear"), Sense::click());
+        if clear_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        icons::draw(
+            painter,
+            Icon::Close,
+            clear.shrink(2.0),
+            if clear_resp.hovered() {
+                theme.toolbar_icon
+            } else {
+                theme.text_secondary
+            },
+            1.2,
+        );
+        if clear_resp.clicked() {
+            search.clear();
+            out.actions.push(TopbarAction::SearchChanged(String::new()));
+        }
     }
 }
 
@@ -964,10 +1043,7 @@ mod m41_tests {
             assert!(r.left() >= 300.0, "第 {i} 枚跑到编辑左侧了");
             assert_eq!(r.width(), d, "第 {i} 枚尺寸被压缩了");
             if i > 0 {
-                assert!(
-                    r.left() >= rects[i - 1].right(),
-                    "第 {i} 枚与前一枚重叠"
-                );
+                assert!(r.left() >= rects[i - 1].right(), "第 {i} 枚与前一枚重叠");
             }
         }
     }
@@ -1080,6 +1156,7 @@ mod m41_tests {
                     ui,
                     &theme,
                     &[("图库".to_string(), None)],
+                    "",
                     ViewMode::Grid,
                     picasa_db::SortSpec::default(),
                     false,
@@ -1099,7 +1176,8 @@ mod m41_tests {
         }
         // 没点按钮 → 不该自动产生占位动作
         assert!(
-            all.iter().all(|a| !matches!(a, TopbarAction::Placeholder(_))),
+            all.iter()
+                .all(|a| !matches!(a, TopbarAction::Placeholder(_))),
             "未点击时不应产生「下一版开放」：{all:?}"
         );
         // 两个可见未接通入口的**反馈文案**必须是「下一版开放」类，
@@ -1149,7 +1227,9 @@ mod m41_tests {
         assert!(taken.ends_with('↓'), "降序要带 ↓：{taken}");
         // 没有「评分」排序（OR-13 / AC-OUT-C）
         assert!(
-            !texts.iter().any(|t| t.contains("评分") || t.contains("星级")),
+            !texts
+                .iter()
+                .any(|t| t.contains("评分") || t.contains("星级")),
             "排序菜单不许有评分：{texts:?}"
         );
 

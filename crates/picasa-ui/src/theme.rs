@@ -305,11 +305,7 @@ impl Theme {
             accent_soft,
             star: rgb(s.star),
             sidebar_selected: if dark { rgb(s.hover) } else { rgb(s.card) },
-            row_selected_text: if dark {
-                Color32::WHITE
-            } else {
-                rgb(s.ink)
-            },
+            row_selected_text: if dark { Color32::WHITE } else { rgb(s.ink) },
             sidebar_selected_inactive: accent_soft,
             sidebar_hover: rgb(s.hover),
             cell_hover: rgb(s.hover),
@@ -457,8 +453,10 @@ impl Metrics {
     pub const CELL_SIZES: [f32; 3] = [85.0, 144.0, 200.0];
 
     // ---- M3.1 顶栏 ----
-    pub const TOPBAR_H: f32 = 96.0;
-    pub const TOPBAR_LINE1_H: f32 = 40.0;
+    /// M5 v1.4：顶栏压成**单行**（图标 · 路径/张数 · 排布/搜索），高度 64。
+    /// `TOPBAR_LINE1_H` 保留给 macOS 红绿灯的垂直带（窗口标题带高度）。
+    pub const TOPBAR_H: f32 = 64.0;
+    pub const TOPBAR_LINE1_H: f32 = 28.0;
     pub const TOPBAR_ICON_D: f32 = 38.0;
     /// 左栏默认宽度。M5-R3 视觉参考 228（亮）/ 216（暗）；**宽度偏好逻辑不变**，
     /// 这里保持既有默认 216，不借主题改用户拖出来的宽度。
@@ -467,7 +465,6 @@ impl Metrics {
     pub const SIDEBAR_INDENT: f32 = 14.0;
     pub const SIDEBAR_SECTION_H: f32 = 26.0;
     pub const SIDEBAR_HEADER_H: f32 = 58.0;
-    pub const VIEW_HEADER_H: f32 = 52.0;
     pub const SEG_H: f32 = 36.0;
     pub const ZOOM_PILL_H: f32 = 32.0;
     pub const CELL_GAP: f32 = 16.0;
@@ -504,7 +501,10 @@ pub fn text_styles(dark: bool) -> Vec<(TextStyle, FontId)> {
             TextStyle::Button,
             FontId::new(12.5, FontFamily::Proportional),
         ),
-        (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
+        (
+            TextStyle::Small,
+            FontId::new(11.0, FontFamily::Proportional),
+        ),
         (
             TextStyle::Monospace,
             FontId::new(11.0, FontFamily::Monospace),
@@ -600,7 +600,9 @@ pub fn apply(ctx: &egui::Context, appearance: Appearance) {
 }
 
 /// 字体文件候选（按主题的主字体 + 共用的 CJK 回退）。
-fn font_file_candidates(appearance: Appearance) -> (&'static [&'static str], &'static [&'static str]) {
+fn font_file_candidates(
+    appearance: Appearance,
+) -> (&'static [&'static str], &'static [&'static str]) {
     let primary: &'static [&'static str] = if appearance.is_dark() {
         &[
             "/usr/share/fonts/truetype/sand-box/google/Geist/Geist-VariableFont_wght.ttf",
@@ -734,7 +736,12 @@ mod tests {
         assert_eq!(hex(t.selected), "#00dfe1", "强调");
         assert_eq!(hex(t.accent_ink), "#00dfe1", "强调文字");
         assert_eq!(
-            (t.accent_soft.r(), t.accent_soft.g(), t.accent_soft.b(), t.accent_soft.a()),
+            (
+                t.accent_soft.r(),
+                t.accent_soft.g(),
+                t.accent_soft.b(),
+                t.accent_soft.a()
+            ),
             (0x00, 0xdf, 0xe1, 0x14),
             "强调柔底 #00dfe114"
         );
@@ -756,7 +763,10 @@ mod tests {
     #[test]
     fn m5_r3_default_appearance_is_light() {
         assert_eq!(Appearance::default(), Appearance::Light);
-        assert_eq!(Theme::for_appearance(Appearance::default()).appearance, Appearance::Light);
+        assert_eq!(
+            Theme::for_appearance(Appearance::default()).appearance,
+            Appearance::Light
+        );
         assert!(!Theme::for_appearance(Appearance::default()).dark);
     }
 
