@@ -274,25 +274,28 @@ pub fn zoom_button_rects(top: Rect) -> (Rect, Rect) {
     )
 }
 
-/// 顶栏「照片信息」开关的矩形：紧跟固定文件名槽位之后，不锚定右端。
-pub fn info_toggle_rect(top: Rect) -> Rect {
+/// 文件名槽位 + 信息胶囊的横向布局：`(文件名左边, 文件名宽, 胶囊左边)`。
+///
+/// 文件名槽位是固定宽度，但窗口窄到放不下时会先压文件名，保证胶囊不越出
+/// 顶栏右边界（控件常驻，不允许被裁掉）。
+fn top_tail(top: Rect) -> (f32, f32, f32) {
     let track = zoom_track_rect(top);
-    Rect::from_min_size(
-        pos2(
-            track.right() + TB_NAME_GAP + TB_NAME_W + TB_CHIP_GAP,
-            top.top() + 10.0,
-        ),
-        vec2(TB_CHIP_W, 24.0),
-    )
+    let name_left = track.right() + TB_NAME_GAP;
+    let avail = top.right() - 8.0 - name_left - TB_CHIP_GAP - TB_CHIP_W;
+    let name_w = TB_NAME_W.min(avail.max(0.0));
+    (name_left, name_w, name_left + name_w + TB_CHIP_GAP)
+}
+
+/// 顶栏「照片信息」开关的矩形：紧跟文件名槽位之后，不锚定右端。
+pub fn info_toggle_rect(top: Rect) -> Rect {
+    let (_, _, chip_left) = top_tail(top);
+    Rect::from_min_size(pos2(chip_left, top.top() + 10.0), vec2(TB_CHIP_W, 24.0))
 }
 
 /// 顶栏文件名槽位（右对齐到信息胶囊左侧 8 px）。
 pub fn filename_slot_rect(top: Rect) -> Rect {
-    let track = zoom_track_rect(top);
-    Rect::from_min_size(
-        pos2(track.right() + TB_NAME_GAP, top.top()),
-        vec2(TB_NAME_W, top.height()),
-    )
+    let (left, w, _) = top_tail(top);
+    Rect::from_min_size(pos2(left, top.top()), vec2(w, top.height()))
 }
 
 /// 胶片条的一个槽位：照片下标 + 屏幕矩形。
@@ -2789,6 +2792,22 @@ mod tests {
         let all = all.join("\n");
         assert!(all.contains('−') && all.contains('+'), "{all}");
         assert!(all.contains("适合") && all.contains("100%"), "{all}");
+    }
+
+    /// 窄窗：文件名槽位先收窄，信息胶囊仍然完整落在顶栏内（控件常驻不裁切）。
+    #[test]
+    fn topbar_chip_stays_inside_on_a_narrow_window() {
+        for w in [1280.0_f32, 900.0, 760.0] {
+            let top = Rect::from_min_size(pos2(0.0, 0.0), vec2(w, TOP_H));
+            let chip = info_toggle_rect(top);
+            let name = filename_slot_rect(top);
+            assert!(
+                top.contains_rect(chip),
+                "w={w} 胶囊越界：{chip:?} / {top:?}"
+            );
+            assert!(name.right() <= chip.left(), "w={w} 文件名与胶囊重叠");
+            assert!((chip.width() - 96.0).abs() < 0.01, "胶囊宽度固定");
+        }
     }
 
     /// V6：展厅控件常驻——空闲很久后顶栏 / 说明条 / 胶片条 / 信息栏 / 底栏仍在。
