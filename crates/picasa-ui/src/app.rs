@@ -2432,6 +2432,12 @@ impl OpenPicasaApp {
     // -------------------------------------------------------------- 键盘
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // 废纸篓确认框是模态：框开着时其它快捷键一律不生效（避免遮罩后面的
+        // Delete / ←/→ / Esc 关闭查看器被当成对底层界面的操作）。Esc 由对话框
+        // 自己处理为「取消」。
+        if self.confirm_trash.is_some() {
+            return;
+        }
         let in_viewer = self.viewer.is_some();
         for action in shortcuts::collect_ex(ctx, in_viewer, self.input_focus_prev) {
             if in_viewer {
@@ -4006,7 +4012,10 @@ impl OpenPicasaApp {
                         .show(ui, |ui| {
                             ui.set_min_width(200.0);
                             if ui
-                                .add(egui::Button::new(crate::index_mgr::reveal_label()).frame(false))
+                                .add(
+                                    egui::Button::new(crate::index_mgr::reveal_label())
+                                        .frame(false),
+                                )
                                 .clicked()
                             {
                                 let _ = crate::macos::open_folder(std::path::Path::new(&path));
@@ -4470,48 +4479,29 @@ impl OpenPicasaApp {
             if let crate::trash_ui::Decision::Close = decision {
                 self.confirm_trash = None;
             }
-            let mut open = true;
             let mut action = crate::trash_ui::UserAction::None;
             let shown = match &decision {
                 crate::trash_ui::Decision::Rearm(next) => next.clone(),
                 _ => confirmed.clone(),
             };
             if self.confirm_trash.is_some() {
-                egui::Window::new(picasa_core::trash_plan::TRASH_TITLE)
-                    .id(egui::Id::unique("trash-confirm"))
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-                    // T1：正文要可读，不能被挤在窄框里乱换行（两行 + 一条还原说明）。
-                    .fixed_size(vec2(420.0, 168.0))
-                    .open(&mut open)
-                    .show(&ctx, |ui| {
-                        ui.set_max_width(388.0);
-                        ui.label(
-                            egui::RichText::new(picasa_core::trash_plan::confirm_body(shown.len()))
-                                .size(12.5),
-                        );
-                        ui.add_space(10.0);
-                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            action = crate::trash_ui::UserAction::Dismiss;
-                        }
-                        // T2：破坏性主按钮红色（取消仍是默认焦点、默认样式）。
-                        ui.horizontal(|ui| {
-                            // 默认焦点在「取消」：回车 / 空格落在取消上，
-                            // 移动原文件必须再主动点一次（`M5-FS-01`）。
-                            let (confirm, cancel) = crate::trash_ui::confirm_buttons(&theme);
-                            let cancel_btn = ui.add(cancel);
-                            cancel_btn.request_focus();
-                            if cancel_btn.clicked() {
-                                action = crate::trash_ui::UserAction::Cancel;
-                            }
-                            if ui.add(confirm).clicked() {
-                                action = crate::trash_ui::UserAction::Confirm;
-                            }
-                        });
-                    });
+                // 按原型 v1.4：居中较大圆角对话框 + 背景遮罩 + 右对齐按钮组。
+                // 遮罩吃掉后面的点击；Escape / 点遮罩 = 取消（零执行）。
+                let paths: Vec<String> = shown
+                    .ids()
+                    .iter()
+                    .filter_map(|id| {
+                        self.lib
+                            .photos
+                            .iter()
+                            .find(|p| p.id == *id)
+                            .map(|p| p.abs_path().to_string_lossy().into_owned())
+                    })
+                    .collect();
+                action = crate::trash_ui::show_dialog(&ctx, &theme, shown.len(), &paths).action;
             }
-            if !open && action == crate::trash_ui::UserAction::None {
+            // 范围在画之前就被判定作废（confirm_trash 已清）→ 按取消处理，零执行。
+            if self.confirm_trash.is_none() && action == crate::trash_ui::UserAction::None {
                 action = crate::trash_ui::UserAction::Dismiss;
             }
             if action != crate::trash_ui::UserAction::None {
@@ -5460,7 +5450,10 @@ mod m5r5_tests {
         );
 
         let child = folder_ctx_items(false);
-        assert!(child.contains(&crate::index_mgr::reveal_label()), "{child:?}");
+        assert!(
+            child.contains(&crate::index_mgr::reveal_label()),
+            "{child:?}"
+        );
         assert!(child.contains(&"刷新此文件夹"), "{child:?}");
         assert!(
             child.contains(&"关闭此文件夹（不再显示）"),

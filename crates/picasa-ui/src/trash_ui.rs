@@ -29,6 +29,143 @@ pub fn confirm_buttons(theme: &Theme) -> (egui::Button<'static>, egui::Button<'s
     (confirm, cancel)
 }
 
+/// 对话框宽度：按屏幕**逻辑像素**取比例的居中卡片。
+///
+/// 原型的 1280 截图是物理像素，不能直接塞进 1024 逻辑坐标；这里只按比例
+/// （46%，400–520 逻辑像素）适配，所以同一窗口在任意 DPI 下都同样居中。
+pub fn dialog_width(screen_w: f32) -> f32 {
+    (screen_w * 0.46).clamp(400.0, 520.0)
+}
+
+/// 确认框一帧的返回值：动作用户点击/按键决定，`open` 仅用于「叉掉」语义
+/// （本原型没有叉，保留给 Escape / 关闭窗口路径）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DialogResponse {
+    pub action: UserAction,
+}
+
+impl Default for DialogResponse {
+    fn default() -> Self {
+        Self {
+            action: UserAction::None,
+        }
+    }
+}
+
+/// 按原型 v1.4 画「移到废纸篓」确认框（居中、较大圆角对话框 + 背景遮罩）。
+///
+/// * 尺寸按**当前屏幕逻辑像素**取比例（宽 min 520 / 46%），不把 1280 截图的
+///   物理像素硬塞进 1024 逻辑坐标；同一图窗在两种 DPI 下都是居中的对话框。
+/// * 标题左上；正文分段（会发生什么 / 如何还原）＋ 真实文件路径；按钮
+///   右对齐：描边「取消」+ 危险红主按钮「移到废纸篓」。
+/// * 遮罩铺满窗口并吃掉点击（后面的删除 / 选择等操作点不到）；点遮罩 =
+///   取消（零执行）。默认焦点在「取消」，Escape = 取消。
+/// * 只画真实张数/路径；不写「仅模拟 / 不移动真实照片」之类演示文案。
+pub fn show_dialog(
+    ctx: &egui::Context,
+    theme: &Theme,
+    count: usize,
+    paths: &[String],
+) -> DialogResponse {
+    let screen = ctx.content_rect();
+    let width = dialog_width(screen.width());
+    let mut action = UserAction::None;
+
+    // 遮罩：铺满窗口，吃掉落在后面的所有点击。
+    egui::Area::new(egui::Id::unique("trash-confirm-scrim"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            let (rect, resp) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
+            ui.painter()
+                .rect_filled(rect, 0.0, egui::Color32::from_black_alpha(96));
+            if resp.clicked() {
+                action = UserAction::Dismiss;
+            }
+        });
+
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        action = UserAction::Dismiss;
+    }
+
+    let card_fill = if theme.dark {
+        theme.menu_bg
+    } else {
+        theme.viewer_card
+    };
+    let mut clicked = UserAction::None;
+    egui::Area::new(egui::Id::unique("trash-confirm"))
+        .order(egui::Order::Tooltip)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(card_fill)
+                .corner_radius(16)
+                .inner_margin(egui::Margin::same(24))
+                .stroke(egui::Stroke::new(1.0, theme.hairline))
+                .show(ui, |ui| {
+                    ui.set_width(width - 48.0);
+                    ui.label(
+                        egui::RichText::new(picasa_core::trash_plan::TRASH_TITLE)
+                            .size(16.0)
+                            .strong()
+                            .color(theme.text_primary),
+                    );
+                    ui.add_space(10.0);
+                    for para in picasa_core::trash_plan::confirm_body(count).split("\n\n") {
+                        ui.label(
+                            egui::RichText::new(para)
+                                .size(12.5)
+                                .color(theme.text_secondary),
+                        );
+                        ui.add_space(8.0);
+                    }
+                    if !paths.is_empty() {
+                        let shown: Vec<&String> = paths.iter().take(3).collect();
+                        for p in &shown {
+                            ui.label(
+                                egui::RichText::new(p.as_str())
+                                    .size(11.5)
+                                    .color(theme.text_primary),
+                            );
+                        }
+                        if paths.len() > shown.len() {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "… 另有 {} 个文件",
+                                    paths.len() - shown.len()
+                                ))
+                                .size(11.0)
+                                .color(theme.text_secondary),
+                            );
+                        }
+                        ui.add_space(4.0);
+                    }
+                    ui.add_space(10.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (confirm, cancel) = confirm_buttons(theme);
+                        let confirm_resp = ui.add(confirm);
+                        if confirm_resp.clicked() {
+                            clicked = UserAction::Confirm;
+                        }
+                        let cancel_resp = ui.add(cancel);
+                        // 默认焦点在「取消」：回车 / 空格落在取消上。
+                        if ui.memory(|m| m.focused().is_none()) {
+                            cancel_resp.request_focus();
+                        }
+                        if cancel_resp.clicked() {
+                            clicked = UserAction::Cancel;
+                        }
+                    });
+                });
+        });
+
+    if action == UserAction::None {
+        action = clicked;
+    }
+    DialogResponse { action }
+}
+
 /// 用户在确认框上的动作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserAction {
@@ -95,6 +232,293 @@ mod tests {
 
     fn scope(v: &[i64]) -> TrashScope {
         TrashScope::new(v.iter().copied())
+    }
+
+    /// 无窗口跑一帧确认框：返回（响应、所有文字及其矩形、所有矩形）。
+    fn run_dialog(
+        ctx: &egui::Context,
+        theme: &Theme,
+        screen: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> (DialogResponse, Vec<(String, egui::Rect)>, Vec<egui::Rect>) {
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+            max_texture_side: Some(2048),
+            ..Default::default()
+        };
+        input.events = events;
+        let mut resp = DialogResponse::default();
+        // Area 的首帧只做布局、不产出形状；先跑一帧预热再用同一输入跑正式帧。
+        let _warm = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+                max_texture_side: Some(2048),
+                ..Default::default()
+            },
+            |_ui| {
+                let _ = show_dialog(
+                    ctx,
+                    theme,
+                    1,
+                    &["/home/me/Pictures/2024/5/07-city.jpg".to_string()],
+                );
+            },
+        );
+        _warm.drop_without_applying_deltas();
+        let out = ctx.run_ui(input, |_ui| {
+            resp = show_dialog(
+                ctx,
+                theme,
+                1,
+                &["/home/me/Pictures/2024/5/07-city.jpg".to_string()],
+            );
+        });
+        let mut texts = Vec::new();
+        let mut rects = Vec::new();
+        fn walk(
+            shape: &egui::Shape,
+            texts: &mut Vec<(String, egui::Rect)>,
+            rects: &mut Vec<egui::Rect>,
+        ) {
+            match shape {
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, texts, rects);
+                    }
+                }
+                egui::Shape::Text(t) => texts.push((
+                    t.galley.job.text.clone(),
+                    egui::Rect::from_min_size(t.pos, t.galley.size()),
+                )),
+                egui::Shape::Rect(r) => rects.push(r.rect),
+                _ => {}
+            }
+        }
+        for c in &out.shapes {
+            walk(&c.shape, &mut texts, &mut rects);
+        }
+        out.drop_without_applying_deltas();
+        (resp, texts, rects)
+    }
+
+    fn dialog_ctx(appearance: picasa_core::Appearance) -> (egui::Context, Theme) {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, appearance);
+        (ctx, Theme::for_appearance(appearance))
+    }
+
+    fn press_release(rect: egui::Rect, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: rect.center(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// 原型 v1.4：确认框是按**逻辑像素比例**取宽的居中卡片，不是 420x168 小窗。
+    #[test]
+    fn dialog_width_follows_logical_pixels_not_screenshot_pixels() {
+        // 1024 逻辑宽 → 46% ≈ 471；1280 → 封顶 520；窄窗 → 下限 400。
+        assert!(
+            (dialog_width(1024.0) - 471.04).abs() < 0.1,
+            "{}",
+            dialog_width(1024.0)
+        );
+        assert_eq!(dialog_width(1280.0), 520.0);
+        assert_eq!(dialog_width(800.0), 400.0);
+        // 同一逻辑宽在任意 DPI 下都按逻辑像素算（不与物理像素混用）。
+        assert!((dialog_width(1024.0) - dialog_width(1024.0)).abs() < f32::EPSILON);
+    }
+
+    /// 对话框结构：居中大圆角卡片、标题在左上、正文分段 + 真实路径、
+    /// 按钮在底部右对齐（描边取消在左、危险红主按钮在右），且有背景遮罩。
+    #[test]
+    fn dialog_is_centered_with_title_left_and_buttons_right_aligned() {
+        for appearance in [
+            picasa_core::Appearance::Light,
+            picasa_core::Appearance::Dark,
+        ] {
+            let (ctx, theme) = dialog_ctx(appearance);
+            let screen = egui::vec2(1280.0, 800.0);
+            let (_r, texts, rects) = run_dialog(&ctx, &theme, screen, Vec::new());
+            let find = |needle: &str| {
+                texts
+                    .iter()
+                    .find(|(t, _)| t == needle)
+                    .map(|(_, r)| *r)
+                    .unwrap_or_else(|| panic!("{appearance:?}：缺「{needle}」"))
+            };
+            let title = find(picasa_core::trash_plan::TRASH_TITLE);
+            let cancel = find(picasa_core::trash_plan::TRASH_CANCEL);
+            let confirm = find(picasa_core::trash_plan::TRASH_ACTION);
+            // 标题在正文之上；标题左对齐（不在卡片中线上）
+            assert!(title.top() < cancel.top(), "标题应在按钮之上");
+            // 正文分段：还原说明与真实路径都画出来了
+            let all: String = texts
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(all.contains("张照片移到"), "缺少正文：{all}");
+            assert!(all.contains("还原"), "缺少还原说明：{all}");
+            assert!(
+                all.contains("/home/me/Pictures/2024/5/07-city.jpg"),
+                "缺少真实路径：{all}"
+            );
+            // 不复制演示文案
+            assert!(!all.contains("仅模拟"), "{all}");
+            assert!(!all.contains("不移动真实照片"), "{all}");
+            // 按钮右对齐：两枚都在卡片右半，取消在确认左侧，且互不重叠。
+            assert!(cancel.right() < confirm.left(), "取消应在确认左侧");
+            assert!(
+                confirm.right() > screen.x * 0.5,
+                "按钮组应在右半区：{confirm:?}"
+            );
+            // 有大背景遮罩：存在一个几乎铺满屏幕的矩形。
+            assert!(
+                rects
+                    .iter()
+                    .any(|r| r.width() >= screen.x - 1.0 && r.height() >= screen.y - 1.0),
+                "{appearance:?}：应有铺满窗口的遮罩"
+            );
+        }
+    }
+
+    /// 取消 / Escape / 点遮罩都零执行；点确认才是 Confirm。
+    #[test]
+    fn dialog_escape_and_scrim_dismiss_without_side_effects() {
+        let screen = egui::vec2(1024.0, 800.0);
+        for appearance in [
+            picasa_core::Appearance::Light,
+            picasa_core::Appearance::Dark,
+        ] {
+            let (ctx, theme) = dialog_ctx(appearance);
+            // Escape
+            let (r, _, _) = run_dialog(
+                &ctx,
+                &theme,
+                screen,
+                vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+            );
+            assert_eq!(
+                r.action,
+                UserAction::Dismiss,
+                "{appearance:?} Escape 应取消"
+            );
+
+            // 点遮罩左上角（对话框之外）
+            let (ctx, theme) = dialog_ctx(appearance);
+            let (_, _, _) = run_dialog(&ctx, &theme, screen, Vec::new());
+            let scrim_pos = egui::pos2(4.0, 4.0);
+            let mut events = vec![egui::Event::PointerMoved(scrim_pos)];
+            events.push(egui::Event::PointerButton {
+                pos: scrim_pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            });
+            let (_, _, _) = run_dialog(&ctx, &theme, screen, events);
+            let (r, _, _) = run_dialog(
+                &ctx,
+                &theme,
+                screen,
+                vec![egui::Event::PointerButton {
+                    pos: scrim_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+            );
+            assert_eq!(r.action, UserAction::Dismiss, "{appearance:?} 点遮罩应取消");
+        }
+    }
+
+    /// 默认焦点在「取消」：框一打开就按回车 / 空格，绝不误触删除。
+    ///
+    /// 这是 `M5-FS-01` 的安全默认：移动原文件必须再主动点一次确认按钮。
+    #[test]
+    fn dialog_defaults_focus_to_cancel_so_enter_never_trashes() {
+        for appearance in [
+            picasa_core::Appearance::Light,
+            picasa_core::Appearance::Dark,
+        ] {
+            let (ctx, theme) = dialog_ctx(appearance);
+            let screen = egui::vec2(1024.0, 800.0);
+            let theme_paths = ["/home/me/Pictures/2024/5/07-city.jpg".to_string()];
+            // 多跑几帧让 request_focus 生效（egui 的焦点在下一个 pass 应用）。
+            let mut last = UserAction::None;
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+                    max_texture_side: Some(2048),
+                    ..Default::default()
+                };
+                let out = ctx.run_ui(input, |_ui| {
+                    last = show_dialog(&ctx, &theme, 1, &theme_paths).action;
+                });
+                out.drop_without_applying_deltas();
+            }
+            assert_eq!(last, UserAction::None, "{appearance:?}：静置时不应有动作");
+            // 现在按回车：焦点在「取消」→ Cancel，而不是 Confirm。
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+                max_texture_side: Some(2048),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+                ..Default::default()
+            };
+            let mut action = UserAction::None;
+            let out = ctx.run_ui(input, |_ui| {
+                action = show_dialog(&ctx, &theme, 1, &theme_paths).action;
+            });
+            out.drop_without_applying_deltas();
+            assert_eq!(
+                action,
+                UserAction::Cancel,
+                "{appearance:?}：默认焦点应在「取消」，回车不得确认删除"
+            );
+        }
+    }
+
+    /// 点「移到废纸篓」→ Confirm；点「取消」→ Cancel。
+    #[test]
+    fn dialog_buttons_emit_confirm_and_cancel() {
+        for appearance in [
+            picasa_core::Appearance::Light,
+            picasa_core::Appearance::Dark,
+        ] {
+            for (label, expect) in [
+                (picasa_core::trash_plan::TRASH_ACTION, UserAction::Confirm),
+                (picasa_core::trash_plan::TRASH_CANCEL, UserAction::Cancel),
+            ] {
+                let (ctx, theme) = dialog_ctx(appearance);
+                let screen = egui::vec2(1024.0, 800.0);
+                let (_r, texts, _) = run_dialog(&ctx, &theme, screen, Vec::new());
+                let target = texts
+                    .iter()
+                    .find(|(t, _)| t == label)
+                    .map(|(_, r)| *r)
+                    .unwrap_or_else(|| panic!("缺「{label}」"));
+                let mut events = vec![egui::Event::PointerMoved(target.center())];
+                events.push(press_release(target, true));
+                let (_, _, _) = run_dialog(&ctx, &theme, screen, events);
+                let (r, _, _) =
+                    run_dialog(&ctx, &theme, screen, vec![press_release(target, false)]);
+                assert_eq!(r.action, expect, "{appearance:?} 点「{label}」");
+            }
+        }
     }
 
     /// T2：确认框里「移到废纸篓」是红色主按钮（实心危险红 + 白字），
