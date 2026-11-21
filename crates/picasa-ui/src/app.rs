@@ -222,6 +222,12 @@ pub struct OpenPicasaApp {
     /// 确认张数与执行集合**不读这个缓存**，仍只认 `confirm_trash` 的
     /// `TrashScope`（见 `draw_overlays` 的决策表）。缓存只影响预览文案。
     trash_preview: crate::trash_preview::TrashPreviewCache,
+    /// 确认集合的代号：每次**装 / 换** `confirm_trash` 就 +1。
+    ///
+    /// 预览缓存只比 `(trash_scope_epoch, photos_rev)` 这两个 u64，所以既不会
+    /// 每帧比较/克隆全部 id，也不会因为「张数相同」就复用旧集合的预览。
+    /// 打开、Rearm、关闭重开都会换代号 → 必然重新生成。
+    trash_scope_epoch: u64,
     /// 诊断页（F 加固）是否打开
     diagnostics_open: bool,
     /// 诊断页数据（打开或动作后重取，不每帧算 `SUM(LENGTH(BLOB))`）
@@ -465,6 +471,7 @@ impl OpenPicasaApp {
             confirm_trash: None,
             confirm_trash_in_viewer: false,
             trash_preview: crate::trash_preview::TrashPreviewCache::new(),
+            trash_scope_epoch: 0,
             diagnostics_open: false,
             diag_data: crate::diagnostics::DiagData::default(),
             diag_dirty: false,
@@ -2419,6 +2426,16 @@ impl OpenPicasaApp {
         self.refresh_view_header();
     }
 
+    /// 装上一个确认集合（打开 / Rearm 的唯一入口）：顺带换代号，让预览缓存失效。
+    ///
+    /// 每帧的绘制路径**不走这里**——它只在「集合真的换了」时调用，所以
+    /// 大选集上每次打开 / 范围变化才付出一次 O(N) 的预览生成。
+    fn open_trash_confirm(&mut self, scope: TrashScope, in_viewer: bool) {
+        self.confirm_trash = Some(scope);
+        self.confirm_trash_in_viewer = in_viewer;
+        self.trash_scope_epoch = self.trash_scope_epoch.wrapping_add(1);
+    }
+
     /// 此刻真实可执行的范围（与打开确认时用的是同一套规则）。
     ///
     /// 只读快照，没有任何副作用；确认框每帧拿它跟已确认的范围比对。
@@ -2507,8 +2524,7 @@ impl OpenPicasaApp {
             KeyAction::Delete => {
                 let scope = library_scope(&self.lib.selection_ids());
                 if !scope.is_empty() {
-                    self.confirm_trash = Some(scope);
-                    self.confirm_trash_in_viewer = false;
+                    self.open_trash_confirm(scope, false);
                 }
             }
             KeyAction::OpenViewer => {
@@ -2670,8 +2686,7 @@ impl OpenPicasaApp {
                 let sel = self.lib.selection_ids();
                 let scope = viewer_scope(&sel, visible);
                 if !scope.is_empty() {
-                    self.confirm_trash = Some(scope);
-                    self.confirm_trash_in_viewer = true;
+                    self.open_trash_confirm(scope, true);
                 }
             }
             _ => {}
@@ -4484,6 +4499,13 @@ impl OpenPicasaApp {
             let mut decision =
                 crate::trash_ui::decide(crate::trash_ui::UserAction::None, &confirmed, &current);
             let keep_open = !matches!(decision, crate::trash_ui::Decision::Close);
+            // 画之前就判定要 Rearm（范围已变）：先把代号换掉再取预览，
+            // 否则这一帧会用旧集合的缓存路径去配新集合的张数。
+            // 下面处理动作时若仍是 Rearm 会再 +1：多一次有界重生成而已（不是
+            // 每帧），换来「任何路径都不可能拿旧集合的预览配新集合的张数」。
+            if matches!(decision, crate::trash_ui::Decision::Rearm(_)) {
+                self.trash_scope_epoch = self.trash_scope_epoch.wrapping_add(1);
+            }
             let action = if keep_open {
                 // `shown` 只是「这一帧画哪个集合」的借用：重画用 decision 里的
                 // 新范围，否则仍用用户确认的那一组。不 clone id 列表。
@@ -4498,9 +4520,12 @@ impl OpenPicasaApp {
                 // 命中；未命中才做一次 O(N) 单遍扫描（找到 3 条即停）。
                 // 不再对每个选中 id 各扫一遍图库，也不再把全部路径收集起来。
                 // ⚠️ 张数传的是 `shown.len()`（完整确认集合），不是预览条数。
-                let preview_paths =
-                    self.trash_preview
-                        .paths(shown, self.lib.photos_rev, &self.lib.photos);
+                let preview_paths = self.trash_preview.paths(
+                    self.trash_scope_epoch,
+                    shown,
+                    self.lib.photos_rev,
+                    &self.lib.photos,
+                );
                 crate::trash_ui::show_dialog(&ctx, &theme, shown.len(), preview_paths).action
             } else {
                 // 范围在画之前就被判定作废 → 按取消处理，零执行。
@@ -4527,17 +4552,20 @@ impl OpenPicasaApp {
                         }
                     }
                     crate::trash_ui::Decision::Rearm(next) => {
+                        // 换了集合 → 换代号，预览按新集合重生成。
                         self.confirm_trash = Some(next);
+                        self.trash_scope_epoch = self.trash_scope_epoch.wrapping_add(1);
                         self.lib.toast = Some((picasa_core::trash_plan::SCOPE_CHANGED.into(), 4.0));
                     }
                     crate::trash_ui::Decision::Close => {}
-                    // 未点确认、范围也没变：框留着，原样放回。
+                    // 未点确认、范围也没变：框留着，原样放回（代号不变，预览命中）。
                     crate::trash_ui::Decision::Keep => self.confirm_trash = Some(confirmed),
                 }
             } else {
                 match decision {
                     crate::trash_ui::Decision::Rearm(next) => {
                         self.confirm_trash = Some(next);
+                        self.trash_scope_epoch = self.trash_scope_epoch.wrapping_add(1);
                         self.lib.toast = Some((picasa_core::trash_plan::SCOPE_CHANGED.into(), 4.0));
                     }
                     crate::trash_ui::Decision::Close => {}

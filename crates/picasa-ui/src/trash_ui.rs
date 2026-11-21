@@ -130,8 +130,9 @@ pub fn show_dialog(
                         ui.add_space(8.0);
                     }
                     if !paths.is_empty() {
-                        let shown: Vec<&String> = paths.iter().take(3).collect();
-                        for p in &shown {
+                        // 只取前 3 条，且不为此每帧分配一个 Vec。
+                        let shown = &paths[..paths.len().min(3)];
+                        for p in shown {
                             ui.label(
                                 egui::RichText::new(p.as_str())
                                     .size(11.5)
@@ -142,7 +143,9 @@ pub fn show_dialog(
                             ui.label(
                                 egui::RichText::new(format!(
                                     "… 另有 {} 个文件",
-                                    count - shown.len()
+                                    // 用完整确认张数算剩余；`saturating_sub` 兜底
+                                    // 调用方传入不一致的 count（绝不 panic）。
+                                    count.saturating_sub(shown.len())
                                 ))
                                 .size(11.0)
                                 .color(theme.text_secondary),

@@ -15,9 +15,9 @@
 //! * 张数与执行集合仍然只认 [`picasa_core::TrashScope`]（`app.rs` 的决策表），
 //!   本模块只读、不执行、不碰磁盘。
 //!
-//! 缓存键刻意不含「每帧散列全部 id」：只比较 `TrashScope` 本身（有序去重的
-//! id 切片，逐项相等即同一集合）与 [`picasa_core::Library::photos_rev`]
-//! （O(1) 计数器）。因此换选集、**同数不同 id**、路径/库数据变化、关闭重开
+//! 缓存键刻意不用「每帧比较 / 克隆 / 散列全部 id」：调用方在**装/换确认集合**
+//! 时给一个单调递增的 `scope_epoch`，缓存只比 `(scope_epoch, photos_rev)` 两个
+//! u64——每帧 O(1)。因此换选集、**同数不同 id**、路径/库数据变化、关闭重开
 //! 都会重新生成；没有变化时一次扫描都不会发生。
 
 use picasa_core::TrashScope;
@@ -32,10 +32,20 @@ pub const PREVIEW_LIMIT: usize = 3;
 /// `TrashScope`，不从本缓存反推。
 #[derive(Debug, Default)]
 pub struct TrashPreviewCache {
-    /// 生成这份预览时对应的完整确认集合（用于逐项相等判定，不每帧克隆）。
-    scope: Option<TrashScope>,
+    /// 生成这份预览时对应的确认集合代号（打开 / Rearm 时 +1，O(1)）。
+    ///
+    /// 不存 `TrashScope` 本体：否则每帧都要逐项比较全部 id，等于把
+    /// 「全选集扫描」换个地方做回来。
+    scope_epoch: Option<u64>,
     /// 生成时的图库数据版本（`Library::photos_rev`）。
     photos_rev: u64,
+    /// 附加的 O(1) 指纹：张数 + 首尾 id。
+    ///
+    /// 代号由调用方负责递增；这三个字段是**廉价的兜底**——万一某个调用点漏换
+    /// 代号，「同数不同 id」也会因为首/尾 id 不同而失效，不必逐项比较全集合。
+    scope_len: usize,
+    scope_first: i64,
+    scope_last: i64,
     /// 已生成的最多 3 条路径。
     paths: Vec<String>,
     /// 实际做过多少次「遍历 photos」的有界扫描（测试可观测）。
@@ -53,24 +63,44 @@ impl TrashPreviewCache {
 
     /// 关框 / 换会话时清空：下次打开必定重新生成（关闭重开也覆盖）。
     pub fn reset(&mut self) {
-        self.scope = None;
+        self.scope_epoch = None;
         self.photos_rev = 0;
+        self.scope_len = 0;
+        self.scope_first = 0;
+        self.scope_last = 0;
         self.paths.clear();
     }
 
     /// 当前确认集合的预览路径（最多 3 条）。
     ///
-    /// 命中条件：**确认集合逐项相等** 且 `photos_rev` 未变。
+    /// 命中条件：**确认集合代号相同** 且 `photos_rev` 未变（两个 u64）。
     /// 未命中时做一次单遍扫描（`O(N)`，提前找到 3 条即可停），
     /// 不会出现每帧 O(选中数 × 图库数)。
-    pub fn paths(&mut self, scope: &TrashScope, photos_rev: u64, photos: &[PhotoRow]) -> &[String] {
-        let hit = self.photos_rev == photos_rev && self.scope.as_ref() == Some(scope);
+    ///
+    /// `scope_epoch` 必须由调用方在**装/换确认集合时**递增（`app.rs` 里统一走
+    /// `set_confirm_trash`），这样「同数不同 id」「换选集」都会失效。
+    pub fn paths(
+        &mut self,
+        scope_epoch: u64,
+        scope: &TrashScope,
+        photos_rev: u64,
+        photos: &[PhotoRow],
+    ) -> &[String] {
+        let (len, first, last) = fingerprint(scope);
+        let hit = self.photos_rev == photos_rev
+            && self.scope_epoch == Some(scope_epoch)
+            && self.scope_len == len
+            && self.scope_first == first
+            && self.scope_last == last;
         if hit {
             self.hits = self.hits.wrapping_add(1);
             return &self.paths;
         }
-        self.scope = Some(scope.clone());
+        self.scope_epoch = Some(scope_epoch);
         self.photos_rev = photos_rev;
+        self.scope_len = len;
+        self.scope_first = first;
+        self.scope_last = last;
         let (paths, visited) = preview_paths(scope.ids(), photos, PREVIEW_LIMIT);
         self.paths = paths;
         self.visited_rows = visited;
@@ -103,6 +133,14 @@ impl TrashPreviewCache {
 
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty()
+    }
+}
+
+/// 集合的 O(1) 指纹：`(张数, 最小 id, 最大 id)`。空集用 `(0,0,0)`。
+fn fingerprint(scope: &TrashScope) -> (usize, i64, i64) {
+    match (scope.ids().first(), scope.ids().last()) {
+        (Some(&first), Some(&last)) => (scope.len(), first, last),
+        _ => (0, 0, 0),
     }
 }
 
@@ -164,7 +202,7 @@ mod tests {
         let scope = TrashScope::new((0..1200).map(|i| i * 3));
         let mut cache = TrashPreviewCache::new();
         for _ in 0..100 {
-            let paths = cache.paths(&scope, 1, &photos);
+            let paths = cache.paths(1, &scope, 1, &photos);
             assert_eq!(paths.len(), PREVIEW_LIMIT);
         }
         assert_eq!(cache.scan_count(), 1, "100 帧只应有 1 次有界扫描");
@@ -182,7 +220,7 @@ mod tests {
         let photos = library(5000);
         let scope = TrashScope::new([4997, 4998, 4999, 10, 11]);
         let mut cache = TrashPreviewCache::new();
-        let paths = cache.paths(&scope, 1, &photos);
+        let paths = cache.paths(1, &scope, 1, &photos);
         assert_eq!(paths.len(), 3);
         assert_eq!(cache.scan_count(), 1, "一次生成只扫描一遍");
         // 第三条命中在 id=4997（第 4998 行），从此不再看后面的行。
@@ -193,9 +231,23 @@ mod tests {
         );
         // 后续帧不再扫描。
         for _ in 0..50 {
-            let _ = cache.paths(&scope, 1, &photos);
+            let _ = cache.paths(1, &scope, 1, &photos);
         }
         assert_eq!(cache.scan_count(), 1);
+    }
+
+    /// 即便调用方漏换代号，同数不同 id 也会被 O(1) 指纹兜住（首/尾 id 变了）。
+    #[test]
+    fn same_size_different_ids_invalidate_even_without_epoch_bump() {
+        let photos = library(5000);
+        let a = TrashScope::new((0..1200).map(|i| i * 3));
+        let b = TrashScope::new((0..1200).map(|i| i * 3 + 1));
+        let mut cache = TrashPreviewCache::new();
+        let first = cache.paths(1, &a, 7, &photos).to_vec();
+        // 故意用同一个代号：靠指纹兜底。
+        let second = cache.paths(1, &b, 7, &photos).to_vec();
+        assert_eq!(cache.scan_count(), 2, "首/尾 id 变了必须失效");
+        assert_ne!(first, second);
     }
 
     /// 同数不同 id（集合真的变了）必须重新生成，不能拿旧预览冒充。
@@ -206,8 +258,8 @@ mod tests {
         let b = TrashScope::new((0..1200).map(|i| i * 3 + 1));
         assert_eq!(a.len(), b.len());
         let mut cache = TrashPreviewCache::new();
-        let first = cache.paths(&a, 7, &photos).to_vec();
-        let second = cache.paths(&b, 7, &photos).to_vec();
+        let first = cache.paths(1, &a, 7, &photos).to_vec();
+        let second = cache.paths(2, &b, 7, &photos).to_vec();
         assert_eq!(cache.scan_count(), 2, "换集合必须重新生成");
         assert_ne!(first, second, "同数不同 id 的预览不能一样");
     }
@@ -218,16 +270,16 @@ mod tests {
         let photos = library(50);
         let scope = TrashScope::new([0, 1, 2, 3, 4]);
         let mut cache = TrashPreviewCache::new();
-        let _ = cache.paths(&scope, 1, &photos);
+        let _ = cache.paths(1, &scope, 1, &photos);
         assert_eq!(cache.scan_count(), 1);
 
         // 库数据版本变化：即使集合一字不差也要重生成（路径可能已变）。
-        let _ = cache.paths(&scope, 2, &photos);
+        let _ = cache.paths(1, &scope, 2, &photos);
         assert_eq!(cache.scan_count(), 2, "photos_rev 变化必须失效");
 
         // 关闭重开：reset 后同集合同版本也要重生成。
         cache.reset();
-        let _ = cache.paths(&scope, 2, &photos);
+        let _ = cache.paths(1, &scope, 2, &photos);
         assert_eq!(cache.scan_count(), 3, "关闭重开必须失效");
     }
 
@@ -240,7 +292,7 @@ mod tests {
         let photos = library(4000);
         let confirmed = TrashScope::new((0..1000).map(|i| i * 2));
         let mut cache = TrashPreviewCache::new();
-        let first = cache.paths(&confirmed, 9, &photos).to_vec();
+        let first = cache.paths(1, &confirmed, 9, &photos).to_vec();
         assert_eq!(first.len(), PREVIEW_LIMIT);
 
         // 同数换一批 id：决策表要求重新确认，预览也必须换。
@@ -250,7 +302,7 @@ mod tests {
             decide(UserAction::None, &confirmed, &next),
             Decision::Rearm(next.clone())
         );
-        let second = cache.paths(&next, 9, &photos).to_vec();
+        let second = cache.paths(2, &next, 9, &photos).to_vec();
         assert_eq!(cache.scan_count(), 2, "Rearm 后必须重新生成");
         assert_ne!(first, second, "新集合的预览不能复用旧的");
         // 张数仍是完整集合大小，与预览条数无关。
@@ -271,7 +323,7 @@ mod tests {
         photos.reverse();
         let scope = TrashScope::new([3, 50, 99, 7, 40]);
         let mut cache = TrashPreviewCache::new();
-        let paths = cache.paths(&scope, 1, &photos);
+        let paths = cache.paths(1, &scope, 1, &photos);
         let expected: Vec<String> = [3, 7, 40]
             .iter()
             .map(|i| format!("/home/me/Pictures/2024/p{i}.jpg"))
@@ -286,7 +338,7 @@ mod tests {
         let photos = library(10);
         let scope = TrashScope::new([2, 500, 501, 502, 503]);
         let mut cache = TrashPreviewCache::new();
-        let paths = cache.paths(&scope, 1, &photos);
+        let paths = cache.paths(1, &scope, 1, &photos);
         assert_eq!(paths.len(), 1, "只有 id=2 在内存里");
         assert_eq!(scope.len(), 5, "完整确认集合仍是 5");
     }
