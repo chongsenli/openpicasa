@@ -24,7 +24,7 @@
 //! ## 保留的既有能力
 //!
 //! * 返回 / Esc、显示位置与 ⌘Enter（动作由 app 层执行）。
-//! * 底栏四段信息、左右点击区与端点箭头、全屏、Space 背景、静止隐藏 chrome。
+//! * 底栏四段信息、左右点击区与端点箭头、全屏、Space 背景；控件常驻不自动隐藏（V6）。
 //! * 连续缩放 5%–800%；滚轮、+/−、PageUp、PageDown（适合）、1（100%）。
 //! * C 并排比较；只有一张时**不画假比较图**。
 //! * 原图未就绪「正在载入原图…」→「正在解码…」，无假进度条。
@@ -293,8 +293,6 @@ pub struct Viewer {
     pub requested_id: Option<i64>,
     pub bg: Bg,
     pub info_open: bool,
-    /// 上次鼠标移动的时间（用于 3 秒后隐藏 chrome）
-    pub last_move: f64,
     pub fullscreen: bool,
     /// EXIF 摘要（打开时同步读一次，1~5ms）
     pub exif: picasa_imaging::ExifSummary,
@@ -333,7 +331,6 @@ impl Viewer {
             requested_id: None,
             bg: Bg::Black,
             info_open: true,
-            last_move: 0.0,
             fullscreen: false,
             exif: Default::default(),
             taken_src: String::new(),
@@ -526,18 +523,12 @@ pub fn show(
         return Some(ViewerAction::Close);
     };
 
-    // ---- 鼠标静止计时（VW-13）：静止 3 秒隐藏 chrome 与光标 ----
-    let now = ui.input(|i| i.time);
-    // 刚打开时还没有「上次移动」：记为现在，否则首帧会因为 now-0 > 3s 直接藏 chrome，
-    // 用户不动鼠标就看不到返回 / 缩放 / 胶片条（展厅等于白进）。
-    if viewer.last_move == 0.0 {
-        viewer.last_move = now;
-    }
-    if ui.input(|i| i.pointer.is_moving()) {
-        viewer.last_move = now;
-    }
-    let idle = now - viewer.last_move;
-    let chrome_visible = idle < 3.0 || ui.input(|i| i.pointer.any_down());
+    // ---- V6：展厅控件常驻 ----
+    //
+    // 原型（v14-light-viewer-info / compare）的顶栏、信息栏、胶片条与底栏说明
+    // **始终可见**。旧实现按鼠标静止 3 秒自动隐藏 chrome 并藏光标，导致
+    // Linux 截图里只剩一张照片；这里取消空闲计时，也不再改动光标可见性。
+    let chrome_visible = true;
 
     let compare_active = viewer.compare_active(photos.len());
     let lay = layout(rect, viewer.info_open, compare_active);
@@ -747,13 +738,6 @@ pub fn show(
         {
             action = Some(ViewerAction::ToggleInfo);
         }
-    } else {
-        ui.ctx()
-            .send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
-    }
-    if chrome_visible {
-        ui.ctx()
-            .send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
     }
 
     // ---- 滚轮缩放（不叠加 ⌘+滚轮） ----
@@ -1995,12 +1979,24 @@ mod tests {
         appearance: Appearance,
         film: &[FilmThumb],
     ) -> (Option<ViewerAction>, Vec<String>) {
+        run_stage_at(viewer, rows, appearance, film, 0.0)
+    }
+
+    /// 同上，但把**帧时间**拨到 `time` 秒后再画——用于验证「空闲很久也不藏控件」。
+    fn run_stage_at(
+        viewer: &mut Viewer,
+        rows: &[PhotoRow],
+        appearance: Appearance,
+        film: &[FilmThumb],
+        time: f64,
+    ) -> (Option<ViewerAction>, Vec<String>) {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx, appearance);
         let theme = Theme::for_appearance(appearance);
         let input = egui::RawInput {
             screen_rect: Some(stage_rect()),
             max_texture_side: Some(2048),
+            time: Some(time),
             ..Default::default()
         };
         let mut action = None;
@@ -2132,6 +2128,24 @@ mod tests {
         let all = all.join("\n");
         assert!(all.contains('−') && all.contains('+'), "{all}");
         assert!(all.contains("适合") && all.contains("100%"), "{all}");
+    }
+
+    /// V6：展厅控件常驻——空闲很久后顶栏 / 说明条 / 胶片条 / 信息栏 / 底栏仍在。
+    ///
+    /// 老实现按鼠标静止 3 秒藏 chrome，Linux 截图里只剩照片；这里把帧时间
+    /// 拨到 600 秒（远超旧的 3 秒阈值）仍要求所有控件文字出现。
+    #[test]
+    fn v6_viewer_chrome_never_auto_hides_when_idle() {
+        let rows = photos(4);
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let mut v = Viewer::new(0);
+            let (_, texts) = run_stage_at(&mut v, &rows, appearance, &[], 600.0);
+            let all = texts.join("\n");
+            assert!(all.contains("返回"), "{appearance:?}：顶栏常驻：{all}");
+            assert!(all.contains("照片信息"), "{appearance:?}：信息栏/开关常驻：{all}");
+            assert!(all.contains("第 1 / 4 张"), "{appearance:?}：底栏常驻：{all}");
+            assert!(all.contains("适合"), "{appearance:?}：缩放簇常驻：{all}");
+        }
     }
 
     /// 亮 / 暗两套主题画出同一套展厅结构（§5.5 不得行为分叉）。
