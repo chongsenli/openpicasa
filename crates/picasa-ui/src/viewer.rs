@@ -920,13 +920,13 @@ fn draw_topbar(
     let _ = x;
 
     // 右端：「照片信息」开关 + 同名「返回」胶囊（V4 两端都有返回）。
+    // V5：文件名右侧是**浅色/描边的信息胶囊**（不再是实心按钮），仍可点开关。
     let info_btn = info_toggle_rect(top);
-    if text_button(
+    if draw_info_chip(
         painter,
         ui,
         ui.scope_id().with("viewer-info-toggle"),
         info_btn,
-        "照片信息",
         viewer.info_open,
         fg,
         theme,
@@ -962,6 +962,55 @@ fn draw_topbar(
             fg,
         );
     }
+}
+
+/// V5：顶栏「照片信息」信息胶囊（浅底 + 发丝描边 + 图标 + 文字）。
+///
+/// 替换原来的实心按钮：默认透明感浅底、描边细，打开时边框与文字换成强调色，
+/// 点击仍走 `ViewerAction::ToggleInfo`（与 I 键同一条路径）。
+fn draw_info_chip(
+    painter: &egui::Painter,
+    ui: &Ui,
+    id: egui::Id,
+    rect: Rect,
+    active: bool,
+    fg: Color32,
+    theme: &Theme,
+) -> egui::Response {
+    let resp = ui.interact(rect, id, Sense::click());
+    let radius = rect.height() / 2.0;
+    let fill = if resp.hovered() {
+        theme.sidebar_hover
+    } else if theme.dark {
+        Color32::from_white_alpha(18)
+    } else {
+        theme.viewer_card
+    };
+    painter.rect_filled(rect, radius, fill);
+    let stroke_color = if active {
+        theme.ring_outer
+    } else {
+        theme.hairline
+    };
+    let stroke_w = if active { 1.5 } else { 1.0 };
+    painter.rect_stroke(rect, radius, Stroke::new(stroke_w, stroke_color), egui::StrokeKind::Inside);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    let color = if active { theme.ring_outer } else { fg };
+    let icon_rect = Rect::from_center_size(
+        pos2(rect.left() + 14.0, rect.center().y),
+        vec2(12.0, 12.0),
+    );
+    icons::draw(painter, Icon::Info, icon_rect, color, 1.5);
+    painter.text(
+        pos2(rect.left() + 25.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        "照片信息",
+        FontId::new(11.5, egui::FontFamily::Proportional),
+        color,
+    );
+    resp.on_hover_text("照片信息 · I")
 }
 
 /// 右端「返回」胶囊的矩形（与左端同款，绘制与测试共用）。
@@ -2107,6 +2156,119 @@ mod tests {
         assert!(!v.info_open);
         v.toggle_info();
         assert!(v.info_open);
+    }
+
+    /// V5：顶栏文件名右侧是浅色/描边的信息胶囊（不是实心按钮），
+    /// 且点击它仍然切换信息栏（与 I 键同一动作 `ToggleInfo`）。
+    #[test]
+    fn v5_info_chip_is_light_outlined_and_still_toggles() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx, appearance);
+            let theme = Theme::for_appearance(appearance);
+            let rows = photos(2);
+            let mut v = Viewer::new(0);
+            // 关掉信息栏来检查「未激活」外观（浅底 + 发丝描边）。
+            v.info_open = false;
+            let lay = layout(stage_rect(), true, false);
+            let chip = info_toggle_rect(lay.top);
+            assert!(lay.top.contains_rect(chip), "{appearance:?}：胶囊必须在顶栏内");
+
+            // 第 1 帧：建立交互层，同时检查胶囊的底与描边形状
+            let input = egui::RawInput {
+                screen_rect: Some(stage_rect()),
+                max_texture_side: Some(2048),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                let _ = show(ui, &mut v, &rows, &theme, true, &[]);
+            });
+            let mut chip_text: Option<egui::Pos2> = None;
+            // 胶囊由「填充底」+「描边」两个 Rect 形状组成，分开收集。
+            let mut fills: Vec<(u8, Color32)> = Vec::new();
+            let mut strokes: Vec<Stroke> = Vec::new();
+            fn walk(
+                shape: &egui::Shape,
+                chip: Rect,
+                text: &mut Option<egui::Pos2>,
+                fills: &mut Vec<(u8, Color32)>,
+                strokes: &mut Vec<Stroke>,
+            ) {
+                match shape {
+                    egui::Shape::Vec(v) => {
+                        for s in v {
+                            walk(s, chip, text, fills, strokes);
+                        }
+                    }
+                    egui::Shape::Text(t) => {
+                        if t.galley.job.text == "照片信息" && chip.contains(t.pos) {
+                            *text = Some(t.pos);
+                        }
+                    }
+                    egui::Shape::Rect(r)
+                        if (r.rect.min - chip.min).length() < 0.5
+                            && (r.rect.max - chip.max).length() < 0.5 =>
+                    {
+                        // 底：胶囊圆角（height/2）+ 浅色填充，不是实心按钮的方角实块
+                        if r.fill != Color32::TRANSPARENT {
+                            assert!(
+                                (r.corner_radius.nw as f32 - chip.height() / 2.0).abs() < 0.5,
+                                "信息胶囊应为胶囊圆角，实际 {}",
+                                r.corner_radius.nw
+                            );
+                            fills.push((r.corner_radius.nw, r.fill));
+                        }
+                        if r.stroke.width > 0.0 {
+                            strokes.push(r.stroke);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for c in &out.shapes {
+                walk(&c.shape, chip, &mut chip_text, &mut fills, &mut strokes);
+            }
+            let expected_fill = if theme.dark {
+                Color32::from_white_alpha(18)
+            } else {
+                theme.viewer_card
+            };
+            assert_eq!(
+                fills.iter().map(|(_, f)| *f).collect::<Vec<_>>(),
+                vec![expected_fill],
+                "{appearance:?}：胶囊应是浅色底（恰好一层），不是实心按钮"
+            );
+            assert_eq!(strokes.len(), 1, "{appearance:?}：胶囊应有一层发丝描边");
+            assert_eq!(
+                strokes[0].color, theme.hairline,
+                "{appearance:?}：未打开时描边是发丝色"
+            );
+            assert!(chip_text.is_some(), "{appearance:?}：胶囊里要有「照片信息」文字");
+            out.drop_without_applying_deltas();
+
+            // 第 2/3 帧：在胶囊上按下 + 松开 → ToggleInfo
+            let pos = chip.center();
+            let mut action = None;
+            for pressed in [true, false] {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(stage_rect()),
+                    max_texture_side: Some(2048),
+                    ..Default::default()
+                };
+                input.events.push(egui::Event::PointerMoved(pos));
+                input.events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+                let out = ctx.run_ui(input, |ui| {
+                    action = show(ui, &mut v, &rows, &theme, true, &[]);
+                });
+                out.drop_without_applying_deltas();
+            }
+            assert_eq!(action, Some(ViewerAction::ToggleInfo), "{appearance:?}：点胶囊应开关信息栏");
+        }
     }
 
     /// 工具条仍有缩放 −/+，且两者都在顶栏内、不互相重叠。
