@@ -4499,17 +4499,12 @@ impl OpenPicasaApp {
                         ui.horizontal(|ui| {
                             // 默认焦点在「取消」：回车 / 空格落在取消上，
                             // 移动原文件必须再主动点一次（`M5-FS-01`）。
-                            let cancel_btn = ui.button(picasa_core::trash_plan::TRASH_CANCEL);
+                            let (confirm, cancel) = crate::trash_ui::confirm_buttons(&theme);
+                            let cancel_btn = ui.add(cancel);
                             cancel_btn.request_focus();
                             if cancel_btn.clicked() {
                                 action = crate::trash_ui::UserAction::Cancel;
                             }
-                            let confirm = egui::Button::new(
-                                egui::RichText::new(picasa_core::trash_plan::TRASH_ACTION)
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .fill(theme.danger)
-                            .corner_radius(theme.radius_btn);
                             if ui.add(confirm).clicked() {
                                 action = crate::trash_ui::UserAction::Confirm;
                             }

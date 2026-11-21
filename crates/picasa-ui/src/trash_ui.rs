@@ -7,6 +7,23 @@
 
 use picasa_core::TrashScope;
 
+use crate::theme::Theme;
+
+/// T2：废纸篓确认框的两个按钮。
+///
+/// 「移到废纸篓」是**破坏性主按钮**：实心危险红 + 白字；
+/// 「取消」保持普通（次）按钮样式，并且仍是默认焦点——
+/// 回车 / 空格落在取消上，移动原文件必须再主动点一次。
+pub fn confirm_buttons(theme: &Theme) -> (egui::Button<'static>, egui::Button<'static>) {
+    let cancel = egui::Button::new(picasa_core::trash_plan::TRASH_CANCEL);
+    let confirm = egui::Button::new(
+        egui::RichText::new(picasa_core::trash_plan::TRASH_ACTION).color(egui::Color32::WHITE),
+    )
+    .fill(theme.danger)
+    .corner_radius(theme.radius_btn);
+    (confirm, cancel)
+}
+
 /// 用户在确认框上的动作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserAction {
@@ -73,6 +90,80 @@ mod tests {
 
     fn scope(v: &[i64]) -> TrashScope {
         TrashScope::new(v.iter().copied())
+    }
+
+    /// T2：确认框里「移到废纸篓」是红色主按钮（实心危险红 + 白字），
+    /// 「取消」是普通次按钮（默认底、不是危险色）。
+    #[test]
+    fn t2_confirm_is_danger_primary_and_cancel_is_secondary() {
+        use crate::theme::{Theme, apply};
+        let ctx = egui::Context::default();
+        apply(&ctx, picasa_core::Appearance::Light);
+        let theme = Theme::for_appearance(picasa_core::Appearance::Light);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(420.0, 168.0),
+            )),
+            max_texture_side: Some(2048),
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| {
+            let (confirm, cancel) = confirm_buttons(&theme);
+            ui.add(confirm);
+            ui.add(cancel);
+        });
+        // 收集（按钮底矩形, 文字位置）两类形状。
+        let mut rects: Vec<(egui::Rect, egui::Color32)> = Vec::new();
+        let mut texts: Vec<(String, egui::Rect)> = Vec::new();
+        fn walk(shape: &egui::Shape, rects: &mut Vec<(egui::Rect, egui::Color32)>, texts: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, rects, texts);
+                    }
+                }
+                egui::Shape::Rect(r) => {
+                    if r.fill != egui::Color32::TRANSPARENT {
+                        rects.push((r.rect, r.fill));
+                    }
+                }
+                egui::Shape::Text(t) => {
+                    texts.push((t.galley.job.text.clone(), egui::Rect::from_min_size(t.pos, t.galley.size())));
+                }
+                _ => {}
+            }
+        }
+        for c in &out.shapes {
+            walk(&c.shape, &mut rects, &mut texts);
+        }
+        out.drop_without_applying_deltas();
+
+        let confirm_text = texts
+            .iter()
+            .find(|(t, _)| t == picasa_core::trash_plan::TRASH_ACTION)
+            .expect("确认框要有「移到废纸篓」");
+        let cancel_text = texts
+            .iter()
+            .find(|(t, _)| t == picasa_core::trash_plan::TRASH_CANCEL)
+            .expect("确认框要有「取消」");
+        let danger_rect = rects
+            .iter()
+            .find(|(_, fill)| *fill == theme.danger)
+            .expect("「移到废纸篓」应有危险红实心底");
+        assert!(
+            danger_rect.0.contains_rect(confirm_text.1),
+            "危险红底应包住「移到废纸篓」文字：{danger_rect:?} vs {:?}",
+            confirm_text.1
+        );
+        // 取消按钮的底不是危险红（次按钮，沿用默认样式）
+        let cancel_bg = rects
+            .iter()
+            .find(|(r, _)| r.contains_rect(cancel_text.1));
+        assert!(
+            cancel_bg.map(|(_, f)| *f) != Some(theme.danger),
+            "「取消」不能是危险红主按钮"
+        );
     }
 
     /// `AC-FS-CONFIRM`：取消不执行；Escape / 关闭同样零执行。
