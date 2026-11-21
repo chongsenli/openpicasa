@@ -969,7 +969,7 @@ fn draw_topbar(
     let track = zoom_track_rect(top);
     painter.rect_filled(track, track.height() / 2.0, theme.seg_bg);
     let mut zx = track.left() + TB_TRACK_PAD;
-    if text_button(
+    if zoom_cell(
         painter,
         ui,
         ui.scope_id().with("viewer-fit"),
@@ -984,7 +984,7 @@ fn draw_topbar(
         *action = Some(ViewerAction::ZoomFit);
     }
     zx += TB_FIT_W;
-    if text_button(
+    if zoom_cell(
         painter,
         ui,
         ui.scope_id().with("viewer-actual"),
@@ -2215,6 +2215,38 @@ fn slim_button(
     painter.text(
         pos2(rect.left() + 22.0, rect.center().y),
         Align2::LEFT_CENTER,
+        label,
+        FontId::new(11.5, egui::FontFamily::Proportional),
+        fg,
+    );
+    resp
+}
+
+/// 缩放轨道里的单元格：激活态是**白色胶囊**（原型里「适合」的选中形状），
+/// 未激活时透明、悬停给一点浅底。
+#[allow(clippy::too_many_arguments)]
+fn zoom_cell(
+    painter: &egui::Painter,
+    ui: &Ui,
+    id: egui::Id,
+    rect: Rect,
+    label: &str,
+    active: bool,
+    fg: Color32,
+    theme: &Theme,
+) -> egui::Response {
+    let resp = ui.interact(rect, id, Sense::click());
+    if active {
+        painter.rect_filled(rect.shrink2(vec2(0.0, 2.0)), 12.0, theme.seg_active);
+    } else if resp.hovered() {
+        painter.rect_filled(rect.shrink2(vec2(0.0, 2.0)), 12.0, theme.sidebar_hover);
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
         label,
         FontId::new(11.5, egui::FontFamily::Proportional),
         fg,
