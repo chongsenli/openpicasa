@@ -39,6 +39,7 @@ pub mod textures;
 pub mod theme;
 pub mod toolbar;
 pub mod topbar;
+pub mod trash_preview;
 pub mod trash_ui;
 pub mod viewer;
 

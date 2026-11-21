@@ -195,6 +195,12 @@ pub struct Library {
     pub photos_total: usize,
     /// 分页补齐是否已到底（`photos.len() >= photos_total` 时为 true）。
     pub photos_complete: bool,
+    /// `photos` 内容版本。每次换列表 / 补页 / 清空都 +1。
+    ///
+    /// 用途：UI 的确认框路径预览缓存用它判断「内存里的路径是否还作数」。
+    /// 它是 **O(1) 计数器**，不是对全库做哈希——缓存键因此不必每帧克隆或散列
+    /// 全部 id / 路径。只增不减（`wrapping_add`），溢出在实际会话里不可能发生。
+    pub photos_rev: u64,
 
     dirty_prefs: bool,
     path_to_id: HashMap<String, i64>,
@@ -271,6 +277,7 @@ impl Library {
             last_error: None,
             photos_total: 0,
             photos_complete: true,
+            photos_rev: 0,
             dirty_prefs: false,
             path_to_id: HashMap::new(),
             tree_dirty: false,
@@ -690,6 +697,8 @@ impl Library {
         self.photos = photos;
         self.photos_total = total;
         self.photos_complete = self.photos.len() >= self.photos_total;
+        // 列表整体换了一份：确认框的路径预览缓存必须失效（O(1) 版本号）。
+        self.photos_rev = self.photos_rev.wrapping_add(1);
         // 选择集与照片列表求交，避免「删了照片但 id 还在选择集里」
         let alive: HashSet<i64> = self.photos.iter().map(|p| p.id).collect();
         self.selection.retain(|id| alive.contains(id));
@@ -789,6 +798,8 @@ impl Library {
         self.photos_total = self.photos_total.max(self.photos.len() + more.len());
         self.photos.extend(more);
         self.photos_complete = self.photos.len() >= self.photos_total;
+        // 补进来的行可能包含确认集合里尚未解析出路径的 id：预览缓存同样失效。
+        self.photos_rev = self.photos_rev.wrapping_add(1);
         Ok(true)
     }
 
@@ -1682,6 +1693,7 @@ impl Library {
                 self.photos.clear();
                 self.photos_total = 0;
                 self.photos_complete = true;
+                self.photos_rev = self.photos_rev.wrapping_add(1);
                 self.selection.clear();
                 self.current = None;
                 self.tree_dirty = true;

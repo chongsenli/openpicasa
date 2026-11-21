@@ -216,6 +216,12 @@ pub struct OpenPicasaApp {
     /// 按 Esc 退出查看器。若按「现在在不在查看器」去算，就会拿图库的选择集
     /// 去比查看器的确认集合，两个规则一混，张数又会对不上。
     confirm_trash_in_viewer: bool,
+    /// 确认框的**有界路径预览**（最多 3 条），只在打开 / 范围重置 / 库数据版本
+    /// 变化时生成一次；每帧直接复用，不再遍历全部选中 id 去 `photos.find`。
+    ///
+    /// 确认张数与执行集合**不读这个缓存**，仍只认 `confirm_trash` 的
+    /// `TrashScope`（见 `draw_overlays` 的决策表）。缓存只影响预览文案。
+    trash_preview: crate::trash_preview::TrashPreviewCache,
     /// 诊断页（F 加固）是否打开
     diagnostics_open: bool,
     /// 诊断页数据（打开或动作后重取，不每帧算 `SUM(LENGTH(BLOB))`）
@@ -458,6 +464,7 @@ impl OpenPicasaApp {
             last_reload: Instant::now(),
             confirm_trash: None,
             confirm_trash_in_viewer: false,
+            trash_preview: crate::trash_preview::TrashPreviewCache::new(),
             diagnostics_open: false,
             diag_data: crate::diagnostics::DiagData::default(),
             diag_dirty: false,
@@ -4468,39 +4475,37 @@ impl OpenPicasaApp {
         // 1. 正文张数 = 已确认集合的大小 = 真正执行的集合；
         // 2. 打开期间范围一变就作废，用新范围重新确认（不拿旧张数执行新集合）；
         // 3. 取消 / Escape / 关闭窗口零执行（不动文件、不改索引）。
-        if let Some(confirmed) = self.confirm_trash.clone() {
+        // 每帧不 clone 整个确认集合：先把它从字段里**取出来**，本帧末尾再按决策
+        // 放回（Keep / Rearm）或丢弃（Execute / Close）。这样大选集上每帧也没有
+        // 一次 N 个 id 的复制。
+        if let Some(confirmed) = self.confirm_trash.take() {
             let current = self.current_trash_scope();
             // 先按「用户还没动作」过一遍决策表：范围变了就在画之前作废重画。
             let mut decision =
                 crate::trash_ui::decide(crate::trash_ui::UserAction::None, &confirmed, &current);
-            if let crate::trash_ui::Decision::Close = decision {
-                self.confirm_trash = None;
-            }
-            let mut action = crate::trash_ui::UserAction::None;
-            let shown = match &decision {
-                crate::trash_ui::Decision::Rearm(next) => next.clone(),
-                _ => confirmed.clone(),
-            };
-            if self.confirm_trash.is_some() {
+            let keep_open = !matches!(decision, crate::trash_ui::Decision::Close);
+            let action = if keep_open {
+                // `shown` 只是「这一帧画哪个集合」的借用：重画用 decision 里的
+                // 新范围，否则仍用用户确认的那一组。不 clone id 列表。
+                let shown: &TrashScope = match &decision {
+                    crate::trash_ui::Decision::Rearm(next) => next,
+                    _ => &confirmed,
+                };
                 // 按原型 v1.4：居中较大圆角对话框 + 背景遮罩 + 右对齐按钮组。
                 // 遮罩吃掉后面的点击；Escape / 点遮罩 = 取消（零执行）。
-                let paths: Vec<String> = shown
-                    .ids()
-                    .iter()
-                    .filter_map(|id| {
-                        self.lib
-                            .photos
-                            .iter()
-                            .find(|p| p.id == *id)
-                            .map(|p| p.abs_path().to_string_lossy().into_owned())
-                    })
-                    .collect();
-                action = crate::trash_ui::show_dialog(&ctx, &theme, shown.len(), &paths).action;
-            }
-            // 范围在画之前就被判定作废（confirm_trash 已清）→ 按取消处理，零执行。
-            if self.confirm_trash.is_none() && action == crate::trash_ui::UserAction::None {
-                action = crate::trash_ui::UserAction::Dismiss;
-            }
+                //
+                // 路径预览：最多 3 条，由缓存按「集合逐项相等 + photos_rev」
+                // 命中；未命中才做一次 O(N) 单遍扫描（找到 3 条即停）。
+                // 不再对每个选中 id 各扫一遍图库，也不再把全部路径收集起来。
+                // ⚠️ 张数传的是 `shown.len()`（完整确认集合），不是预览条数。
+                let preview_paths =
+                    self.trash_preview
+                        .paths(shown, self.lib.photos_rev, &self.lib.photos);
+                crate::trash_ui::show_dialog(&ctx, &theme, shown.len(), preview_paths).action
+            } else {
+                // 范围在画之前就被判定作废 → 按取消处理，零执行。
+                crate::trash_ui::UserAction::Dismiss
+            };
             if action != crate::trash_ui::UserAction::None {
                 // 动作发生时的真实范围可能又变了，重新取一次再进决策表。
                 //
@@ -4511,7 +4516,6 @@ impl OpenPicasaApp {
                 decision = crate::trash_ui::decide(action, &confirmed, &now);
                 match decision {
                     crate::trash_ui::Decision::Execute(ids) => {
-                        self.confirm_trash = None;
                         let (ok, errors) = self.lib.trash_ids(&ids);
                         self.tray_rows_dirty = true;
                         self.restore_scroll = None;
@@ -4526,12 +4530,24 @@ impl OpenPicasaApp {
                         self.confirm_trash = Some(next);
                         self.lib.toast = Some((picasa_core::trash_plan::SCOPE_CHANGED.into(), 4.0));
                     }
-                    crate::trash_ui::Decision::Close => self.confirm_trash = None,
-                    crate::trash_ui::Decision::Keep => {}
+                    crate::trash_ui::Decision::Close => {}
+                    // 未点确认、范围也没变：框留着，原样放回。
+                    crate::trash_ui::Decision::Keep => self.confirm_trash = Some(confirmed),
                 }
-            } else if let crate::trash_ui::Decision::Rearm(next) = decision {
-                self.confirm_trash = Some(next);
-                self.lib.toast = Some((picasa_core::trash_plan::SCOPE_CHANGED.into(), 4.0));
+            } else {
+                match decision {
+                    crate::trash_ui::Decision::Rearm(next) => {
+                        self.confirm_trash = Some(next);
+                        self.lib.toast = Some((picasa_core::trash_plan::SCOPE_CHANGED.into(), 4.0));
+                    }
+                    crate::trash_ui::Decision::Close => {}
+                    _ => self.confirm_trash = Some(confirmed),
+                }
+            }
+            // 关框（执行 / 取消 / Escape / 遮罩 / 范围清空）即丢预览：
+            // 下次打开哪怕集合相同也重新生成，避免拿旧会话的派生数据。
+            if self.confirm_trash.is_none() {
+                self.trash_preview.reset();
             }
         }
 

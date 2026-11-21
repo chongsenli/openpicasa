@@ -66,6 +66,10 @@ impl Default for DialogResponse {
 /// * 遮罩铺满窗口并吃掉点击（后面的删除 / 选择等操作点不到）；点遮罩 =
 ///   取消（零执行）。默认焦点在「取消」，Escape = 取消。
 /// * 只画真实张数/路径；不写「仅模拟 / 不移动真实照片」之类演示文案。
+///
+/// `count` 是**完整确认集合**的大小（`TrashScope::len()`），`paths` 只是
+/// 有上限的预览（≤3 条）。因此「另有 N 个文件」必须用 `count` 减已画条数，
+/// 不能用 `paths.len()`——否则只传 3 条预览时剩余数量就被悄悄丢掉了。
 pub fn show_dialog(
     ctx: &egui::Context,
     theme: &Theme,
@@ -134,11 +138,11 @@ pub fn show_dialog(
                                     .color(theme.text_primary),
                             );
                         }
-                        if paths.len() > shown.len() {
+                        if count > shown.len() {
                             ui.label(
                                 egui::RichText::new(format!(
                                     "… 另有 {} 个文件",
-                                    paths.len() - shown.len()
+                                    count - shown.len()
                                 ))
                                 .size(11.0)
                                 .color(theme.text_secondary),
@@ -246,6 +250,25 @@ mod tests {
         screen: egui::Vec2,
         events: Vec<egui::Event>,
     ) -> (DialogResponse, Vec<(String, egui::Rect)>, Vec<egui::Rect>) {
+        run_dialog_with(
+            ctx,
+            theme,
+            screen,
+            1,
+            &["/home/me/Pictures/2024/5/07-city.jpg".to_string()],
+            events,
+        )
+    }
+
+    /// 同 [`run_dialog`]，但可指定完整确认张数与预览路径（大集合用例）。
+    fn run_dialog_with(
+        ctx: &egui::Context,
+        theme: &Theme,
+        screen: egui::Vec2,
+        count: usize,
+        paths: &[String],
+        events: Vec<egui::Event>,
+    ) -> (DialogResponse, Vec<(String, egui::Rect)>, Vec<egui::Rect>) {
         let mut input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
             max_texture_side: Some(2048),
@@ -261,22 +284,12 @@ mod tests {
                 ..Default::default()
             },
             |_ui| {
-                let _ = show_dialog(
-                    ctx,
-                    theme,
-                    1,
-                    &["/home/me/Pictures/2024/5/07-city.jpg".to_string()],
-                );
+                let _ = show_dialog(ctx, theme, count, paths);
             },
         );
         _warm.drop_without_applying_deltas();
         let out = ctx.run_ui(input, |_ui| {
-            resp = show_dialog(
-                ctx,
-                theme,
-                1,
-                &["/home/me/Pictures/2024/5/07-city.jpg".to_string()],
-            );
+            resp = show_dialog(ctx, theme, count, paths);
         });
         let mut texts = Vec::new();
         let mut rects = Vec::new();
@@ -702,5 +715,104 @@ mod tests {
             decide(UserAction::None, &confirmed, &scope(&[10, 11])),
             Decision::Keep
         );
+    }
+
+    /// 「另有 N 个文件」按**完整确认集合**算，不因只预览 3 条而丢掉剩余数量。
+    #[test]
+    fn remaining_file_count_uses_the_full_confirmed_set() {
+        let (ctx, theme) = dialog_ctx(picasa_core::Appearance::Light);
+        let screen = egui::vec2(1280.0, 800.0);
+        let preview: Vec<String> = (1..=3)
+            .map(|i| format!("/home/me/Pictures/2024/5/0{i}-city.jpg"))
+            .collect();
+        // 1234 张的确认集合，只预览 3 条 → 另有 1231 个文件。
+        let (_r, texts, _) = run_dialog_with(&ctx, &theme, screen, 1234, &preview, Vec::new());
+        let all: String = texts
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all.contains("将把 1234 张照片"),
+            "张数必须是完整集合：{all}"
+        );
+        assert!(all.contains("另有 1231 个文件"), "剩余提示丢了：{all}");
+        assert_eq!(
+            texts.iter().filter(|(t, _)| t.contains("city.jpg")).count(),
+            3,
+            "预览只画 3 条"
+        );
+        // 预览为空（路径都还没解析出来）时仍要说清「另有 1234 个文件」。
+        let (_r, texts, _) = run_dialog_with(&ctx, &theme, screen, 1234, &[], Vec::new());
+        let all: String = texts
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("将把 1234 张照片"), "{all}");
+    }
+
+    /// 1000+ 张的确认集合：执行集合必须逐项完整（第 4 个与最后一个不能丢）。
+    #[test]
+    fn thousand_plus_set_executes_every_confirmed_id() {
+        let ids: Vec<i64> = (1..=1200).collect();
+        let confirmed = TrashScope::new(ids.iter().copied());
+        assert_eq!(confirmed.len(), 1200);
+        let executed = match decide(UserAction::Confirm, &confirmed, &confirmed) {
+            Decision::Execute(ids) => ids,
+            other => panic!("应执行完整集合，实际 {other:?}"),
+        };
+        assert_eq!(executed.len(), 1200, "不得 take(3) 截断执行");
+        assert_eq!(executed[3], 4, "第 4 个不能丢");
+        assert_eq!(executed.last().copied(), Some(1200), "最后一个不能丢");
+        assert_eq!(executed, ids, "顺序与内容都应与确认集合一致");
+    }
+
+    /// 大集合打开后范围变化（加一张 / 同数换一张）→ 作废并用新集合重新确认，
+    /// 绝不用旧的 1200 张执行新集合。
+    #[test]
+    fn large_set_scope_change_rearms_instead_of_executing() {
+        let confirmed = TrashScope::new(1..=1200);
+        // 同数不同 id：最后一个换成 9999。
+        let mut swapped: Vec<i64> = (1..=1199).collect();
+        swapped.push(9999);
+        let current = TrashScope::new(swapped.iter().copied());
+        assert_eq!(current.len(), confirmed.len());
+        assert_eq!(
+            decide(UserAction::None, &confirmed, &current),
+            Decision::Rearm(current.clone()),
+            "同数换集合也必须重新确认"
+        );
+        assert_eq!(
+            decide(UserAction::Confirm, &confirmed, &current),
+            Decision::Rearm(current.clone()),
+            "变化后点确认不得执行旧集合"
+        );
+        // 加一张也一样。
+        let more = TrashScope::new(1..=1201);
+        assert_eq!(
+            decide(UserAction::None, &confirmed, &more),
+            Decision::Rearm(more)
+        );
+    }
+
+    /// 大集合上取消 / Escape / 遮罩都零执行（`Decision::Close`，无 Execute）。
+    #[test]
+    fn large_set_cancel_and_dismiss_never_execute() {
+        let confirmed = TrashScope::new(1..=2000);
+        let current = TrashScope::new(1..=2000);
+        for a in [UserAction::Cancel, UserAction::Dismiss] {
+            assert_eq!(
+                decide(a, &confirmed, &current),
+                Decision::Close,
+                "{a:?} 零执行"
+            );
+            // 即使范围已经变了也照样零执行。
+            assert_eq!(
+                decide(a, &confirmed, &TrashScope::new(1..=3)),
+                Decision::Close,
+                "{a:?} 范围变化时仍零执行"
+            );
+        }
     }
 }
