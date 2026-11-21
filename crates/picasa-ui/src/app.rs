@@ -4012,10 +4012,7 @@ impl OpenPicasaApp {
                         .show(ui, |ui| {
                             ui.set_min_width(200.0);
                             if ui
-                                .add(
-                                    egui::Button::new(crate::index_mgr::reveal_label())
-                                        .frame(false),
-                                )
+                                .add(egui::Button::new(crate::index_mgr::reveal_label()).frame(false))
                                 .clicked()
                             {
                                 let _ = crate::macos::open_folder(std::path::Path::new(&path));
@@ -5450,10 +5447,7 @@ mod m5r5_tests {
         );
 
         let child = folder_ctx_items(false);
-        assert!(
-            child.contains(&crate::index_mgr::reveal_label()),
-            "{child:?}"
-        );
+        assert!(child.contains(&crate::index_mgr::reveal_label()), "{child:?}");
         assert!(child.contains(&"刷新此文件夹"), "{child:?}");
         assert!(
             child.contains(&"关闭此文件夹（不再显示）"),
