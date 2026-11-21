@@ -15,7 +15,12 @@ use crate::theme::Theme;
 /// 「取消」保持普通（次）按钮样式，并且仍是默认焦点——
 /// 回车 / 空格落在取消上，移动原文件必须再主动点一次。
 pub fn confirm_buttons(theme: &Theme) -> (egui::Button<'static>, egui::Button<'static>) {
-    let cancel = egui::Button::new(picasa_core::trash_plan::TRASH_CANCEL);
+    // 次按钮：芯片底 + 发丝描边，明确弱于红色主按钮。
+    let cancel = egui::Button::new(picasa_core::trash_plan::TRASH_CANCEL)
+        .fill(theme.chip_bg)
+        .stroke(egui::Stroke::new(1.0, theme.hairline))
+        .corner_radius(theme.radius_btn);
+    // 主按钮：实心危险红 + 白字。
     let confirm = egui::Button::new(
         egui::RichText::new(picasa_core::trash_plan::TRASH_ACTION).color(egui::Color32::WHITE),
     )
@@ -115,17 +120,26 @@ mod tests {
         });
         // 收集（按钮底矩形, 文字位置）两类形状。
         let mut rects: Vec<(egui::Rect, egui::Color32)> = Vec::new();
+        let mut strokes: Vec<(egui::Rect, egui::Stroke)> = Vec::new();
         let mut texts: Vec<(String, egui::Rect)> = Vec::new();
-        fn walk(shape: &egui::Shape, rects: &mut Vec<(egui::Rect, egui::Color32)>, texts: &mut Vec<(String, egui::Rect)>) {
+        fn walk(
+            shape: &egui::Shape,
+            rects: &mut Vec<(egui::Rect, egui::Color32)>,
+            strokes: &mut Vec<(egui::Rect, egui::Stroke)>,
+            texts: &mut Vec<(String, egui::Rect)>,
+        ) {
             match shape {
                 egui::Shape::Vec(v) => {
                     for s in v {
-                        walk(s, rects, texts);
+                        walk(s, rects, strokes, texts);
                     }
                 }
                 egui::Shape::Rect(r) => {
                     if r.fill != egui::Color32::TRANSPARENT {
                         rects.push((r.rect, r.fill));
+                    }
+                    if r.stroke.width > 0.0 {
+                        strokes.push((r.rect, r.stroke));
                     }
                 }
                 egui::Shape::Text(t) => {
@@ -135,7 +149,7 @@ mod tests {
             }
         }
         for c in &out.shapes {
-            walk(&c.shape, &mut rects, &mut texts);
+            walk(&c.shape, &mut rects, &mut strokes, &mut texts);
         }
         out.drop_without_applying_deltas();
 
@@ -156,13 +170,27 @@ mod tests {
             "危险红底应包住「移到废纸篓」文字：{danger_rect:?} vs {:?}",
             confirm_text.1
         );
-        // 取消按钮的底不是危险红（次按钮，沿用默认样式）
+        // 取消按钮：次按钮 = 芯片底 + 发丝描边，且绝不是危险红
         let cancel_bg = rects
             .iter()
-            .find(|(r, _)| r.contains_rect(cancel_text.1));
+            .find(|(r, _)| r.contains_rect(cancel_text.1))
+            .map(|(_, f)| *f);
+        assert_ne!(cancel_bg, Some(theme.danger), "「取消」不能是危险红主按钮");
+        assert_eq!(
+            cancel_bg,
+            Some(theme.chip_bg),
+            "「取消」应是芯片底的次按钮"
+        );
+        let cancel_strokes: Vec<egui::Stroke> = strokes
+            .iter()
+            .filter(|(r, _)| r.contains_rect(cancel_text.1))
+            .map(|(_, s)| *s)
+            .collect();
         assert!(
-            cancel_bg.map(|(_, f)| *f) != Some(theme.danger),
-            "「取消」不能是危险红主按钮"
+            cancel_strokes
+                .iter()
+                .any(|s| s.color == theme.hairline && s.width > 0.0),
+            "「取消」应有发丝描边（次按钮）：{cancel_strokes:?}"
         );
     }
 
