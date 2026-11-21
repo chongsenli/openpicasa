@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! ┌──────────────────────────────────────────────────────────────┐
-//! │ 返回  显示位置  比较  背景   [适合|100%|−|+]  文件名  [照片信息]│ 顶栏
+//! │ 返回  收藏  显示位置  比较  背景  [适合|100%|−|+]  文件名  [照片信息]│ 顶栏
 //! ├───────────────────────────────────────────────┬──────────────┤
 //! │                                               │              │
 //! │                 主图区域                       │  照片信息     │
@@ -46,7 +46,7 @@ use picasa_db::PhotoRow;
 use crate::icons::{self, Icon};
 use crate::theme::Theme;
 
-/// 顶栏高度（逻辑像素）。V4：两端都有「返回」胶囊，留 44 px。
+/// 顶栏高度（逻辑像素）。顶栏只有左端一枚「返回」胶囊（V1.4 单返回）。
 pub const TOP_H: f32 = 44.0;
 /// 底栏高度。
 pub const STATUS_H: f32 = 27.0;
@@ -201,24 +201,98 @@ pub fn layout(rect: Rect, info_open: bool, compare: bool) -> StageLayout {
     }
 }
 
+// ---- 顶栏流式布局尺寸 -----------------------------------------------------
+//
+// V1.4：工具条是**一条从左往右的流**，不再左右各锚一枚「返回」。
+// 顺序：返回 → 收藏 → 显示位置 → 比较 → 背景 → 缩放簇 → 文件名 → 信息胶囊。
+// 文件名与胶囊跟在缩放控件之后，不再被推到远右端。
+const TB_PAD: f32 = 10.0;
+const TB_BACK_W: f32 = 72.0;
+const TB_BACK_GAP: f32 = 14.0;
+const TB_HEART_W: f32 = 28.0;
+const TB_HEART_GAP: f32 = 8.0;
+const TB_REVEAL_W: f32 = 94.0;
+const TB_REVEAL_GAP: f32 = 10.0;
+const TB_COMPARE_W: f32 = 52.0;
+const TB_COMPARE_GAP: f32 = 6.0;
+const TB_BG_W: f32 = 52.0;
+const TB_BG_GAP: f32 = 12.0;
+const TB_TRACK_PAD: f32 = 4.0;
+const TB_FIT_W: f32 = 50.0;
+const TB_ACTUAL_W: f32 = 50.0;
+const TB_ZOOM_MINUS_W: f32 = 28.0;
+const TB_ZOOM_PLUS_W: f32 = 28.0;
+const TB_ZOOM_GAP: f32 = 4.0;
+const TB_TRACK_H: f32 = 28.0;
+const TB_NAME_W: f32 = 150.0;
+const TB_NAME_GAP: f32 = 14.0;
+const TB_CHIP_GAP: f32 = 8.0;
+const TB_CHIP_W: f32 = 96.0;
+
+/// 缩放簇的圆角轨道（适合 / 100% / − / + 共用一条底）。
+pub fn zoom_track_rect(top: Rect) -> Rect {
+    let x = top.left()
+        + TB_PAD
+        + TB_BACK_W
+        + TB_BACK_GAP
+        + TB_HEART_W
+        + TB_HEART_GAP
+        + TB_REVEAL_W
+        + TB_REVEAL_GAP
+        + TB_COMPARE_W
+        + TB_COMPARE_GAP
+        + TB_BG_W
+        + TB_BG_GAP;
+    Rect::from_min_size(
+        pos2(x, top.top() + 8.0),
+        vec2(
+            TB_TRACK_PAD * 2.0
+                + TB_FIT_W
+                + TB_ACTUAL_W
+                + TB_ZOOM_MINUS_W
+                + TB_ZOOM_GAP
+                + TB_ZOOM_PLUS_W,
+            TB_TRACK_H,
+        ),
+    )
+}
+
 /// 顶栏「−/+」缩放按钮的矩形（绘制与测试共用，避免测试自己猜坐标）。
 ///
 /// 返回 `(zoom_out, zoom_in)`。查看器工具条必须始终保留这两个按钮
 /// （说明书 §4.5：不能把适合 / 100% / 200% 三按钮作为唯一缩放）。
 pub fn zoom_button_rects(top: Rect) -> (Rect, Rect) {
-    // 左端：返回胶囊 78 + 间距 10 + 收藏 32 + 显示位置 94 + 比较 58 + 背景 62
-    //       + 适合 54 + 100% 54 → 起点 442。
-    let x = top.left() + 10.0 + 78.0 + 10.0 + 32.0 + 94.0 + 58.0 + 62.0 + 54.0 + 54.0;
-    let y = top.top() + 10.0;
+    let track = zoom_track_rect(top);
+    let x = track.left() + TB_TRACK_PAD + TB_FIT_W + TB_ACTUAL_W;
+    let y = track.top() + 2.0;
     (
-        Rect::from_min_size(pos2(x, y), vec2(28.0, 24.0)),
-        Rect::from_min_size(pos2(x + 32.0, y), vec2(28.0, 24.0)),
+        Rect::from_min_size(pos2(x, y), vec2(TB_ZOOM_MINUS_W, 24.0)),
+        Rect::from_min_size(
+            pos2(x + TB_ZOOM_MINUS_W + TB_ZOOM_GAP, y),
+            vec2(TB_ZOOM_PLUS_W, 24.0),
+        ),
     )
 }
 
-/// 顶栏「照片信息」开关的矩形（右端「返回」胶囊左侧）。
+/// 顶栏「照片信息」开关的矩形：紧跟固定文件名槽位之后，不锚定右端。
 pub fn info_toggle_rect(top: Rect) -> Rect {
-    Rect::from_min_size(pos2(top.right() - 200.0, top.top() + 10.0), vec2(96.0, 24.0))
+    let track = zoom_track_rect(top);
+    Rect::from_min_size(
+        pos2(
+            track.right() + TB_NAME_GAP + TB_NAME_W + TB_CHIP_GAP,
+            top.top() + 10.0,
+        ),
+        vec2(TB_CHIP_W, 24.0),
+    )
+}
+
+/// 顶栏文件名槽位（右对齐到信息胶囊左侧 8 px）。
+pub fn filename_slot_rect(top: Rect) -> Rect {
+    let track = zoom_track_rect(top);
+    Rect::from_min_size(
+        pos2(track.right() + TB_NAME_GAP, top.top()),
+        vec2(TB_NAME_W, top.height()),
+    )
 }
 
 /// 胶片条的一个槽位：照片下标 + 屏幕矩形。
@@ -764,7 +838,7 @@ fn draw_topbar(
     action: &mut Option<ViewerAction>,
 ) {
     let top = lay.top;
-    let light = theme.dark == false;
+    let light = !theme.dark;
     // V1：亮色展厅的顶栏是浅色（浅底 + 深字），不再叠一块深色暗房画布。
     let (bar_bg, fg) = if light {
         (theme.viewer_chrome_bg, Color32::from_black_alpha(215))
@@ -776,11 +850,18 @@ fn draw_topbar(
         [top.left_bottom(), top.right_bottom()],
         Stroke::new(1.0, theme.hairline),
     );
-    let mut x = top.left() + 10.0;
 
-    // V4：左右两端各一枚「返回」胶囊（左端回库，右端同样可退出）。
-    let left_back = Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(78.0, 24.0));
-    draw_back_pill(painter, ui, ui.scope_id().with("viewer-back"), left_back, theme, fg);
+    // V1.4：**单**返回胶囊，只有左端一枚；右侧不再重复。
+    let mut x = top.left() + TB_PAD;
+    let left_back = Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(TB_BACK_W, 24.0));
+    draw_back_pill(
+        painter,
+        ui,
+        ui.scope_id().with("viewer-back"),
+        left_back,
+        theme,
+        fg,
+    );
     if ui
         .interact(
             left_back,
@@ -791,10 +872,13 @@ fn draw_topbar(
     {
         *action = Some(ViewerAction::Close);
     }
-    x = left_back.right() + 10.0;
+    x = left_back.right() + TB_BACK_GAP;
 
-    // 收藏（只读状态）+ 显示位置
-    let fav = Rect::from_center_size(pos2(x + 14.0, top.center().y), vec2(28.0, 24.0));
+    // 收藏（只读状态）
+    let fav = Rect::from_center_size(
+        pos2(x + TB_HEART_W / 2.0, top.center().y),
+        vec2(TB_HEART_W, 24.0),
+    );
     icons::draw(
         painter,
         Icon::Heart,
@@ -808,13 +892,13 @@ fn draw_topbar(
     } else {
         "未收藏"
     });
-    x += 32.0;
+    x = fav.right() + TB_HEART_GAP;
 
     if slim_button(
         painter,
         ui,
         ui.scope_id().with("viewer-reveal"),
-        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(88.0, 24.0)),
+        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(TB_REVEAL_W, 24.0)),
         Icon::Reveal,
         reveal_label(),
         fg,
@@ -823,14 +907,14 @@ fn draw_topbar(
     {
         *action = Some(ViewerAction::Reveal);
     }
-    x += 94.0;
+    x += TB_REVEAL_W + TB_REVEAL_GAP;
 
     // 比较：只有至少两张时才点亮；状态如实反映当前是否并排。
     if text_button(
         painter,
         ui,
         ui.scope_id().with("viewer-compare"),
-        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(52.0, 24.0)),
+        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(TB_COMPARE_W, 24.0)),
         "比较",
         viewer.compare,
         fg,
@@ -840,12 +924,12 @@ fn draw_topbar(
     {
         *action = Some(ViewerAction::ToggleCompare);
     }
-    x += 58.0;
+    x += TB_COMPARE_W + TB_COMPARE_GAP;
     if text_button(
         painter,
         ui,
         ui.scope_id().with("viewer-bg"),
-        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(52.0, 24.0)),
+        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(TB_BG_W, 24.0)),
         "背景",
         false,
         fg,
@@ -855,14 +939,16 @@ fn draw_topbar(
     {
         *action = Some(ViewerAction::ToggleBg);
     }
-    x += 62.0;
 
-    // 缩放簇：适合 / 100% / − / +
+    // 缩放簇：一条圆角轨道内「适合 / 100% / − / +」。
+    let track = zoom_track_rect(top);
+    painter.rect_filled(track, track.height() / 2.0, theme.seg_bg);
+    let mut zx = track.left() + TB_TRACK_PAD;
     if text_button(
         painter,
         ui,
         ui.scope_id().with("viewer-fit"),
-        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(50.0, 24.0)),
+        Rect::from_min_size(pos2(zx, track.top() + 2.0), vec2(TB_FIT_W, 24.0)),
         "适合",
         viewer.fit_pending,
         fg,
@@ -872,12 +958,12 @@ fn draw_topbar(
     {
         *action = Some(ViewerAction::ZoomFit);
     }
-    x += 54.0;
+    zx += TB_FIT_W;
     if text_button(
         painter,
         ui,
         ui.scope_id().with("viewer-actual"),
-        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(50.0, 24.0)),
+        Rect::from_min_size(pos2(zx, track.top() + 2.0), vec2(TB_ACTUAL_W, 24.0)),
         "100%",
         (viewer.zoom - 1.0).abs() < 0.001,
         fg,
@@ -887,7 +973,6 @@ fn draw_topbar(
     {
         *action = Some(ViewerAction::ZoomActual);
     }
-    x += 54.0;
     let (zoom_out_rect, zoom_in_rect) = zoom_button_rects(top);
     if text_button(
         painter,
@@ -917,16 +1002,26 @@ fn draw_topbar(
     {
         *action = Some(ViewerAction::ZoomIn);
     }
-    let _ = x;
 
-    // 右端：「照片信息」开关 + 同名「返回」胶囊（V4 两端都有返回）。
-    // V5：文件名右侧是**浅色/描边的信息胶囊**（不再是实心按钮），仍可点开关。
-    let info_btn = info_toggle_rect(top);
+    // 文件名：紧跟缩放簇之后的固定槽位，右对齐；再往右才是信息胶囊。
+    // 不再被推到远右端（V1.4 原型里两者都贴着缩放控件）。
+    let name_slot = filename_slot_rect(top);
+    let chip = info_toggle_rect(top);
+    if name_slot.width() > 20.0 {
+        painter.with_clip_rect(name_slot).text(
+            pos2(name_slot.right(), top.center().y),
+            Align2::RIGHT_CENTER,
+            &row.name,
+            FontId::new(12.0, egui::FontFamily::Proportional),
+            fg,
+        );
+    }
+
     if draw_info_chip(
         painter,
         ui,
         ui.scope_id().with("viewer-info-toggle"),
-        info_btn,
+        chip,
         viewer.info_open,
         fg,
         theme,
@@ -934,33 +1029,6 @@ fn draw_topbar(
     .clicked()
     {
         *action = Some(ViewerAction::ToggleInfo);
-    }
-    let right_back = right_back_rect(top);
-    draw_back_pill(painter, ui, ui.scope_id().with("viewer-back-right"), right_back, theme, fg);
-    if ui
-        .interact(
-            right_back,
-            ui.scope_id().with("viewer-back-right-hit"),
-            Sense::click(),
-        )
-        .clicked()
-    {
-        *action = Some(ViewerAction::Close);
-    }
-
-    // 文件名（居中裁剪在缩放簇与右侧控件之间）
-    let name_clip = Rect::from_min_max(
-        pos2((x + 12.0).max(info_btn.left() - 240.0), top.top()),
-        pos2(info_btn.left() - 12.0, top.bottom()),
-    );
-    if name_clip.width() > 20.0 {
-        painter.with_clip_rect(name_clip).text(
-            pos2(name_clip.right(), top.center().y),
-            Align2::RIGHT_CENTER,
-            &row.name,
-            FontId::new(12.0, egui::FontFamily::Proportional),
-            fg,
-        );
     }
 }
 
@@ -1013,12 +1081,7 @@ fn draw_info_chip(
     resp.on_hover_text("照片信息 · I")
 }
 
-/// 右端「返回」胶囊的矩形（与左端同款，绘制与测试共用）。
-pub fn right_back_rect(top: Rect) -> Rect {
-    Rect::from_min_size(pos2(top.right() - 92.0, top.top() + 10.0), vec2(78.0, 24.0))
-}
-
-/// 两端统一的「返回」胶囊：圆角浅片 + 左箭头 + 文字。
+/// 唯一的「返回」胶囊：圆角浅片 + 左箭头 + 文字（V1.4 只在左端）。
 fn draw_back_pill(
     painter: &egui::Painter,
     ui: &Ui,
@@ -2748,24 +2811,67 @@ mod tests {
         assert!(all2.contains("旅行"), "{all2}");
     }
 
-    /// V4：看图顶栏左右两端都要有「返回」胶囊。
+    /// V1.4：顶栏**只有一个**返回胶囊（左端），右侧不再重复返回。
+    ///
+    /// 这条取代了旧的「两端各一枚返回」要求：原型 `shots-v1.4` 的
+    /// light/dark viewer 顶栏都只有左侧一枚返回，右侧是文件名 + 信息胶囊。
     #[test]
-    fn topbar_has_back_pills_on_both_ends() {
+    fn topbar_has_a_single_back_pill_on_the_left() {
         let lay = layout(stage_rect(), true, false);
-        let right = right_back_rect(lay.top);
-        assert!(lay.top.contains_rect(right), "右端返回胶囊必须在顶栏内");
-        assert!(right.left() > lay.top.center().x, "右端胶囊应在右半区");
-        // 左端胶囊从左边距开始
         let rows = photos(3);
         let mut v = Viewer::new(0);
         let (_a, texts) = run_stage(&mut v, &rows, Appearance::Light, &[]);
         let backs = texts.iter().filter(|t| t.as_str() == "返回").count();
-        assert!(backs >= 2, "两端各一枚「返回」，实际 {backs}：{texts:?}");
-        // 两端胶囊与「照片信息」/缩放按钮不重叠
+        assert_eq!(backs, 1, "顶栏应只有一枚「返回」：{texts:?}");
+        // 唯一那枚在左端；信息胶囊与缩放按钮都在它右侧，且互不重叠。
+        let back = Rect::from_min_size(
+            pos2(lay.top.left() + TB_PAD, lay.top.top() + 10.0),
+            vec2(TB_BACK_W, 24.0),
+        );
+        assert!(lay.top.contains_rect(back));
+        assert!(back.left() < lay.top.center().x, "返回应在左端");
         let info = info_toggle_rect(lay.top);
-        assert!(!right.intersects(info));
+        assert!(!back.intersects(info));
         let (minus, plus) = zoom_button_rects(lay.top);
-        assert!(!right.intersects(minus) && !right.intersects(plus));
+        assert!(!back.intersects(minus) && !back.intersects(plus));
+    }
+
+    /// V1.4：工具栏是一条左→右的流：返回 → 收藏 → 显示位置 → 比较 → 背景
+    /// → 缩放簇 → 文件名 → 照片信息胶囊。
+    ///
+    /// 原型里文件名与信息胶囊紧贴缩放控件，**不再**锚定远右端；本测试用几何
+    /// 位置钉住顺序，同时保证所有控件都还在顶栏内、互不重叠。
+    #[test]
+    fn topbar_flows_left_to_right_and_ends_after_the_zoom_cluster() {
+        let lay = layout(stage_rect(), true, false);
+        let top = lay.top;
+        let track = zoom_track_rect(top);
+        let name = filename_slot_rect(top);
+        let chip = info_toggle_rect(top);
+        assert!(top.contains_rect(track), "{track:?} 应在顶栏内");
+        assert!(top.contains_rect(chip), "{chip:?} 应在顶栏内");
+        // 顺序：缩放簇 → 文件名 → 信息胶囊（都在缩放之后，不是两端锚定）
+        assert!(track.right() < name.left(), "文件名应在缩放簇之后");
+        assert!(name.right() <= chip.left(), "胶囊应在文件名之后");
+        assert!(!track.intersects(name) && !name.intersects(chip));
+        // 不再锚定远右：胶囊右端离顶栏右边界还有一大段（不是 right-200 那种）
+        assert!(
+            top.right() - chip.right() > top.width() * 0.25,
+            "胶囊不应贴近/锚定右端：chip={chip:?} top={top:?}"
+        );
+        // 缩放簇内部顺序：适合 → 100% → − → +
+        let (minus, plus) = zoom_button_rects(top);
+        assert!(track.contains_rect(minus) && track.contains_rect(plus));
+        assert!(minus.right() < plus.left());
+        // 视觉断言：只有一枚返回；文件名与胶囊都真的画出来了。
+        let rows = photos(3);
+        let mut v = Viewer::new(0);
+        let (_a, texts) = run_stage(&mut v, &rows, Appearance::Light, &[]);
+        let all = texts.join("\n");
+        assert_eq!(texts.iter().filter(|t| t.as_str() == "返回").count(), 1);
+        assert!(all.contains("IMG_0001") || all.contains("19-fog"), "{all}");
+        assert!(all.contains("照片信息"), "{all}");
+        assert!(all.contains("适合") && all.contains("100%"), "{all}");
     }
 
     /// 换页重置缩放与适合标记（翻到下一张应回「适合」，不残留上一张的 400%）。
