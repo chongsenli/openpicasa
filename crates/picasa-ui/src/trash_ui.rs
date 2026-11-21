@@ -143,7 +143,10 @@ mod tests {
                     }
                 }
                 egui::Shape::Text(t) => {
-                    texts.push((t.galley.job.text.clone(), egui::Rect::from_min_size(t.pos, t.galley.size())));
+                    texts.push((
+                        t.galley.job.text.clone(),
+                        egui::Rect::from_min_size(t.pos, t.galley.size()),
+                    ));
                 }
                 _ => {}
             }
@@ -176,11 +179,7 @@ mod tests {
             .find(|(r, _)| r.contains_rect(cancel_text.1))
             .map(|(_, f)| *f);
         assert_ne!(cancel_bg, Some(theme.danger), "「取消」不能是危险红主按钮");
-        assert_eq!(
-            cancel_bg,
-            Some(theme.chip_bg),
-            "「取消」应是芯片底的次按钮"
-        );
+        assert_eq!(cancel_bg, Some(theme.chip_bg), "「取消」应是芯片底的次按钮");
         let cancel_strokes: Vec<egui::Stroke> = strokes
             .iter()
             .filter(|(r, _)| r.contains_rect(cancel_text.1))

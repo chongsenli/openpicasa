@@ -2172,7 +2172,10 @@ mod tests {
             v.info_open = false;
             let lay = layout(stage_rect(), true, false);
             let chip = info_toggle_rect(lay.top);
-            assert!(lay.top.contains_rect(chip), "{appearance:?}：胶囊必须在顶栏内");
+            assert!(
+                lay.top.contains_rect(chip),
+                "{appearance:?}：胶囊必须在顶栏内"
+            );
 
             // 第 1 帧：建立交互层，同时检查胶囊的底与描边形状
             let input = egui::RawInput {
@@ -2243,7 +2246,10 @@ mod tests {
                 strokes[0].color, theme.hairline,
                 "{appearance:?}：未打开时描边是发丝色"
             );
-            assert!(chip_text.is_some(), "{appearance:?}：胶囊里要有「照片信息」文字");
+            assert!(
+                chip_text.is_some(),
+                "{appearance:?}：胶囊里要有「照片信息」文字"
+            );
             out.drop_without_applying_deltas();
 
             // 第 2/3 帧：在胶囊上按下 + 松开 → ToggleInfo
@@ -2267,7 +2273,11 @@ mod tests {
                 });
                 out.drop_without_applying_deltas();
             }
-            assert_eq!(action, Some(ViewerAction::ToggleInfo), "{appearance:?}：点胶囊应开关信息栏");
+            assert_eq!(
+                action,
+                Some(ViewerAction::ToggleInfo),
+                "{appearance:?}：点胶囊应开关信息栏"
+            );
         }
     }
 

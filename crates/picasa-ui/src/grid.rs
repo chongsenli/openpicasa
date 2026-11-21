@@ -2148,18 +2148,12 @@ mod tests {
         crate::theme::apply(&ctx, picasa_core::Appearance::Light);
         let theme = Theme::for_appearance(picasa_core::Appearance::Light);
         let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(
-                egui::Pos2::ZERO,
-                vec2(1200.0, 820.0),
-            )),
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 820.0))),
             max_texture_side: Some(2048),
             ..Default::default()
         };
         let out = ctx.run_ui(input, |ui| {
-            let bar = Rect::from_min_size(
-                ui.max_rect().min,
-                vec2(600.0, Metrics::GROUP_HEADER_H),
-            );
+            let bar = Rect::from_min_size(ui.max_rect().min, vec2(600.0, Metrics::GROUP_HEADER_H));
             draw_group_header(ui.painter(), bar, "2020年9月14日", 37, &theme);
         });
         let mut texts: Vec<(String, egui::Pos2)> = Vec::new();
