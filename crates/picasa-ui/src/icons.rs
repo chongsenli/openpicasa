@@ -90,6 +90,15 @@ pub enum Icon {
     Tag,
     /// 说明（对话气泡 + 两条横线文本）
     Caption,
+    // ---- M5-V1 r7：查看器信息栏的字段图标（原型 v1.4）----
+    /// 日历（拍摄日期）
+    Calendar,
+    /// 文档（文件 / 格式 / 大小）
+    File,
+    /// 图片（像素尺寸）
+    Image,
+    /// 相机（机身 / 镜头）
+    Camera,
 }
 
 /// 在 `rect` 内绘制图标。线条宽度按 `stroke` 缩放（Retina 下自动变细）。
@@ -214,6 +223,43 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
         Icon::Close => {
             painter.line_segment([ip(0.15, 0.15), ip(0.85, 0.85)], s);
             painter.line_segment([ip(0.85, 0.15), ip(0.15, 0.85)], s);
+        }
+        // 日历：圆角方框 + 顶部装订线 + 两个挂耳
+        Icon::Calendar => {
+            let body = Rect::from_min_max(ip(0.08, 0.2), ip(0.92, 0.94));
+            painter.rect_stroke(body, 2.0, s, StrokeKind::Middle);
+            painter.line_segment([ip(0.08, 0.4), ip(0.92, 0.4)], s);
+            painter.line_segment([ip(0.3, 0.1), ip(0.3, 0.28)], s);
+            painter.line_segment([ip(0.7, 0.1), ip(0.7, 0.28)], s);
+        }
+        // 文档：纸张轮廓 + 右上折角 + 两条正文线
+        Icon::File => {
+            let body = Rect::from_min_max(ip(0.2, 0.06), ip(0.8, 0.94));
+            painter.rect_stroke(body, 2.0, s, StrokeKind::Middle);
+            painter.line_segment([ip(0.58, 0.06), ip(0.8, 0.28)], s);
+            painter.line_segment([ip(0.58, 0.06), ip(0.58, 0.28)], s);
+            painter.line_segment([ip(0.58, 0.28), ip(0.8, 0.28)], s);
+            painter.line_segment([ip(0.35, 0.52), ip(0.65, 0.52)], s);
+            painter.line_segment([ip(0.35, 0.7), ip(0.65, 0.7)], s);
+        }
+        // 图片：方框 + 太阳 + 山脊
+        Icon::Image => {
+            let body = Rect::from_min_max(ip(0.06, 0.14), ip(0.94, 0.86));
+            painter.rect_stroke(body, 2.0, s, StrokeKind::Middle);
+            painter.circle_stroke(ip(0.34, 0.38), rect.width() * 0.08, s);
+            painter.line_segment([ip(0.14, 0.76), ip(0.42, 0.5)], s);
+            painter.line_segment([ip(0.42, 0.5), ip(0.62, 0.7)], s);
+            painter.line_segment([ip(0.62, 0.7), ip(0.74, 0.58)], s);
+            painter.line_segment([ip(0.74, 0.58), ip(0.9, 0.76)], s);
+        }
+        // 相机：机身 + 顶部取景凸起 + 镜头圈
+        Icon::Camera => {
+            let body = Rect::from_min_max(ip(0.04, 0.28), ip(0.96, 0.86));
+            painter.rect_stroke(body, 3.0, s, StrokeKind::Middle);
+            painter.line_segment([ip(0.3, 0.28), ip(0.36, 0.14)], s);
+            painter.line_segment([ip(0.36, 0.14), ip(0.64, 0.14)], s);
+            painter.line_segment([ip(0.64, 0.14), ip(0.7, 0.28)], s);
+            painter.circle_stroke(ip(0.5, 0.57), rect.width() * 0.17, s);
         }
         // 文件夹：一个梯形口袋 + 一个标签页（16 px 下仍可辨认的最小形状）
         Icon::Folder => {
@@ -627,7 +673,10 @@ mod tests {
         for (i, p) in pts.iter().enumerate() {
             let r = ((p.x - c.x).powi(2) + (p.y - c.y).powi(2)).sqrt();
             let expect = if i % 2 == 0 { 10.0 } else { 4.5 };
-            assert!((r - expect).abs() < 0.001, "point {i} radius {r} != {expect}");
+            assert!(
+                (r - expect).abs() < 0.001,
+                "point {i} radius {r} != {expect}"
+            );
         }
         // 第一个点在正上方
         assert!((pts[0].x - c.x).abs() < 0.001);
