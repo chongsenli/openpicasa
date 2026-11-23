@@ -54,8 +54,17 @@ pub const STATUS_H: f32 = 27.0;
 pub const CAPTION_H: f32 = 78.0;
 /// 胶片条高度。
 pub const FILM_H: f32 = 82.0;
-/// 右侧「照片信息」栏宽度。打开时**推动**主图与胶片条（V2 要放缩略图 + 四宫格）。
-pub const INFO_W: f32 = 336.0;
+/// 右侧「照片信息」栏占窗口宽度的比例。
+///
+/// 原型 v1.4（`v14-light-viewer-info` / `v14-dark-viewer-info`，1280 逻辑宽）
+/// 的信息栏是 **320 逻辑像素 = 25%**，主图占 75%；r7 产品实窗在 1920 逻辑宽下
+/// 只有 336（17.5%），所以看起来「过窄」。这里按同一比例取宽，窄窗再用上下限
+/// 兜底（下限保证缩略图 + 四小卡还能排开，上限避免超宽屏把主图压得太小）。
+pub const INFO_RATIO: f32 = 0.25;
+/// 信息栏宽度下限（1280 逻辑宽时正好取下限之外的原型宽度 320）。
+pub const INFO_MIN_W: f32 = 300.0;
+/// 信息栏宽度上限。
+pub const INFO_MAX_W: f32 = 480.0;
 /// 缩放上下限（说明书 §4.5：约 5%–800%）。
 pub const ZOOM_MIN: f32 = 0.05;
 pub const ZOOM_MAX: f32 = 8.0;
@@ -135,6 +144,18 @@ pub struct StageLayout {
 ///
 /// `compare` 必须是「已经有下一张」的最终判定——调用方不应把
 /// `viewer.compare` 直接传进来，否则序列末尾会得到一个假窗格。
+/// 信息栏宽度按 [`INFO_RATIO`] 取窗口宽度的比例（原型 25%），再夹在
+/// [`INFO_MIN_W`]..[`INFO_MAX_W`] 之间：1280 逻辑宽 → 320（与原型一致），
+/// 1920 → 480，窄窗不小于下限、超宽屏不再继续变胖。
+pub fn info_panel_width(body_w: f32) -> f32 {
+    if body_w <= 0.0 {
+        return 0.0;
+    }
+    (body_w * INFO_RATIO)
+        .clamp(INFO_MIN_W.min(body_w), INFO_MAX_W)
+        .max(0.0)
+}
+
 pub fn layout(rect: Rect, info_open: bool, compare: bool) -> StageLayout {
     let top = Rect::from_min_size(rect.min, vec2(rect.width(), TOP_H));
     let status = Rect::from_min_size(
@@ -145,8 +166,8 @@ pub fn layout(rect: Rect, info_open: bool, compare: bool) -> StageLayout {
         pos2(rect.left(), top.bottom()),
         pos2(rect.right(), status.top()),
     );
-    // 窄窗时信息栏最多占 35%，避免把主图挤成一条缝（推窄而不是遮挡仍成立）。
-    let info_w = INFO_W.min(body.width() * 0.35).max(0.0);
+    // 按原型比例取宽（见 [`INFO_RATIO`]），上下限兜底；仍是推窄而不是遮挡。
+    let info_w = info_panel_width(body.width());
     let info_panel = info_open.then(|| {
         Rect::from_min_size(
             pos2(body.right() - info_w, body.top()),
@@ -614,20 +635,15 @@ pub fn show(
     let compare_active = viewer.compare_active(photos.len());
     let lay = layout(rect, viewer.info_open, compare_active);
 
-    // ---- V1：照片卡片（圆角 + 留白；亮色是浅色展厅，暗色是暗房） ----
-    if is_bright(bg) {
-        // 浅色展厅：卡片白底 + 极淡描边，照片不直接贴在浅灰底上。
-        painter.rect_filled(lay.card, theme.radius_card, theme.viewer_card);
-        painter.rect_stroke(
-            lay.card,
-            theme.radius_card,
-            Stroke::new(1.0, theme.hairline),
-            egui::StrokeKind::Inside,
-        );
-    } else {
-        // 暗房：卡片比背景略深一档，仍是圆角（不改成黑/灰/白/棋盘）。
-        painter.rect_filled(lay.card, theme.radius_card, theme.viewer_card);
-    }
+    // ---- V1：照片自身的圆角（亮色大圆角 / 暗色小圆角） ----
+    //
+    // r7 产品把圆角做在**白色外框**上、图片本身是直角，实窗里看起来就是
+    // 「方图套在圆角白框里」。原型是照片本身有圆角、直接落在展厅底色上
+    // （亮色 21、暗色 5），没有那一圈白色画框。这里改成：不再铺满整块卡片，
+    // 只在照片自己的矩形上给一层落影，圆角加在图片本身（见 `paint_rounded_image`）。
+    //
+    // 暗房仍保留一档略深的底（照片落在比背景更深一档的面上），只是同一尺寸，
+    // 不会在照片外加一圈可见的浅色边框。
 
     // ---- 主图尺寸 / 适合 ----
     let (iw, ih) = if viewer.tex_size.x > 0.0 {
@@ -671,21 +687,33 @@ pub fn show(
     // 主图裁到自己的窗格里：比较模式下 100% 的大图会超出半屏，不裁就会画到
     // 相邻窗格 / 信息栏上（视觉上是「比较图被主图盖住」）。
     let main_painter = painter.with_clip_rect(pane.intersect(rect));
+    let full_uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    let photo_r = photo_radius(theme);
+    // 原型是照片直接落在展厅底色上 + 一层柔和落影，不是一圈白色画框；
+    // 落影跟着照片自己的圆角走，所以圆角形状在亮/暗两边都成立。
+    let photo_shadow = if theme.dark {
+        egui::Shadow {
+            offset: [0, 6],
+            blur: 18,
+            spread: 0,
+            color: Color32::from_black_alpha(120),
+        }
+    } else {
+        egui::Shadow {
+            offset: [0, 6],
+            blur: 20,
+            spread: 0,
+            color: Color32::from_black_alpha(48),
+        }
+    };
+    if viewer.tex.is_some() || viewer.preview.is_some() {
+        main_painter.add(photo_shadow.as_shape(img_rect, photo_r));
+    }
     if let Some(tex) = viewer.tex.as_ref() {
-        main_painter.image(
-            tex.id(),
-            img_rect,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        paint_rounded_image(&main_painter, tex.id(), img_rect, photo_r, full_uv);
     } else if let Some((tex_id, psize)) = viewer.preview {
         let prect = fit_rect(img_rect, psize);
-        main_painter.image(
-            tex_id,
-            prect,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        paint_rounded_image(&main_painter, tex_id, prect, photo_r, full_uv);
         main_painter.text(
             pos2(pane.center().x, pane.bottom() - 18.0),
             Align2::CENTER_CENTER,
@@ -709,12 +737,8 @@ pub fn show(
         let right_painter = painter.with_clip_rect(right.intersect(rect));
         if let Some((_, tex, csize)) = viewer.compare_tex.as_ref() {
             let crect = fit_rect(right, *csize);
-            right_painter.image(
-                tex.id(),
-                crect,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            right_painter.add(photo_shadow.as_shape(crect, photo_r));
+            paint_rounded_image(&right_painter, tex.id(), crect, photo_r, full_uv);
             if let Some(next) = photos.get(viewer.index + 1) {
                 right_painter.text(
                     pos2(crect.center().x, crect.bottom() + 14.0),
@@ -1540,21 +1564,23 @@ fn draw_info_panel(
         egui::StrokeKind::Inside,
     );
 
-    let pad = 16.0;
+    // 内边距 18、标题字号 14、关闭钮直径 26：与原型卡片的内衬一致
+    // （原型 pad 18、标题 ink 顶距卡顶 24、关闭钮 26）。
+    let pad = 18.0;
     let left = card.left() + pad;
     let right = card.right() - pad;
     let inner_w = (right - left).max(0.0);
 
     painter.text(
-        pos2(left, card.top() + 15.0),
+        pos2(left, card.top() + 21.0),
         Align2::LEFT_TOP,
         "照片信息",
-        FontId::new(13.5, egui::FontFamily::Proportional),
+        FontId::new(14.0, egui::FontFamily::Proportional),
         theme.text_primary,
     );
     let close = Rect::from_center_size(
-        pos2(card.right() - pad - 11.0, card.top() + 24.0),
-        vec2(22.0, 22.0),
+        pos2(card.right() - pad - 13.0, card.top() + 28.0),
+        vec2(26.0, 26.0),
     );
     let close_resp = ui.interact(close, id.with("close"), Sense::click());
     let close_bg = if close_resp.hovered() {
@@ -1575,7 +1601,7 @@ fn draw_info_panel(
     close_resp.clone().on_hover_text("关闭照片信息");
 
     // 直方图钉在卡片底部（原型里它总在最下方），中间内容超出就裁剪。
-    let hist_top = card.bottom() - 92.0;
+    let hist_top = card.bottom() - 84.0;
     let content_clip = Rect::from_min_max(
         pos2(card.left(), card.top()),
         pos2(card.right(), (hist_top - 6.0).max(card.top())),
@@ -1660,7 +1686,7 @@ fn draw_info_light(
     left: f32,
     right: f32,
     inner_w: f32,
-    mut y: f32,
+    _y: f32,
     viewer: &Viewer,
     theme: &Theme,
     row: &PhotoRow,
@@ -1669,27 +1695,35 @@ fn draw_info_light(
     let e = &viewer.exif;
 
     // 头部：大缩略图 + 标题（文件名去扩展名）+ 文件名。
-    let thumb = Rect::from_min_size(pos2(left, y), vec2(56.0, 56.0));
+    //
+    // 原型 v1.4（1280 逻辑宽）：缩略图 64×64 落在标题下 58、左边 18；
+    // 标题字号 16、文件名 12，间距 13。r7 产品用 56 / 14.5 / 11 才显得
+    // 「标题缩略图组过紧」，这里按原型取。
+    let thumb = Rect::from_min_size(pos2(left, card.top() + 58.0), vec2(64.0, 64.0));
     draw_info_thumb(clip, viewer, thumb, theme);
-    let text_x = thumb.right() + 12.0;
+    let text_x = thumb.right() + 13.0;
     let text_w = (right - text_x).max(40.0);
     clip.text(
-        pos2(text_x, y + 10.0),
+        pos2(text_x, thumb.top() + 11.0),
         Align2::LEFT_TOP,
-        truncate_to_width(clip, &display_title(row), 14.5, text_w, theme.text_primary),
-        FontId::new(14.5, egui::FontFamily::Proportional),
+        truncate_to_width(clip, &display_title(row), 16.0, text_w, theme.text_primary),
+        FontId::new(16.0, egui::FontFamily::Proportional),
         theme.text_primary,
     );
     clip.text(
-        pos2(text_x, y + 32.0),
+        pos2(text_x, thumb.top() + 37.0),
         Align2::LEFT_TOP,
-        truncate_to_width(clip, &row.name, 11.0, text_w, theme.text_secondary),
-        FontId::new(11.0, egui::FontFamily::Proportional),
+        truncate_to_width(clip, &row.name, 12.0, text_w, theme.text_secondary),
+        FontId::new(12.0, egui::FontFamily::Proportional),
         theme.text_secondary,
     );
-    y += 70.0;
 
     // 日期 / 文件 / 尺寸 / 路径：圆形图标 + 两行字段，行间细分隔。
+    //
+    // 原型行距 57：字段内容 32（图标 32 圆、值 14、注释 11.5）+ 11 到分隔线
+    // + 14 到下一行内容。r7 产品是 46 / 图标 28 / 13 / 10.5，读起来明显更挤。
+    const ROW_H: f32 = 57.0;
+    const SEP_AT: f32 = 43.0;
     let path = shorten_path(&row.folder_path);
     let fields: [(&str, Icon, String, String); 4] = [
         (
@@ -1716,23 +1750,18 @@ fn draw_info_light(
         ),
         ("路径", Icon::Folder, path, "所在文件夹".to_string()),
     ];
+    let mut y = thumb.bottom() + 16.0;
     for (at, (label, icon, value, note)) in fields.iter().enumerate() {
-        if at > 0 {
-            clip.line_segment(
-                [pos2(left, y), pos2(right, y)],
-                Stroke::new(1.0, theme.separator),
-            );
-        }
-        let icon_c = pos2(left + 14.0, y + 23.0);
-        clip.circle_filled(icon_c, 14.0, theme.chip_bg);
+        let icon_c = pos2(left + 16.0, y + 15.0);
+        clip.circle_filled(icon_c, 16.0, theme.chip_bg);
         icons::draw(
             clip,
             *icon,
-            Rect::from_center_size(icon_c, vec2(14.0, 14.0)),
+            Rect::from_center_size(icon_c, vec2(15.0, 15.0)),
             theme.text_secondary,
-            1.2,
+            1.25,
         );
-        let vx = left + 40.0;
+        let vx = left + 44.0;
         let vw = (right - vx).max(40.0);
         let shown = if value.trim().is_empty() {
             "—"
@@ -1740,40 +1769,48 @@ fn draw_info_light(
             value.as_str()
         };
         clip.text(
-            pos2(vx, y + 8.0),
+            pos2(vx, y + 1.0),
             Align2::LEFT_TOP,
-            truncate_to_width(clip, shown, 13.0, vw, theme.text_primary),
-            FontId::new(13.0, egui::FontFamily::Proportional),
+            truncate_to_width(clip, shown, 14.0, vw, theme.text_primary),
+            FontId::new(14.0, egui::FontFamily::Proportional),
             theme.text_primary,
         );
         clip.text(
-            pos2(vx, y + 26.0),
+            pos2(vx, y + 19.5),
             Align2::LEFT_TOP,
-            truncate_to_width(clip, note, 10.5, vw, theme.text_secondary),
-            FontId::new(10.5, egui::FontFamily::Proportional),
+            truncate_to_width(clip, note, 11.5, vw, theme.text_secondary),
+            FontId::new(11.5, egui::FontFamily::Proportional),
             theme.text_secondary,
         );
         let _ = label;
-        y += 46.0;
+        if at + 1 < fields.len() {
+            clip.line_segment(
+                [pos2(left, y + SEP_AT), pos2(right, y + SEP_AT)],
+                Stroke::new(1.0, theme.separator),
+            );
+        }
+        y += ROW_H;
     }
 
     // 曝光组：在路径之后、相机之前；四小卡并排。
-    y += 10.0;
+    //
+    // 原型：行距 57 走完后紧接「曝光」小标题（ink 顶 +1），小卡 54 高、
+    // 标题下 25 起，卡内值 14 / 标签 10.5。
     clip.text(
-        pos2(left, y),
+        pos2(left, y + 1.0),
         Align2::LEFT_TOP,
         "曝光",
-        FontId::new(12.0, egui::FontFamily::Proportional),
+        FontId::new(13.0, egui::FontFamily::Proportional),
         theme.text_primary,
     );
     clip.text(
-        pos2(left + 34.0, y + 1.0),
+        pos2(left + 36.0, y + 3.0),
         Align2::LEFT_TOP,
         "来自该文件的 EXIF",
-        FontId::new(10.0, egui::FontFamily::Proportional),
+        FontId::new(10.5, egui::FontFamily::Proportional),
         theme.text_secondary,
     );
-    y += 22.0;
+    y += 25.0;
     let cells = [
         (e.iso.clone(), "ISO"),
         (e.focal_length.clone(), "焦距"),
@@ -1789,84 +1826,87 @@ fn draw_info_light(
         clip.text(
             pos2(cell.center().x, cell.top() + 10.0),
             Align2::CENTER_TOP,
-            truncate_to_width(clip, shown, 13.0, cell_w - 10.0, theme.text_primary),
-            FontId::new(13.0, egui::FontFamily::Proportional),
+            truncate_to_width(clip, shown, 14.0, cell_w - 10.0, theme.text_primary),
+            FontId::new(14.0, egui::FontFamily::Proportional),
             theme.text_primary,
         );
         clip.text(
-            pos2(cell.center().x, cell.top() + 32.0),
+            pos2(cell.center().x, cell.top() + 29.0),
             Align2::CENTER_TOP,
             *label,
-            FontId::new(10.0, egui::FontFamily::Proportional),
+            FontId::new(10.5, egui::FontFamily::Proportional),
             theme.text_secondary,
         );
     }
-    y += 64.0;
+    y += 54.0 + 18.0;
 
     // 相机组（机身 + 镜头），与原型一样在曝光之后单独一组。
-    let icon_c = pos2(left + 14.0, y + 16.0);
-    clip.circle_filled(icon_c, 14.0, theme.chip_bg);
+    let icon_c = pos2(left + 16.0, y + 18.0);
+    clip.circle_filled(icon_c, 16.0, theme.chip_bg);
     icons::draw(
         clip,
         Icon::Camera,
-        Rect::from_center_size(icon_c, vec2(15.0, 15.0)),
+        Rect::from_center_size(icon_c, vec2(16.0, 16.0)),
         theme.text_secondary,
-        1.2,
+        1.25,
     );
-    let vx = left + 40.0;
+    let vx = left + 44.0;
     let vw = (right - vx).max(40.0);
     let camera = join_opt(&e.make, &e.model);
     clip.text(
-        pos2(vx, y + 2.0),
+        pos2(vx, y + 3.0),
         Align2::LEFT_TOP,
         truncate_to_width(
             clip,
             camera.as_deref().unwrap_or("—"),
-            12.5,
+            14.0,
             vw,
             theme.text_primary,
         ),
-        FontId::new(12.5, egui::FontFamily::Proportional),
+        FontId::new(14.0, egui::FontFamily::Proportional),
         theme.text_primary,
     );
     clip.text(
-        pos2(vx, y + 20.0),
+        pos2(vx, y + 22.0),
         Align2::LEFT_TOP,
         truncate_to_width(
             clip,
             e.lens.as_deref().unwrap_or("—"),
-            10.5,
+            11.5,
             vw,
             theme.text_secondary,
         ),
-        FontId::new(10.5, egui::FontFamily::Proportional),
+        FontId::new(11.5, egui::FontFamily::Proportional),
         theme.text_secondary,
     );
-    y += 40.0;
+    y += 36.0;
 
     // 状态行：时间来源 / 色彩空间 / 元数据（只读，真实状态）。
-    y += 4.0;
+    //
+    // 原型在这里有一个「说明段」把相机组与状态行分开；产品不复制演示文案，
+    // 所以用一条分隔线 + 更大的留白承担同一层级的「分段」，而不是塞假文案。
+    y += 18.0;
     clip.line_segment(
         [pos2(left, y), pos2(right, y)],
         Stroke::new(1.0, theme.separator),
     );
-    y += 10.0;
+    y += 16.0;
     for (label, value) in status_rows(viewer) {
         clip.text(
             pos2(left, y),
             Align2::LEFT_TOP,
             label,
-            FontId::new(11.0, egui::FontFamily::Proportional),
+            FontId::new(12.0, egui::FontFamily::Proportional),
             theme.text_secondary,
         );
         clip.text(
             pos2(right, y),
             Align2::RIGHT_TOP,
-            truncate_to_width(clip, &value, 11.0, inner_w - 60.0, theme.text_primary),
-            FontId::new(11.0, egui::FontFamily::Proportional),
+            truncate_to_width(clip, &value, 12.0, inner_w - 64.0, theme.text_primary),
+            FontId::new(12.0, egui::FontFamily::Proportional),
             theme.text_primary,
         );
-        y += 22.0;
+        y += 34.0;
     }
     let _ = card;
     y
@@ -1881,7 +1921,7 @@ fn draw_info_dark(
     left: f32,
     right: f32,
     inner_w: f32,
-    mut y: f32,
+    _y: f32,
     viewer: &Viewer,
     theme: &Theme,
     row: &PhotoRow,
@@ -1890,28 +1930,37 @@ fn draw_info_dark(
     let e = &viewer.exif;
     let _ = inner_w;
 
-    // 标题卡：略亮的底 + 48 px 缩略图 + 标题 / 文件名。
-    let header = Rect::from_min_size(pos2(left - 10.0, y), vec2(right - left + 20.0, 76.0));
-    clip.rect_filled(header, 8.0, theme.chip_bg);
-    let thumb = Rect::from_min_size(pos2(header.left() + 10.0, y + 10.0), vec2(48.0, 48.0));
+    // 标题卡：略亮的底 + 52 px 缩略图 + 标题 / 文件名。
+    //
+    // 原型 v1.4 暗色：标题卡从卡顶 +52 起、约 74 高，缩略图 52 见方内缩 11，
+    // 标题 15 / 文件名 11.5；下面是 115 高的 2x2 曝光格（行距 57.5）。
+    let header = Rect::from_min_size(
+        pos2(left - 12.0, card.top() + 52.0),
+        vec2(right - left + 24.0, 74.0),
+    );
+    clip.rect_filled(header, 10.0, theme.chip_bg);
+    let thumb = Rect::from_min_size(
+        pos2(header.left() + 11.0, header.top() + 11.0),
+        vec2(52.0, 52.0),
+    );
     draw_info_thumb(clip, viewer, thumb, theme);
-    let text_x = thumb.right() + 10.0;
-    let text_w = (header.right() - 10.0 - text_x).max(40.0);
+    let text_x = thumb.right() + 12.0;
+    let text_w = (header.right() - 12.0 - text_x).max(40.0);
     clip.text(
-        pos2(text_x, y + 16.0),
+        pos2(text_x, thumb.top() + 8.0),
         Align2::LEFT_TOP,
-        truncate_to_width(clip, &display_title(row), 13.5, text_w, theme.text_primary),
-        FontId::new(13.5, egui::FontFamily::Proportional),
+        truncate_to_width(clip, &display_title(row), 15.0, text_w, theme.text_primary),
+        FontId::new(15.0, egui::FontFamily::Proportional),
         theme.text_primary,
     );
     clip.text(
-        pos2(text_x, y + 38.0),
+        pos2(text_x, thumb.top() + 32.0),
         Align2::LEFT_TOP,
-        truncate_to_width(clip, &row.name, 10.5, text_w, theme.text_secondary),
-        FontId::new(10.5, egui::FontFamily::Proportional),
+        truncate_to_width(clip, &row.name, 11.5, text_w, theme.text_secondary),
+        FontId::new(11.5, egui::FontFamily::Proportional),
         theme.text_secondary,
     );
-    y += 84.0;
+    let mut y = header.bottom();
 
     // 2x2 曝光格：细线分隔，不带胶囊底（与亮色四小卡刻意不同）。
     let cells = [
@@ -1920,7 +1969,7 @@ fn draw_info_dark(
         (e.f_number.clone(), "光圈"),
         (e.exposure_time.clone(), "快门"),
     ];
-    let grid = Rect::from_min_size(pos2(left - 10.0, y), vec2(right - left + 20.0, 112.0));
+    let grid = Rect::from_min_size(pos2(left - 12.0, y), vec2(right - left + 24.0, 115.0));
     let cw = grid.width() / 2.0;
     let ch = grid.height() / 2.0;
     let cell_rects = exposure_cell_rects(grid, false);
@@ -1930,21 +1979,25 @@ fn draw_info_dark(
         let cy = cell.top();
         let shown = value.as_deref().filter(|s| !s.is_empty()).unwrap_or("—");
         clip.text(
-            pos2(cx + 14.0, cy + 14.0),
+            pos2(cx + 16.0, cy + 13.0),
             Align2::LEFT_TOP,
-            truncate_to_width(clip, shown, 16.0, cw - 24.0, theme.text_primary),
-            FontId::new(16.0, egui::FontFamily::Proportional),
+            truncate_to_width(clip, shown, 17.0, cw - 28.0, theme.text_primary),
+            FontId::new(17.0, egui::FontFamily::Proportional),
             theme.text_primary,
         );
         clip.text(
-            pos2(cx + 14.0, cy + 38.0),
+            pos2(cx + 16.0, cy + 38.0),
             Align2::LEFT_TOP,
             *label,
-            FontId::new(10.5, egui::FontFamily::Proportional),
+            FontId::new(11.0, egui::FontFamily::Proportional),
             theme.text_secondary,
         );
     }
-    // 内部十字线与外框。
+    // 内部十字线与外框（上边框就是标题卡与曝光格的分界）。
+    clip.line_segment(
+        [pos2(grid.left(), grid.top()), pos2(grid.right(), grid.top())],
+        Stroke::new(1.0, theme.separator),
+    );
     clip.line_segment(
         [
             pos2(grid.left(), grid.top() + ch),
@@ -1966,9 +2019,13 @@ fn draw_info_dark(
         ],
         Stroke::new(1.0, theme.separator),
     );
-    y = grid.bottom() + 6.0;
+    // 原型里第一条数据行的分隔线就是曝光格的下边框（不再另留一段空隙）。
+    y = grid.bottom();
 
     // 密集数据行：标签在左、值右对齐，行间细分隔。
+    //
+    // 原型暗色行距 31（r7 产品 25），字号 12（产品 11）；隔行没有整行底色，
+    // 只有发丝线，这样「密集」但不糊成一片。
     let path = shorten_path(&row.folder_path);
     let rows: Vec<(&str, Option<String>)> = vec![
         ("文件", Some(row.name.clone()).filter(|s| !s.is_empty())),
@@ -1993,48 +2050,51 @@ fn draw_info_dark(
             Some(viewer.caption_text.trim().to_string()).filter(|s| !s.is_empty()),
         ),
     ];
-    let label_w = 44.0;
-    let hover = if theme.dark {
-        Color32::from_white_alpha(6)
-    } else {
-        theme.chip_bg
-    };
-    for (i, (label, value)) in rows.iter().enumerate() {
-        let row_rect = Rect::from_min_size(pos2(left - 10.0, y), vec2(right - left + 20.0, 25.0));
-        if i % 2 == 1 {
-            clip.rect_filled(row_rect, 0.0, hover);
-        }
+    let label_w = 48.0;
+    for (label, value) in rows.iter() {
+        clip.line_segment(
+            [
+                pos2(left - 12.0, y),
+                pos2(right + 12.0, y),
+            ],
+            Stroke::new(1.0, theme.separator),
+        );
         clip.text(
-            pos2(left, y + 6.0),
+            pos2(left, y + 9.0),
             Align2::LEFT_TOP,
             *label,
-            FontId::new(11.0, egui::FontFamily::Proportional),
+            FontId::new(12.0, egui::FontFamily::Proportional),
             theme.text_secondary,
         );
         clip.text(
-            pos2(right, y + 6.0),
+            pos2(right, y + 9.0),
             Align2::RIGHT_TOP,
             truncate_to_width(
                 clip,
                 value.as_deref().unwrap_or("—"),
-                11.0,
+                12.0,
                 (right - left) - label_w - 12.0,
                 theme.text_primary,
             ),
-            FontId::new(11.0, egui::FontFamily::Proportional),
+            FontId::new(12.0, egui::FontFamily::Proportional),
             theme.text_primary,
         );
-        y += 25.0;
+        y += 30.0;
     }
-    y += 6.0;
+    y += 18.0;
 
     // 状态行：时间来源 / 色彩空间 / 元数据。
+    clip.line_segment(
+        [pos2(left - 12.0, y), pos2(right + 12.0, y)],
+        Stroke::new(1.0, theme.separator),
+    );
+    y += 14.0;
     for (label, value) in status_rows(viewer) {
         clip.text(
             pos2(left, y),
             Align2::LEFT_TOP,
             label,
-            FontId::new(11.0, egui::FontFamily::Proportional),
+            FontId::new(12.0, egui::FontFamily::Proportional),
             theme.text_secondary,
         );
         clip.text(
@@ -2043,14 +2103,14 @@ fn draw_info_dark(
             truncate_to_width(
                 clip,
                 &value,
-                11.0,
-                (right - left) - 60.0,
+                12.0,
+                (right - left) - 64.0,
                 theme.text_primary,
             ),
-            FontId::new(11.0, egui::FontFamily::Proportional),
+            FontId::new(12.0, egui::FontFamily::Proportional),
             theme.text_primary,
         );
-        y += 22.0;
+        y += 30.0;
     }
     let _ = card;
     y
@@ -2293,6 +2353,37 @@ fn fit_rect(outer: Rect, tex: Vec2) -> Rect {
     let scale = (outer.width() / tex.x).min(outer.height() / tex.y);
     let size = vec2(tex.x * scale, tex.y * scale);
     Rect::from_center_size(outer.center(), size)
+}
+
+/// 主图圆角半径（逻辑像素，**按图本身**取，不按外框）。
+///
+/// 原型 v1.4（1280 逻辑宽）实测：亮色照片本身是大圆角 ≈21，暗色是小圆角
+/// ≈5（暗房里的照片收得更紧）。r7 产品把圆角做在白色外框上、图片本身是
+/// 直角，看起来就是「方图套圆白框」；这里按原型加在图片本身上。
+pub fn photo_radius(theme: &Theme) -> f32 {
+    if theme.dark { 6.0 } else { 22.0 }
+}
+
+/// 把纹理画成**圆角矩形**（图片本身有圆角，而不是靠外层白框裁）。
+///
+/// 用带 brush 的 `RectShape`：tessellator 会按圆角路径做带 UV 的填充，
+/// 因此四角是真的圆角（不是直角贴图叠在圆角底上）。`uv` 为纹理子矩形，
+/// 主图 / 预览 / 比较图都是整张 0..1。
+fn paint_rounded_image(
+    painter: &egui::Painter,
+    tex: egui::TextureId,
+    rect: Rect,
+    radius: f32,
+    uv: Rect,
+) {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    // 圆角不能超过短边的一半，否则 tessellator 会退化成一坨。
+    let r = radius.max(0.0).min(rect.width().min(rect.height()) * 0.5);
+    let shape = egui::epaint::RectShape::filled(rect, r, Color32::WHITE)
+        .with_texture(tex, uv);
+    painter.add(egui::Shape::Rect(shape));
 }
 
 fn draw_big_chevron(painter: &egui::Painter, center: egui::Pos2, right: bool, alpha: u8) {
@@ -2651,10 +2742,11 @@ mod tests {
         let closed = layout(stage_rect(), false, false);
         let open = layout(stage_rect(), true, false);
         let panel = open.info_panel.expect("打开时应有信息栏");
-        assert!((panel.width() - INFO_W).abs() < 0.5);
+        let info_w = info_panel_width(stage_rect().width());
+        assert!((panel.width() - info_w).abs() < 0.5);
         // 推窄：舞台列宽减少的信息栏宽度
         assert!(open.stage.width() < closed.stage.width());
-        assert!((closed.stage.width() - open.stage.width() - INFO_W).abs() < 0.5);
+        assert!((closed.stage.width() - open.stage.width() - info_w).abs() < 0.5);
         assert!(open.canvas.width() < closed.canvas.width());
         assert!(open.filmstrip.width() < closed.filmstrip.width());
         // 不遮挡：面板与主图 / 胶片条 / 说明条**面积不重叠**（允许共用边线）

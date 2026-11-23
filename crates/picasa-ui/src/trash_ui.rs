@@ -17,18 +17,28 @@ use crate::theme::Theme;
 pub fn confirm_buttons(theme: &Theme) -> (egui::Button<'static>, egui::Button<'static>) {
     // 次按钮：卡片底 + 明确可见的描边（原型里「取消」是描边按钮），
     // 视觉上明确弱于红色主按钮。
+    //
+    // 两枚按钮都按原型做成 38 高、带内边距的实体按钮（原型 36 高、
+    // 主按钮约 92 宽）：r7 产品用 egui 默认高度（约 24），在加高后的
+    // 对话框里显得又扁又挤。
     let cancel = egui::Button::new(
-        egui::RichText::new(picasa_core::trash_plan::TRASH_CANCEL).color(theme.text_primary),
+        egui::RichText::new(picasa_core::trash_plan::TRASH_CANCEL)
+            .size(13.5)
+            .color(theme.text_primary),
     )
     .fill(theme.viewer_card)
     .stroke(egui::Stroke::new(1.2, theme.text_secondary))
-    .corner_radius(theme.radius_btn);
+    .corner_radius(theme.radius_btn)
+    .min_size(egui::vec2(88.0, 38.0));
     // 主按钮：实心危险红 + 白字。
     let confirm = egui::Button::new(
-        egui::RichText::new(picasa_core::trash_plan::TRASH_ACTION).color(egui::Color32::WHITE),
+        egui::RichText::new(picasa_core::trash_plan::TRASH_ACTION)
+            .size(13.5)
+            .color(egui::Color32::WHITE),
     )
     .fill(theme.danger)
-    .corner_radius(theme.radius_btn);
+    .corner_radius(theme.radius_btn)
+    .min_size(egui::vec2(96.0, 38.0));
     (confirm, cancel)
 }
 
@@ -109,33 +119,48 @@ pub fn show_dialog(
         .show(ctx, |ui| {
             egui::Frame::new()
                 .fill(card_fill)
-                .corner_radius(16)
-                .inner_margin(egui::Margin::same(24))
+                .corner_radius(18)
+                .inner_margin(egui::Margin::same(26))
                 .stroke(egui::Stroke::new(1.0, theme.hairline))
                 .show(ui, |ui| {
-                    ui.set_width(width - 48.0);
+                    ui.set_width(width - 52.0);
                     ui.label(
                         egui::RichText::new(picasa_core::trash_plan::TRASH_TITLE)
-                            .size(16.0)
+                            .size(17.0)
+                            .line_height(Some(24.0))
                             .strong()
                             .color(theme.text_primary),
                     );
-                    ui.add_space(10.0);
-                    for para in picasa_core::trash_plan::confirm_body(count).split("\n\n") {
+                    ui.add_space(16.0);
+                    // 正文按原型：两段说明 + 分段留白（不是把句子挤在窄框里）。
+                    // 行高 21（原型行距 20、字号 13.5），段间 12。
+                    let body = picasa_core::trash_plan::confirm_body(count);
+                    let paras: Vec<&str> = body
+                        .split("\n\n")
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    for (i, para) in paras.iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(12.0);
+                        }
                         ui.label(
-                            egui::RichText::new(para)
-                                .size(12.5)
+                            egui::RichText::new(*para)
+                                .size(13.5)
+                                .line_height(Some(21.0))
                                 .color(theme.text_secondary),
                         );
-                        ui.add_space(8.0);
                     }
                     if !paths.is_empty() {
+                        // 路径是与说明分开的一组：上面 18、行距 19（原型 20）。
+                        ui.add_space(18.0);
                         // 只取前 3 条，且不为此每帧分配一个 Vec。
                         let shown = &paths[..paths.len().min(3)];
                         for p in shown {
                             ui.label(
                                 egui::RichText::new(p.as_str())
-                                    .size(11.5)
+                                    .size(12.5)
+                                    .line_height(Some(19.0))
                                     .color(theme.text_primary),
                             );
                         }
@@ -147,13 +172,14 @@ pub fn show_dialog(
                                     // 调用方传入不一致的 count（绝不 panic）。
                                     count.saturating_sub(shown.len())
                                 ))
-                                .size(11.0)
+                                .size(12.0)
+                                .line_height(Some(19.0))
                                 .color(theme.text_secondary),
                             );
                         }
-                        ui.add_space(4.0);
                     }
-                    ui.add_space(10.0);
+                    // 按钮组前留白 26（原型 22），按钮组到底边 26（原型 16）。
+                    ui.add_space(26.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (confirm, cancel) = confirm_buttons(theme);
                         let confirm_resp = ui.add(confirm);
