@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenPicasa · Android 端设计原型（10 屏 · 探讨稿）</title>
+<style>
+  :root{
+    /* Material 3 浅色基线（单色主题，不引彩色顶栏/玻璃态） */
+    --md-primary:#2f6fed; --md-on-primary:#ffffff; --md-primary-container:#dce7ff;
+    --md-on-primary-container:#0a2c66;
+    --md-surface:#ffffff; --md-surface-1:#f7f9fc; --md-surface-2:#f0f3f8; --md-surface-3:#e8edf5;
+    --md-on-surface:#1b1b1f; --md-on-surface-var:#44474f; --md-outline:#c3c7d0;
+    --md-secondary-container:#e2e8f2; --md-on-secondary-container:#2a3140;
+    --md-danger:#ba1a1a; --md-ok:#1b7f4b; --md-warn:#9a6700;
+    --md-star:#f2a63b; --md-sel:#2f6fed; --ph:#d9dee6; --ph2:#c9d0da;
+    --shadow:0 1px 3px rgba(0,0,0,.18),0 1px 2px rgba(0,0,0,.10);
+    --shadow-lg:0 6px 18px rgba(0,0,0,.22);
+    --viewer-bg:#101114;
+    font-synthesis:none;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;font:13px/1.45 -apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif;color:var(--md-on-surface);background:#e7ebf1}
+  .app{display:flex;height:100vh;overflow:hidden}
+
+  /* 左侧屏导航（原型外壳，不是产品界面） */
+  .nav{width:236px;flex:none;background:#1c2230;color:#cdd3dc;padding:16px 12px;overflow:auto}
+  .nav h1{font-size:13.5px;margin:2px 6px 3px;color:#fff;letter-spacing:.3px}
+  .nav .sub{font-size:10.5px;color:#8b95a4;margin:0 6px 12px;line-height:1.55}
+  .nav .grp{font-size:9.5px;color:#6f7a89;letter-spacing:1.2px;margin:15px 6px 6px;text-transform:uppercase}
+  .nav button{display:block;width:100%;text-align:left;border:0;border-radius:9px;background:transparent;color:#cdd3dc;padding:8px 10px;margin:2px 0;cursor:pointer;font-size:12px;transition:.15s}
+  .nav button:hover{background:#2b3341;color:#fff}
+  .nav button.active{background:var(--md-primary);color:#fff;box-shadow:0 2px 8px rgba(47,111,237,.45)}
+  .nav button .sid{opacity:.55;font-size:10px;margin-right:7px;font-variant-numeric:tabular-nums}
+  .nav .note{margin-top:16px;padding:10px;background:#262e3b;border-radius:9px;font-size:10px;color:#9aa4b2;line-height:1.65}
+  .nav .note b{color:#e6c98a}
+  .nav .redline{margin-top:10px;padding:9px 10px;border-left:3px solid #d98b3a;background:#222a36;border-radius:0 8px 8px 0;font-size:10px;color:#aeb7c4;line-height:1.6}
+
+  /* 右侧舞台 */
+  .stage{flex:1;display:flex;flex-direction:column;min-width:0}
+  .stage-bar{height:46px;flex:none;background:#fff;border-bottom:1px solid #dfe3ea;display:flex;align-items:center;gap:12px;padding:0 20px}
+  .stage-bar .t{font-weight:600;font-size:13px}
+  .stage-bar .d{font-size:11px;color:#6b7280}
+  .stage-bar .tag{margin-left:auto;font-size:10px;color:#5a616b;background:#eef1f6;border:1px solid #dfe3ea;padding:3px 10px;border-radius:20px}
+  .canvas{flex:1;overflow:auto;padding:24px;display:flex;align-items:flex-start;justify-content:center;gap:26px;flex-wrap:wrap}
+
+  /* 手机外框 */
+  .device{width:372px;flex:none;background:#0c0e12;border-radius:42px;padding:11px;box-shadow:0 14px 40px rgba(20,28,44,.32),0 2px 8px rgba(0,0,0,.18);position:relative}
+  .device .notch{position:absolute;top:11px;left:50%;transform:translateX(-50%);width:104px;height:22px;background:#0c0e12;border-bottom-left-radius:14px;border-bottom-right-radius:14px;z-index:40;display:flex;align-items:center;justify-content:center;gap:7px}
+  .device .notch i{width:7px;height:7px;border-radius:50%;background:#23262e;display:block}
+  .phone{width:350px;height:720px;background:var(--md-surface);border-radius:32px;overflow:hidden;position:relative;display:flex;flex-direction:column}
+
+  /* 状态栏 */
+  .statusbar{height:30px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:6px 18px 0;font-size:11px;font-weight:600;color:#1b1b1f;z-index:30;background:var(--md-surface)}
+  .statusbar.dark{color:#f2f2f4;background:transparent}
+  .statusbar .icons{display:flex;gap:5px;align-items:center;font-size:10px;letter-spacing:.5px}
+  .statusbar .bat{width:15px;height:8px;border:1.4px solid currentColor;border-radius:2px;position:relative;opacity:.85}
+  .statusbar .bat:after{content:"";position:absolute;right:-3px;top:1.5px;width:2px;height:4px;background:currentColor;border-radius:0 1px 1px 0}
+  .statusbar.dark .bat:after{background:currentColor}
+
+  /* 内容区 */
+  .content{flex:1;min-height:0;position:relative;overflow:hidden}
+  .screen{position:absolute;inset:0;display:none;flex-direction:column;overflow:hidden}
+  .screen.active{display:flex;animation:fade .18s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+
+  /* TopAppBar */
+  .appbar{height:56px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px 0 16px;background:var(--md-surface);border-bottom:1px solid var(--md-surface-3)}
+  .appbar .title{font-size:18px;font-weight:600;letter-spacing:.1px;flex:1;min-width:0}
+  .appbar .ic{width:38px;height:38px;border:0;background:transparent;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;color:var(--md-on-surface-var);font-size:17px;flex:none}
+  .appbar .ic:hover{background:var(--md-surface-2)}
+  .appbar.sel{background:var(--md-primary-container);color:var(--md-on-primary-container)}
+
+  .scroll{flex:1;min-height:0;overflow:auto;padding:0 0 8px}
+  .scroll::-webkit-scrollbar{width:0}
+
+  /* 底部导航 */
+  .bottomnav{height:74px;flex:none;background:var(--md-surface-1);border-top:1px solid var(--md-surface-3);display:flex;align-items:flex-start;padding-top:7px;position:relative}
+  .bottomnav .tab{flex:1;border:0;background:transparent;display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;color:var(--md-on-surface-var);font-size:11px;position:relative;padding:3px 0}
+  .bottomnav .tab .ico{width:44px;height:26px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:17px;transition:.15s}
+  .bottomnav .tab.active .ico{background:var(--md-secondary-container);color:var(--md-on-secondary-container)}
+  .bottomnav .tab.active{color:var(--md-on-surface);font-weight:600}
+  .bottomnav .tab .badge{position:absolute;top:0;right:24%;min-width:15px;height:15px;border-radius:8px;background:#ba1a1a;color:#fff;font-size:9px;line-height:15px;text-align:center;font-weight:700}
+  .gesturebar{height:18px;flex:none;display:flex;align-items:center;justify-content:center;background:var(--md-surface-1)}
+  .gesturebar .pill{width:108px;height:4px;border-radius:3px;background:#1b1b1f;opacity:.55}
+  .gesturebar.dark{background:var(--viewer-bg)}
+  .gesturebar.dark .pill{background:#f2f2f4;opacity:.6}
+
+  /* 通用 M3 控件 */
+  .btn{border:0;border-radius:20px;padding:10px 20px;cursor:pointer;font-size:13px;font-weight:600;transition:.12s;white-space:nowrap;font-family:inherit}
+  .btn:active{transform:scale(.97)}
+  .btn.filled{background:var(--md-primary);color:var(--md-on-primary);box-shadow:var(--shadow)}
+  .btn.tonal{background:var(--md-secondary-container);color:var(--md-on-secondary-container)}
+  .btn.outlined{background:transparent;color:var(--md-primary);border:1px solid var(--md-outline)}
+  .btn.text{background:transparent;color:var(--md-primary)}
+  .btn.danger{background:var(--md-danger);color:#fff}
+  .btn.sm{padding:7px 14px;font-size:11.5px}
+  .btn.block{width:100%;text-align:center}
+  .chip{display:inline-flex;align-items:center;gap:5px;border-radius:8px;padding:6px 11px;font-size:11.5px;background:var(--md-surface-2);border:1px solid var(--md-outline);cursor:pointer;font-family:inherit}
+  .chip.on{background:var(--md-secondary-container);border-color:transparent;color:var(--md-on-secondary-container);font-weight:600}
+  .chip .x{opacity:.55;font-size:12px}
+  .fab{position:absolute;right:16px;bottom:16px;width:56px;height:56px;border-radius:16px;background:var(--md-primary-container);color:var(--md-on-primary-container);border:0;box-shadow:var(--shadow-lg);font-size:26px;cursor:pointer;z-index:12;display:flex;align-items:center;justify-content:center}
+  .fab:active{transform:scale(.95)}
+  .card{background:var(--md-surface);border:1px solid var(--md-surface-3);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+  .section{padding:14px 16px 6px;font-size:11px;color:var(--md-on-surface-var);font-weight:600;letter-spacing:.4px}
+  .row{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--md-surface-2)}
+  .row .lead{width:34px;height:34px;border-radius:10px;background:var(--md-surface-2);display:flex;align-items:center;justify-content:center;font-size:16px;flex:none}
+  .row .txt{flex:1;min-width:0}
+  .row .txt .a{font-size:13px;font-weight:500}
+  .row .txt .b{font-size:11px;color:var(--md-on-surface-var);margin-top:2px;line-height:1.4}
+  .row .trail{font-size:11px;color:var(--md-on-surface-var);flex:none}
+  .divider{height:1px;background:var(--md-surface-2);margin:4px 0}
+  .pill-num{background:var(--md-primary-container);color:var(--md-on-primary-container);border-radius:20px;padding:2px 9px;font-size:10.5px;font-weight:700}
+
+  /* 说明卡（原型外壳，随屏显示在右侧） */
+  .spec{width:340px;flex:none;background:#fff;border:1px solid #dfe3ea;border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);align-self:flex-start}
+  .spec h3{margin:0 0 4px;font-size:14px}
+  .spec .k{font-size:10.5px;color:#8a93a0;letter-spacing:.6px;text-transform:uppercase;margin-bottom:8px}
+  .spec p{font-size:12px;color:#4a515c;line-height:1.7;margin:8px 0}
+  .spec ul{margin:8px 0;padding-left:18px}
+  .spec li{font-size:12px;color:#4a515c;line-height:1.75;margin-bottom:3px}
+  .spec .tagrow{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px}
+  .spec .tg{font-size:10px;background:#eef2f8;border:1px solid #dde3ec;border-radius:20px;padding:3px 9px;color:#5a6472}
+  .spec .red{background:#fff4e6;border-left:3px solid #d98b3a;padding:8px 10px;border-radius:0 8px 8px 0;font-size:11.5px;color:#7a5a2a;line-height:1.6;margin-top:10px}
+
+  /* ===== 各屏专用 ===== */
+  /* 空态 */
+  .empty-wrap{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 28px;text-align:center;gap:6px}
+  .empty-art{width:120px;height:120px;border-radius:28px;background:linear-gradient(145deg,#eef3fc,#dce7ff);display:flex;align-items:center;justify-content:center;font-size:52px;margin-bottom:12px;box-shadow:inset 0 0 0 1px #d6e2f7;position:relative}
+  .empty-art .ph1{position:absolute;width:46px;height:36px;border-radius:6px;background:#fff;box-shadow:var(--shadow);transform:rotate(-9deg) translate(-8px,4px)}
+  .empty-art .ph2{position:absolute;width:46px;height:36px;border-radius:6px;background:var(--md-primary);opacity:.85;box-shadow:var(--shadow);transform:rotate(8deg) translate(8px,-4px)}
+  .empty-wrap h2{font-size:19px;margin:6px 0 0}
+  .empty-wrap .muted{font-size:12.5px;color:var(--md-on-surface-var);line-height:1.6;max-width:250px}
+  .empty-actions{display:flex;flex-direction:column;gap:10px;width:100%;margin-top:18px}
+  .scan-opts{margin-top:18px;width:100%;text-align:left}
+  .scan-opt{display:flex;align-items:center;gap:10px;padding:9px 4px;font-size:12.5px;cursor:pointer}
+  .scan-opt .radio{width:18px;height:18px;border:2px solid var(--md-outline);border-radius:50%;flex:none}
+  .scan-opt.on .radio{border-color:var(--md-primary);background:radial-gradient(circle,var(--md-primary) 0 45%,transparent 46%)}
+
+  /* 图库栅格 */
+  .lib-head{padding:8px 16px 10px}
+  .lib-head .l1{font-size:20px;font-weight:700}
+  .lib-head .l2{font-size:11.5px;color:var(--md-on-surface-var);margin-top:2px}
+  .grouphead{position:sticky;top:0;background:var(--md-surface-1);padding:9px 16px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:8px;z-index:5;border-bottom:1px solid var(--md-surface-2)}
+  .grouphead .sp{flex:1}
+  .grouphead .cnt{font-weight:400;color:var(--md-on-surface-var);font-size:11px}
+  .grid{display:grid;gap:4px;padding:4px}
+  .grid.c4{grid-template-columns:repeat(4,1fr)}
+  .grid.c3{grid-template-columns:repeat(3,1fr)}
+  .grid.c2{grid-template-columns:repeat(2,1fr)}
+  .cell{position:relative;aspect-ratio:1;background:var(--ph);border-radius:8px;overflow:hidden;cursor:pointer}
+  .cell .img{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:26px;color:#fff;opacity:.0}
+  .cell .tone{position:absolute;inset:0}
+  .cell .fname{position:absolute;bottom:0;left:0;right:0;font-size:8px;color:#fff;background:linear-gradient(transparent,rgba(0,0,0,.5));padding:8px 4px 3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cell .star{position:absolute;top:3px;right:3px;font-size:12px;color:var(--md-star);text-shadow:0 1px 2px rgba(0,0,0,.4)}
+  .cell .selmark{position:absolute;top:4px;left:4px;width:17px;height:17px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.25);display:none;align-items:center;justify-content:center;font-size:10px;color:#fff}
+  .cell .selmark.check{background:var(--md-sel);border-color:#fff}
+  .cell.selected .selmark{display:flex}
+  .cell.selected{outline:3px solid var(--md-sel);outline-offset:-3px}
+  .cell.broken{background:repeating-linear-gradient(45deg,#eceff4,#eceff4 8px,#e2e6ed 8px,#e2e6ed 16px)}
+  .cell.broken .img{opacity:.5;color:#9aa3b0;font-size:18px}
+  .density{display:flex;gap:6px;align-items:center;padding:6px 16px;font-size:11px;color:var(--md-on-surface-var)}
+  .density .seg{display:flex;background:var(--md-surface-2);border-radius:20px;padding:2px}
+  .density .seg button{border:0;background:transparent;border-radius:18px;padding:4px 12px;font-size:10.5px;cursor:pointer;font-family:inherit;color:var(--md-on-surface-var)}
+  .density .seg button.on{background:var(--md-secondary-container);color:var(--md-on-secondary-container);font-weight:700}
+
+  /* 搜索 / 筛选 */
+  .searchbar{display:flex;align-items:center;gap:8px;padding:8px 12px 4px}
+  .searchbar .field{flex:1;display:flex;align-items:center;gap:8px;background:var(--md-surface-2);border-radius:28px;padding:9px 14px;font-size:13px}
+  .searchbar .field input{border:0;background:transparent;outline:none;flex:1;font-size:13px;font-family:inherit;min-width:0}
+  .scope{padding:4px 16px 8px;font-size:11.5px;color:var(--md-on-surface-var);display:flex;gap:14px;align-items:center}
+  .filter-panel{margin:6px 12px;padding:12px;border-radius:14px;background:var(--md-surface-2)}
+  .filter-panel .fl{display:flex;align-items:center;gap:8px;margin-bottom:9px;font-size:11.5px}
+  .filter-panel .fl .lb{width:40px;color:var(--md-on-surface-var);flex:none}
+  .filter-panel .chips{display:flex;flex-wrap:wrap;gap:6px;flex:1}
+  .filter-panel .actions{display:flex;justify-content:space-between;margin-top:6px}
+  .result-head{padding:8px 16px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .noresult{text-align:center;padding:40px 20px;color:var(--md-on-surface-var)}
+  .noresult .big{font-size:38px;margin-bottom:8px}
+
+  /* 多选 CAB */
+  .cab-actions{display:flex;gap:8px;padding:8px 16px;overflow:auto}
+  .cab-bottom{height:64px;flex:none;background:var(--md-surface-1);border-top:1px solid var(--md-surface-3);display:flex;align-items:center;justify-content:space-around;padding:0 6px}
+  .cab-bottom .act{display:flex;flex-direction:column;align-items:center;gap:3px;border:0;background:transparent;cursor:pointer;font-size:10px;color:var(--md-on-surface-var);font-family:inherit;flex:1}
+  .cab-bottom .act .i{width:34px;height:34px;border-radius:10px;background:var(--md-surface-2);display:flex;align-items:center;justify-content:center;font-size:16px}
+  .cab-bottom .act.del{color:var(--md-danger)}
+  .cab-bottom .act.del .i{background:#fbe9e7}
+
+  /* 查看器 */
+  .viewer{background:var(--viewer-bg);height:100%;display:flex;flex-direction:column;position:relative}
+  .viewer .vtop{height:50px;display:flex;align-items:center;gap:6px;padding:0 10px;color:#f2f2f4;z-index:5}
+  .viewer .vtop .ic{width:38px;height:38px;border:0;background:transparent;color:#f2f2f4;border-radius:50%;font-size:17px;cursor:pointer}
+  .viewer .vtop .sp{flex:1}
+  .viewer .vtop .cnt{font-size:12px;opacity:.85}
+  .viewer .vstage{flex:1;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+  .viewer .vphoto{width:86%;aspect-ratio:4/3;border-radius:6px;background:linear-gradient(135deg,#3a4a63,#6d5b73 45%,#c98b5e);box-shadow:0 10px 40px rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.55);font-size:13px;transition:transform .18s ease}
+  .viewer .vphoto.zoom{transform:scale(1.45)}
+  .viewer .vhint{position:absolute;bottom:8px;left:0;right:0;text-align:center;color:rgba(255,255,255,.5);font-size:10.5px}
+  .viewer .vnav{position:absolute;top:50%;transform:translateY(-50%);width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.12);border:0;color:#fff;font-size:16px;cursor:pointer}
+  .viewer .vnav.l{left:6px}.viewer .vnav.r{right:6px}
+  .viewer .sheet{background:#1c1e22;color:#e8e9ec;border-radius:20px 20px 0 0;padding:8px 16px 14px;max-height:56%;overflow:auto;transition:transform .25s ease;transform:translateY(0)}
+  .viewer .sheet.hidden{transform:translateY(105%);position:absolute;left:0;right:0;bottom:0}
+  .viewer .sheet .handle{width:36px;height:4px;border-radius:3px;background:#55585f;margin:4px auto 10px}
+  .viewer .sheet .st{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin-bottom:4px}
+  .viewer .sheet .meta{font-size:11px;color:#a9adb5;line-height:1.9}
+  .viewer .sheet .tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .viewer .sheet .tags .tg{background:#2c2f35;border:1px solid #3a3e45;border-radius:8px;padding:4px 9px;font-size:10.5px;color:#cfd3da}
+  .viewer .sheet .src{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:#9fd3b0;margin-top:8px}
+
+  /* 相册卡片 */
+  .albums{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 14px}
+  .album{background:var(--md-surface-2);border-radius:14px;overflow:hidden;cursor:pointer;position:relative}
+  .album .cover{aspect-ratio:1.2;display:flex;align-items:center;justify-content:center;font-size:30px;color:rgba(255,255,255,.8)}
+  .album .cap{padding:8px 10px;background:var(--md-surface)}
+  .album .cap .n{font-size:12.5px;font-weight:600}
+  .album .cap .c{font-size:10.5px;color:var(--md-on-surface-var)}
+  .album.new{display:flex;align-items:center;justify-content:center;border:2px dashed var(--md-outline);background:transparent;color:var(--md-primary);flex-direction:column;gap:6px;font-size:12px;min-height:120px}
+  .album.new .plus{font-size:30px}
+  .segtabs{display:flex;gap:4px;padding:8px 14px 0}
+  .segtabs button{flex:1;border:0;border-bottom:2px solid transparent;background:transparent;padding:9px;font-size:12.5px;cursor:pointer;font-family:inherit;color:var(--md-on-surface-var)}
+  .segtabs button.on{color:var(--md-primary);border-color:var(--md-primary);font-weight:700}
+
+  /* 索引页 */
+  .idx-summary{margin:12px 14px;padding:14px;border-radius:16px;background:var(--md-primary-container);color:var(--md-on-primary-container)}
+  .idx-summary .big{font-size:22px;font-weight:700}
+  .idx-summary .sub{font-size:11px;opacity:.8;margin-top:2px}
+  .progress{height:8px;border-radius:5px;background:rgba(47,111,237,.18);margin:12px 0 6px;overflow:hidden}
+  .progress .bar{height:100%;background:var(--md-primary);border-radius:5px;transition:width .3s}
+  .idx-state{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600}
+  .idx-state .dot{width:9px;height:9px;border-radius:50%;background:var(--md-primary)}
+  .idx-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .idxtabs{display:flex;gap:2px;padding:0 10px;border-bottom:1px solid var(--md-surface-2);overflow:auto}
+  .idxtabs button{border:0;background:transparent;padding:10px 10px;font-size:11.5px;cursor:pointer;font-family:inherit;color:var(--md-on-surface-var);white-space:nowrap;border-bottom:2px solid transparent}
+  .idxtabs button.on{color:var(--md-primary);border-color:var(--md-primary);font-weight:700}
+  .offline .lead{background:#f0e9dd}
+  .fail-item{font-size:11px;color:var(--md-on-surface-var);padding:7px 16px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--md-surface-2)}
+  .fail-item .fx{color:var(--md-danger);font-weight:700}
+  .state-select{font-size:11px;border:1px solid var(--md-outline);border-radius:8px;padding:5px 7px;font-family:inherit;background:var(--md-surface)}
+
+  /* 导入导出 / 设置 */
+  .stepper{display:flex;gap:4px;align-items:center;justify-content:center;padding:12px 14px;font-size:10.5px;color:var(--md-on-surface-var)}
+  .stepper .s{width:24px;height:24px;border-radius:50%;background:var(--md-surface-2);display:flex;align-items:center;justify-content:center;font-weight:700}
+  .stepper .s.done{background:var(--md-ok);color:#fff}
+  .stepper .s.cur{background:var(--md-primary);color:#fff}
+  .stepper .ln{width:14px;height:2px;background:var(--md-outline)}
+  .confirm-box{margin:12px 14px;padding:14px;border-radius:14px;background:#fff7ed;border:1px solid #f0d8b0}
+  .confirm-box .h{font-size:13px;font-weight:700;color:#8a5a12}
+  .confirm-box .b{font-size:11.5px;color:#7a5a2a;line-height:1.6;margin-top:6px}
+  .result-line{display:flex;gap:8px;padding:9px 16px;font-size:12px;border-bottom:1px solid var(--md-surface-2)}
+  .result-line .ok{color:var(--md-ok);font-weight:700}
+  .setting-row{display:flex;align-items:center;gap:12px;padding:13px 16px;border-bottom:1px solid var(--md-surface-2)}
+  .setting-row .txt{flex:1}
+  .setting-row .txt .a{font-size:13px}
+  .setting-row .txt .b{font-size:10.5px;color:var(--md-on-surface-var);margin-top:2px}
+  .setting-row .val{font-size:11.5px;color:var(--md-primary);font-weight:600}
+  .switch{width:38px;height:22px;border-radius:14px;background:var(--md-surface-3);border:1px solid var(--md-outline);position:relative;cursor:pointer;flex:none}
+  .switch.on{background:var(--md-primary);border-color:var(--md-primary)}
+  .switch .knob{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.15s}
+  .switch.on .knob{left:18px}
+  .about{text-align:center;padding:18px;color:var(--md-on-surface-var);font-size:11px;line-height:1.8}
+  .about .logo{width:52px;height:52px;border-radius:14px;background:linear-gradient(145deg,#eef3fc,#dce7ff);display:flex;align-items:center;justify-content:center;font-size:24px;margin:0 auto 8px}
+
+  /* 小 toast */
+  .toast{position:absolute;left:16px;right:16px;bottom:86px;background:#2b2f36;color:#fff;border-radius:10px;padding:10px 14px;font-size:11.5px;box-shadow:var(--shadow-lg);z-index:50;display:none;align-items:center;gap:8px}
+  .toast.show{display:flex;animation:fade .2s ease}
+
+  /* 二次确认 dialog */
+  .dialog-bg{position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:60;display:none;align-items:center;justify-content:center;padding:24px}
+  .dialog-bg.show{display:flex}
+  .dialog{background:var(--md-surface);border-radius:20px;padding:20px;width:100%;max-width:300px;box-shadow:var(--shadow-lg)}
+  .dialog h4{margin:0 0 8px;font-size:16px}
+  .dialog p{font-size:12px;color:var(--md-on-surface-var);line-height:1.6;margin:0 0 16px}
+  .dialog .acts{display:flex;justify-content:flex-end;gap:6px}
+
+  @media(max-width:820px){
+    .nav{width:170px}.spec{display:none}.canvas{padding:14px;gap:14px}
+  }
+
+  /* 出图模式：?screen=xxx&shot=1 —— 只留手机外框，供逐屏导出 PNG 原型图 */
+  body.shot{background:#eef1f6}
+  body.shot .nav,body.shot .stage-bar,body.shot .spec{display:none!important}
+  body.shot .app{display:block;height:auto;overflow:visible}
+  body.shot .stage{display:block}
+  body.shot .canvas{min-height:100vh;align-items:flex-start;justify-content:center;background:#eef1f6;overflow:visible;
+    padding:0;display:flex;width:100vw}
+  body.shot .device{margin:0 auto;box-shadow:none}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- 屏导航（原型外壳） -->
+  <div class="nav">
+    <h1>OpenPicasa · Android</h1>
+    <div class="sub">设计原型 v1.0 · 探讨稿<br>10 屏 · 360×780dp 手机外框<br>配套 docs/19-Android-界面原型设计.md</div>
+    <div class="grp">首启与授权</div>
+    <button data-go="empty" class="active"><span class="sid">S1</span>空库首屏 / 首次引导</button>
+    <button data-go="perm"><span class="sid">S2</span>权限与关注文件夹</button>
+    <div class="grp">浏览与整理</div>
+    <button data-go="library"><span class="sid">S3</span>图库栅格（照片 Tab）</button>
+    <button data-go="search"><span class="sid">S4</span>搜索与组合筛选</button>
+    <button data-go="select"><span class="sid">S5</span>长按多选 / CAB</button>
+    <button data-go="viewer"><span class="sid">S6</span>全屏查看器</button>
+    <button data-go="albums"><span class="sid">S7</span>相册与标签</button>
+    <div class="grp">索引与系统</div>
+    <button data-go="index"><span class="sid">S8</span>索引管理（索引 Tab）</button>
+    <button data-go="transfer"><span class="sid">S9</span>导入 / 导出索引</button>
+    <button data-go="settings"><span class="sid">S10</span>设置</button>
+    <div class="redline"><b>红线</b>：照片目录零写入（R-1）、编辑室入口不存在（R-2）、不恢复玻璃态、五处同源、失败不静默。原型为界面探讨，未立项、未实装。</div>
+    <div class="note">桌面端为 Rust/egui 的 macOS 应用（<b>README.md</b>）。本文把 <b>12/14/17</b> 的信息架构<b>翻译</b>到 Material 3 手机形态，而非缩放桌面窗口。图标为几何自绘，不引原版资源。</div>
+  </div>
+
+  <!-- 舞台 -->
+  <div class="stage">
+    <div class="stage-bar">
+      <span class="t" id="stageTitle">S1 · 空库首屏 / 首次引导</span>
+      <span class="d" id="stageDesc">首次扫描向导 · 空态 · 红线文案前置</span>
+      <span class="tag">Material 3 · 浅色 · 竖屏 360dp</span>
+    </div>
+    <div class="canvas">
+      <!-- 手机外框 -->
+      <div class="device">
+        <div class="notch"><i></i><i></i></div>
+        <div class="phone">
+          <!-- 状态栏 -->
+          <div class="statusbar" id="statusbar">
+            <span id="clock">9:41</span>
+            <span class="icons">▮▮▮ &nbsp;WiFi &nbsp;<span class="bat"></span></span>
+          </div>
+
+          <!-- 内容：10 屏 -->
+          <div class="content" id="content">
+
+            <!-- S1 空库首屏 -->
+            <div class="screen active" data-screen="empty">
+              <div class="appbar"><div class="title">OpenPicasa</div><button class="ic" title="菜单">≡</button></div>
+              <div class="empty-wrap">
+                <div class="empty-art"><span class="ph1"></span><span class="ph2"></span></div>
+                <h2>还没有照片</h2>
+                <div class="muted">添加文件夹即可开始浏览。<br><b>我们只读，不改你的照片。</b></div>
+                <div class="empty-actions">
+                  <button class="btn filled block" data-go="perm">添加文件夹</button>
+                  <button class="btn outlined block" data-toast="从系统图库导入（原型演示）">从系统图库导入</button>
+                </div>
+                <div class="scan-opts">
+                  <div style="font-size:11px;color:var(--md-on-surface-var);margin-bottom:2px">或选择扫描方式</div>
+                  <div class="scan-opt on"><span class="radio"></span>典型位置（相机 / 下载 / 图片）</div>
+                  <div class="scan-opt"><span class="radio"></span>整个设备</div>
+                  <div class="scan-opt"><span class="radio"></span>暂不扫描（跳过）</div>
+                </div>
+              </div>
+              <div class="bottomnav" data-nav></div>
+              <div class="gesturebar"><div class="pill"></div></div>
+            </div>
+
+            <!-- S2 权限与关注文件夹 -->
+            <div class="screen" data-screen="perm">
+              <div class="appbar"><button class="ic" data-back="library">←</button><div class="title">关注文件夹</div><button class="ic" data-toast="通过系统选择器添加目录（SAF）">＋</button></div>
+              <div class="scroll">
+                <div style="margin:12px 14px;padding:14px;border-radius:14px;background:var(--md-secondary-container)">
+                  <div style="font-size:12.5px;font-weight:700;margin-bottom:6px">ⓘ 为什么要权限</div>
+                  <div style="font-size:11.5px;line-height:1.7;color:var(--md-on-surface-var)">OpenPicasa 只读取照片与 EXIF，用于生成缩略图与索引。<b>不会写入 / 删除 / 重命名原图。</b></div>
+                  <button class="btn tonal sm" style="margin-top:10px" data-toast="已授予照片与媒体权限（原型演示）">授予照片权限</button>
+                </div>
+                <div class="section">已添加的目录 · 3</div>
+                <div class="card" style="margin:0 14px">
+                  <div class="row"><div class="lead">📁</div><div class="txt"><div class="a">DCIM / Camera</div><div class="b">● 已索引 · 包含子文件夹</div></div><div class="trail">1204 张</div></div>
+                  <div class="row"><div class="lead">📁</div><div class="txt"><div class="a">Pictures / 旅行</div><div class="b">● 监视中 · 3 个子目录</div></div><div class="trail">318 张</div></div>
+                  <div class="row offline"><div class="lead">📁</div><div class="txt"><div class="a">U盘 / 照片</div><div class="b">○ 离线 · 断开后自动重扫</div></div><div class="trail">—</div></div>
+                </div>
+                <div style="margin:12px 14px">
+                  <button class="btn outlined block" data-toast="打开系统文件选择器（SAF）">＋ 通过系统选择器添加目录</button>
+                </div>
+                <div class="setting-row" style="margin:0 14px;border:1px solid var(--md-surface-3);border-radius:12px">
+                  <div class="txt"><div class="a">包含子文件夹</div><div class="b">递归显示整棵子树（F1-02）</div></div>
+                  <div class="switch on" data-switch><div class="knob"></div></div>
+                </div>
+              </div>
+              <div class="bottomnav" data-nav></div>
+              <div class="gesturebar"><div class="pill"></div></div>
+            </div>
+
+            <!-- S3 图库栅格 -->
+            <div class="screen" data-screen="library">
+              <div class="appbar">
+                <div class="title" style="font-size:17px">OpenPicasa</div>
+                <button class="ic" data-go="search" title="搜索">🔍</button>
+                <button class="ic" id="densityBtn" title="密度">▦</button>
+                <button class="ic" data-toast="溢出菜单：排序 / 布局 / 设置">≡</button>
+              </div>
+              <div class="lib-head"><div class="l1">所有照片</div><div class="l2">2,718 张 · 2026 年 11 月</div></div>
+              <div class="density">缩略图密度
+                <div class="seg" id="densitySeg">
+                  <button data-col="4">小</button><button class="on" data-col="3">中</button><button data-col="2">大</button>
+                </div>
+                <span style="flex:1"></span><span id="colHint">3 列</span>
+              </div>
+              <div class="scroll">
+                <div class="grouphead">2026 年 11 月 <span class="cnt">· 共 86 张</span><span class="sp"></span><span style="font-size:11px">⌄</span></div>
+                <div class="grid c3" id="mainGrid"></div>
+                <div class="grouphead">2026 年 10 月 <span class="cnt">· 共 412 张</span><span class="sp"></span><span style="font-size:11px">⌄</span></div>
+                <div class="grid c3" data-extra></div>
+              </div>
+              <button class="fab" data-toast="导入 / 添加照片（原型演示）">＋</button>
+              <div class="bottomnav" data-nav></div>
+              <div class="gesturebar"><div class="pill"></div></div>
+            </div>
+
+            <!-- S4 搜索与组合筛选 -->
+            <div class="screen" data-screen="search">
+              <div class="appbar" style="padding-right:12px">
+                <button class="ic" data-back="library">←</button>
+                <div class="field" style="flex:1;display:flex;align-items:center;gap:6px;background:var(--md-surface-2);border-radius:28px;padding:8px 12px"><span style="opacity:.6">🔍</span><input id="searchInput" placeholder="搜索照片、文件夹、日期"><button class="ic" style="width:26px;height:26px" data-clear-search>✕</button></div>
+              </div>
+              <div class="scope">范围：<b>当前视图</b> · 全库 &nbsp;|&nbsp; <span class="pill-num">128 张</span></div>
+              <div class="scroll">
+                <div class="section">近期搜索</div>
+                <div style="padding:0 14px;display:flex;gap:7px;flex-wrap:wrap">
+                  <span class="chip">海边 <span class="x">✕</span></span><span class="chip">2026-10 <span class="x">✕</span></span><span class="chip">IMG_20 <span class="x">✕</span></span>
+                </div>
+                <div class="filter-panel">
+                  <div class="fl"><span class="lb">日期</span><div class="chips"><span class="chip">起始</span><span class="chip">结束</span></div></div>
+                  <div class="fl"><span class="lb">类型</span><div class="chips"><span class="chip on">JPEG</span><span class="chip">PNG</span><span class="chip">RAW</span><span class="chip">视频</span></div></div>
+                  <div class="fl"><span class="lb">星标</span><div class="chips"><span class="chip">★ 仅星标</span></div></div>
+                  <div class="fl"><span class="lb">标签</span><div class="chips"><span class="chip on">旅行</span><span class="chip">家人</span><span class="chip">＋</span></div></div>
+                  <div class="fl"><span class="lb">排序</span><div class="chips"><span class="chip on">拍摄日期 ↓</span></div></div>
+                  <div class="actions"><button class="btn text sm" data-clear-filter>清除全部</button><button class="btn filled sm" data-toast="应用筛选（原型演示）">应用筛选</button></div>
+                </div>
+                <div class="result-head" id="resultHead">找到 128 张 <span style="font-weight:400;color:var(--md-on-surface-var)">· 文件名 / 文件夹 / EXIF 日期</span></div>
+                <div class="grid c3" id="resultGrid"></div>
+                <div class="noresult" id="noResult" style="display:none">
+                  <div class="big">🕳</div><div style="font-size:13px;font-weight:600">未找到照片</div>
+                  <div style="font-size:11px;margin-top:6px">不列出「标签 / 人物」等无数据筛选项（F1-21 验收⑤）</div>
+                </div>
+                <div style="font-size:10px;color:var(--md-on-surface-var);padding:6px 16px 12px">提示：输入「zzz」可预览无结果空态。</div>
+              </div>
+              <div class="bottomnav" data-nav></div>
+              <div class="gesturebar"><div class="pill"></div></div>
+            </div>
+
+            <!-- S5 长按多选 -->
+            <div class="screen" data-screen="select">
+              <div class="appbar sel"><div class="title" style="font-size:16px" id="selCount">✓ 已选 3 张</div><button class="ic" data-toast="更多：加入托盘 / 全选 / 反选">≡</button></div>
+              <div class="cab-actions">
+                <button class="btn tonal sm" data-select-all>全选</button>
+                <button class="btn tonal sm" data-invert>反选</button>
+                <button class="btn text sm" data-back="library">取消</button>
+              </div>
+              <div class="scroll">
+                <div class="grid c3" id="selectGrid"></div>
+              </div>
+              <div class="cab-bottom">
+                <button class="act" data-toast="加星标 ★"><span class="i">★</span>星标</button>
+                <button class="act" data-toast="加入相册 ▣"><span class="i">▣</span>相册</button>
+                <button class="act" data-toast="打标签 🏷"><span class="i">🏷</span>标签</button>
+                <button class="act" data-toast="导出 ⬆"><span class="i">⬆</span>导出</button>
+                <button class="act del" data-confirm="删除 3 张照片？|删除仅移出图库或进系统回收站；照片文件不受影响。"><span class="i">🗑</span>删除</button>
+              </div>
+              <div class="gesturebar"><div class="pill"></div></div>
+            </div>
+
+            <!-- S6 查看器 -->
+            <div class="screen" data-screen="viewer" style="background:var(--viewer-bg)">
+              <div class="viewer">
+                <div class="vtop"><button class="ic" data-back="library">←</button><span class="cnt">1 / 2,718</span><span class="sp"></span><button class="ic" data-toast="已加星标 ★">☆</button><button class="ic" data-sheet>ⓘ</button><button class="ic" data-toast="更多">⋯</button></div>
+                <div class="vstage">
+                  <div class="vphoto" id="vphoto" data-zoom>IMG_2043.JPG · 双击缩放</div>
+                  <button class="vnav l" data-page="-1">‹</button>
+                  <button class="vnav r" data-page="1">›</button>
+                  <div class="vhint">双击缩放 · 左右滑翻页 · 上滑看信息 · 下滑退出</div>
+                </div>
+                <div class="sheet hidden" id="viewerSheet">
+                  <div class="handle"></div>
+                  <div class="st">IMG_2043.JPG <span style="font-size:10px;color:#9fd3b0;font-weight:400">● 本机索引</span><span style="flex:1"></span><span style="color:var(--md-star)">★</span></div>
+                  <div class="meta">2026-11-02 14:31 · 4032 × 3024 · 4.2 MB<br>相机 Sony A7IV · 镜头 FE 35mm · ISO 200 · f/2.8 · 1/500s<br>GPS 31.23°N 121.47°E（EXIF 方向自动应用）</div>
+                  <div class="tags"><span class="tg">旅行</span><span class="tg">海边</span><span class="tg">＋ 添加标签</span></div>
+                  <div class="src">● 元数据来源：本机索引（M4-META-*）</div>
+                  <button class="btn outlined sm" style="margin-top:10px;color:#cfd3da;border-color:#55585f" data-toast="在系统文件管理器中显示">在系统文件管理器中显示</button>
+                  <div style="font-size:10px;color:#7b808a;margin-top:8px">无编辑 / 滤镜 / 旋转写回入口（R-2）；方向只由 EXIF Orientation 决定。</div>
+                </div>
+              </div>
+              <div class="gesturebar dark"><div class="pill"></div></div>
+            </div>
+
+            <!-- S7 相册与标签 -->
+            <div class="screen" data-screen="albums">
+              <div class="appbar"><div class="title">相册与标签</div><button class="ic" data-confirm="新建相册？|相册是虚拟集合，不会在磁盘创建目录。">＋</button></div>
+              <div class="segtabs"><button class="on" data-seg="albums">相册</button><button data-seg="tags">标签</button></div>
+              <div class="scroll">
+                <div class="albums" id="albumGrid">
+                  <div class="album" data-confirm="删除相册「旅行 2026」？|删除相册不会删除照片文件（虚拟集合，F5-02）。"><div class="cover" style="background:linear-gradient(135deg,#7aa0d8,#c98b5e)">🏖</div><div class="cap"><div class="n">旅行 2026</div><div class="c">128 张</div></div></div>
+                  <div class="album" data-confirm="删除相册「家人」？|删除相册不会删除照片文件。"><div class="cover" style="background:linear-gradient(135deg,#d8a07a,#8a6d9e)">👨‍👩‍👧</div><div class="cap"><div class="n">家人</div><div class="c">64 张</div></div></div>
+                  <div class="album" data-confirm="删除相册「海边」？|删除相册不会删除照片文件。"><div class="cover" style="background:linear-gradient(135deg,#6db6a8,#3f6d8e)">🌊</div><div class="cap"><div class="n">海边</div><div class="c">37 张</div></div></div>
+                  <div class="album new" data-confirm="新建相册？|相册是虚拟集合，不会在磁盘创建目录。"><div class="plus">＋</div>新建相册</div>
+                </div>
+                <div id="tagPanel" style="display:none;padding:8px 14px">
+                  <div class="section">标签管理</div>
+                  <div style="display:flex;gap:7px;flex-wrap:wrap"><span class="chip on">旅行</span><span class="chip on">家人</span><span class="chip on">海边</span><span class="chip">＋ 新建标签</span></div>
+                  <div class="divider" style="margin:14px 0"></div>
+                  <div style="font-size:11px;color:var(--md-on-surface-var);line-height:1.7">长按标签可改名 / 删除；标签与相册定义落在自家 App 数据库，<b>不写 .picasa.ini</b>（R-1 数据自立）。</div>
+                </div>
+                <div style="font-size:10.5px;color:var(--md-on-surface-var);padding:6px 16px">长按卡片：改名 / 设封面 / 删除（二次确认）。</div>
+              </div>
+              <div class="bottomnav" data-nav></div>
+              <div class="gesturebar"><div class="pill"></div></div>
+            </div>
+
+            <!-- S8 索引管理 -->
+            <div class="screen" data-screen="index">
+              <div class="appbar"><div class="title">索引管理</div><select class="state-select" id="stateSel" title="六态切换">
+                <option>空闲</option><option>准备中</option><option selected>进行中</option><option>成功</option><option>失败</option><option>已取消</option>
+              </select><button class="ic" data-toast="菜单：重建索引 / 诊断">≡</button></div>
+              <div class="scroll">
+                <div class="idx-summary">
+                  <div class="big" id="idxBig">2,718 / 2,740</div>
+                  <div class="sub">已索引 / 总数 · 缩略图 2,705 · 失败 22 · 待处理 0</div>
+                  <div class="progress"><div class="bar" id="idxBar" style="width:99%"></div></div>
+                  <div class="idx-state"><span class="dot" id="idxDot"></span><span id="idxStateText">进行中：已处理 2,718 项（不显示 ETA）</span></div>
+                  <div class="idx-actions"><button class="btn filled sm" id="idxBtn1">暂停</button><button class="btn tonal sm" id="idxBtn2">继续</button><button class="btn text sm" data-confirm="删除索引？|只删自家索引数据，照片文件不受影响；可重建。">删除索引</button></div>
+                </div>
+                <div class="idxtabs"><button class="on">总览</button><button>目录</button><button>失败</button><button>任务</button><button>设置</button></div>
+                <div class="section">逐文件夹状态</div>
+                <div class="card" style="margin:0 14px">
+                  <div class="row"><div class="lead">📁</div><div class="txt"><div class="a">DCIM / Camera</div><div class="b">● 已索引 · 监视中</div></div><div class="trail">1204</div></div>
+                  <div class="row"><div class="lead">📁</div><div class="txt"><div class="a">Pictures / 旅行</div><div class="b">● 监视中 · 3 个子目录</div></div><div class="trail">318</div></div>
+                  <div class="row offline"><div class="lead">📁</div><div class="txt"><div class="a">U盘 / 照片</div><div class="b">○ 离线 · 目录不可访问，恢复后自动重扫（不静默退化）</div></div><div class="trail">—</div></div>
+                </div>
+                <div class="section" style="display:flex;align-items:center">失败项 22（常驻，不自动收起）<span style="flex:1"></span><button class="btn text sm" data-toast="重试选中失败项">重试选中</button></div>
+                <div class="fail-item"><span class="fx">✕</span> IMG_0912.CR2 · 不支持解码</div>
+                <div class="fail-item"><span class="fx">✕</span> DSC_0031.HEIC · 解码器未编译</div>
+                <div style="font-size:10px;color:var(--md-on-surface-var);padding:8px 16px 14px">非模态：离开本页 ≠ 取消任务，后台继续跑，回来接着看进度（12 §0.2）。五处读同一份快照。</div>
+              </div>
+              <div class="bottomnav" data-nav></div>
+              <div class="gesturebar"><div class="pill"></div></div>
+            </div>
+
+            <!-- S9 导入导出 -->
+            <div class="screen" data-screen="transfer">
+              <div class="appbar"><button class="ic" data-back="index">←</button><div class="title">导入 / 导出</div></div>
+              <div class="scroll">
+                <div class="segtabs" style="padding-top:12px"><button class="on">导出索引</button><button>导入向导</button></div>
+                <div class="section">导出预览</div>
+                <div class="card" style="margin:0 14px">
+                  <div class="row"><div class="lead">🗂</div><div class="txt"><div class="a">照片 2,718 张</div><div class="b">索引 + 元数据，不含原图</div></div></div>
+                  <div class="setting-row"><div class="txt"><div class="a">包含缩略图</div><div class="b">导出 .opidx 体积更大</div></div><div class="switch" data-switch><div class="knob"></div></div></div>
+                </div>
+                <div style="margin:12px 14px"><button class="btn filled block" data-confirm="导出并覆盖现有索引？|导出 / 导入只动自家数据库，照片文件不受影响。">导出 .opidx</button></div>
+                <div class="divider" style="margin:16px 14px"></div>
+                <div class="section">导入 · 四步向导</div>
+                <div class="stepper"><span class="s done">✓</span><span class="ln"></span><span class="s cur">2</span><span class="ln"></span><span class="s">3</span><span class="ln"></span><span class="s">4</span></div>
+                <div style="font-size:11px;color:var(--md-on-surface-var);text-align:center">① 校验 ✓　② 策略　③ 进度　④ 结果</div>
+                <div class="confirm-box">
+                  <div class="h">Step 2 · 策略与影响范围</div>
+                  <div class="b">合并 / 替换：<b>● 替换</b>（○ 合并）<br>影响范围：2,718 张将被覆盖。<br>二次确认：「照片文件不受影响」。</div>
+                  <div class="idx-actions"><button class="btn text sm" data-toast="取消并回滚（原型演示）">取消</button><button class="btn filled sm" data-toast="进入 Step 3 进度（原型演示）">继续</button></div>
+                </div>
+                <div class="section">Step 4 · 结果清单</div>
+                <div class="result-line"><span class="ok">成功 2,700</span><span>跳过 18</span><span>失败 0</span></div>
+                <div class="result-line" style="color:var(--md-on-surface-var)">逐根重新匹配根目录（12 S6 / 18 §1）</div>
+              </div>
+              <div class="bottomnav" data-nav></div>
+              <div class="gesturebar"><div class="pill"></div></div>
+            </div>
+
+            <!-- S10 设置 -->
+            <div class="screen" data-screen="settings">
+              <div class="appbar"><button class="ic" data-back="library">←</button><div class="title">设置</div></div>
+              <div class="scroll">
+                <div class="section">显示</div>
+                <div class="setting-row"><div class="txt"><div class="a">缩略图档位</div><div class="b">小 / 中 / 大三档，均显示文件名</div></div><span class="val">中档 ▾</span></div>
+                <div class="setting-row"><div class="txt"><div class="a">排序方式</div><div class="b">名称 / 拍摄日期 / 修改日期 / 大小</div></div><span class="val">拍摄日期 ▾</span></div>
+                <div class="setting-row"><div class="txt"><div class="a">主题</div><div class="b">跟随系统（待裁决 P-A03）</div></div><span class="val">跟随系统 ▾</span></div>
+                <div class="section">索引</div>
+                <div class="setting-row"><div class="txt"><div class="a">格式白名单</div><div class="b">JPEG / PNG / GIF / BMP / TIFF / WebP / RAW</div></div><span class="val">编辑</span></div>
+                <div class="setting-row"><div class="txt"><div class="a">包含子文件夹</div><div class="b">递归显示整棵子树</div></div><div class="switch on" data-switch><div class="knob"></div></div></div>
+                <div class="setting-row"><div class="txt"><div class="a">仅 Wi-Fi 下扫描</div><div class="b">Android 特有 · 省流量</div></div><div class="switch" data-switch><div class="knob"></div></div></div>
+                <div class="section">关于</div>
+                <div class="about">
+                  <div class="logo">▦</div>
+                  OpenPicasa for Android（探讨稿）<br>
+                  「像 Picasa，但不通」<br>
+                  <b>照片目录零写入 · 无编辑室</b><br>
+                  <span style="font-size:10px">本原型为界面设计探讨，未立项、未实装。产品红线以 README.md 为准。</span>
+                </div>
+              </div>
+              <div class="bottomnav" data-nav></div>
+              <div class="gesturebar"><div class="pill"></div></div>
+            </div>
+
+          </div><!-- /content -->
+
+          <!-- toast -->
+          <div class="toast" id="toast"><span>✓</span><span id="toastText"></span></div>
+          <!-- 二次确认 dialog -->
+          <div class="dialog-bg" id="dialogBg">
+            <div class="dialog">
+              <h4 id="dlgTitle">确认</h4>
+              <p id="dlgBody"></p>
+              <div class="acts"><button class="btn text sm" id="dlgCancel">取消</button><button class="btn filled sm" id="dlgOk">确认</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右侧说明卡 -->
+      <div class="spec" id="spec">
+        <div class="k">当前屏 · 设计说明</div>
+        <h3 id="specTitle">S1 · 空库首屏 / 首次引导</h3>
+        <div id="specBody"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  /* ---------- 数据 ---------- */
+  var TONES = [
+    'linear-gradient(135deg,#7c93b8,#c2a0b5)','linear-gradient(135deg,#c98b5e,#7b6a86)',
+    'linear-gradient(135deg,#6db6a8,#3f6d8e)','linear-gradient(135deg,#b58a8a,#6d7c9e)',
+    'linear-gradient(135deg,#9aa86b,#c2a86b)','linear-gradient(135deg,#8a7bb0,#6a9bb5)',
+    'linear-gradient(135deg,#c07a7a,#9a8ab0)','linear-gradient(135deg,#5f8f86,#b08a6a)'
+  ];
+  var NAMES = ['IMG_2043','DSC_0912','IMG_2044','P1030881','IMG_0987','DSC_0031','IMG_1120','IMG_2051','P1030902'];
+
+  var SCREENS = {
+    empty:{t:'S1 · 空库首屏 / 首次引导',d:'首次扫描向导 · 空态 · 红线文案前置',s:'<p>对应 <b>F1-01</b> 首次扫描向导与 <b>m1-empty</b> 基线。三选一（典型 / 全盘 / 跳过）任一都能得到可用图库；跳过时主界面给「添加文件夹」空态引导。</p><p>「<b>我们只读，不改你的照片</b>」把红线 <b>R-1</b> 前置到首屏，不等用户撞墙。</p><div class="tagrow"><span class="tg">F1-01</span><span class="tg">R-1</span><span class="tg">Filled button</span><span class="tg">M3 Dialog</span></div>'},
+    perm:{t:'S2 · 权限与关注文件夹',d:'照片权限 rationale · SAF · 离线降级',s:'<p>Android 特有的<b>权限 rationale</b>：只读取照片与 EXIF 生成缩略图与索引，不写入 / 删除 / 重命名原图。通过 <b>SAF 系统选择器</b>添加关注文件夹，复刻桌面「关注文件夹」语义。</p><ul><li>「包含子文件夹」= F1-02 递归</li><li>U盘节点灰 + 原因 = F1-05 离线降级</li><li>断开后自动重扫，不静默退化</li></ul><div class="tagrow"><span class="tg">F1-02</span><span class="tg">F1-05</span><span class="tg">SAF</span><span class="tg">R-1</span></div>'},
+    library:{t:'S3 · 图库栅格（照片 Tab）',d:'日期分组吸顶 · 三档密度 · 星标/选中角标 · FAB',s:'<p>把桌面<b>三行骨架</b>翻译成 TopAppBar + 底部 3 Tab + FAB。吸顶日期分组头（F1-16）、星标 ★ 角标（M42-UI-01）、文件名单行省略。</p><p>点顶部 <b>▦ 密度</b> 或下方「小/中/大」切换 <b>4 / 3 / 2 列</b>；≤48px 档 8px 圆角（M42-UI-02）。索引 Tab 角标来自单一快照，不单独计数。</p><div class="tagrow"><span class="tg">F1-13/14/16/22</span><span class="tg">12 S0</span><span class="tg">17 S1</span><span class="tg">单一真相源</span></div>'},
+    search:{t:'S4 · 搜索与组合筛选',d:'即时过滤 · 范围切换 · 组合筛选 · 无结果空态',s:'<p><b>F1-21</b> 联合搜索：文件名 / 文件夹名 / EXIF 拍摄日期；范围「当前视图 / 全库」。组合筛选对齐 <b>12 S8</b> 与 M4-SEARCH-*。</p><p>输入 <b>zzz</b> 可预览无结果空态：只说「未找到照片」，<b>不列出「标签 / 人物」等 M1 无数据筛选项</b>（F1-21 验收⑤）。</p><div class="tagrow"><span class="tg">F1-21</span><span class="tg">M4-SEARCH-*</span><span class="tg">12 S8</span></div>'},
+    select:{t:'S5 · 长按多选 / 上下文操作栏',d:'长按进 CAB · 批量动作 · 删除二次确认',s:'<p>桌面 <b>14 §4</b> 用鼠标框选 + 四枚工具栏按钮；手机改为<b>长按进入多选 + 点选</b>，CAB 替换 TopAppBar，批量动作收进底部操作栏。</p><ul><li>已选计数 = F1-18/19 托盘语义</li><li>星标 / 相册 / 标签 / 导出 / 删除</li><li>删除必经二次确认「照片文件不受影响」</li></ul><div class="tagrow"><span class="tg">F1-18/19</span><span class="tg">14 §4</span><span class="tg">12 S10</span><span class="tg">CAB</span></div>'},
+    viewer:{t:'S6 · 全屏查看器',d:'暗底 · 捏合/双击 · 左右滑 · 上滑信息面板',s:'<p><b>F2-01～05/09/16/17</b> + <b>12 S9</b> + <b>17 S2</b>。暗底等比显示，EXIF 信息面板含「来源标签」与标签 chips。</p><p>点 <b>ⓘ</b> 打开信息面板、<b>双击照片</b>缩放、<b>‹ ›</b> 翻页。</p><div class="red"><b>R-2</b>：没有编辑 / 滤镜 / 旋转写回入口；方向只由 EXIF Orientation 决定。</div><div class="tagrow"><span class="tg">F2-*</span><span class="tg">M4-META-*</span><span class="tg">bottom sheet</span><span class="tg">R-2</span></div>'},
+    albums:{t:'S7 · 相册与标签',d:'虚拟集合 · 新建/改名/删除二次确认 · 标签 chips',s:'<p><b>F5-01～04</b> + <b>12 S10</b> + <b>17 S4</b>。相册是<b>虚拟集合</b>不是磁盘目录（F5-04）；删除二次确认「删除相册不会删除照片文件」。</p><p>相册定义落自家 App 数据库，<b>不写 .picasa.ini</b>（R-1 数据自立，与项目 v3.0 一致）。点「标签」分段看标签管理。</p><div class="tagrow"><span class="tg">F5-01～04</span><span class="tg">M42-UI-04/05</span><span class="tg">R-1</span><span class="tg">虚拟集合</span></div>'},
+    index:{t:'S8 · 索引管理（索引 Tab）',d:'总览 + 五标签 · 六态进度 · 失败常驻 · 离线失联',s:'<p><b>M4-IDX-*</b> + <b>12 S1</b> + <b>18</b> + <b>11 §2.1.2</b>。顶部「状态」下拉切 <b>空闲 / 准备中 / 进行中 / 成功 / 失败 / 已取消</b> 六态。</p><ul><li>进度只给「已处理 N 项」，<b>不显示 ETA</b></li><li>失败项常驻、可重试（不静默）</li><li>离线节点写明原因，恢复后自动重扫</li><li>离开本页 ≠ 取消任务（非模态）</li></ul><div class="tagrow"><span class="tg">M4-IDX-*</span><span class="tg">六态</span><span class="tg">单一快照</span><span class="tg">18 离线</span></div>'},
+    transfer:{t:'S9 · 导入 / 导出索引',d:'导出预览 · 四步向导 · 覆盖确认 · 结果清单',s:'<p><b>12 S2/S3～S7</b> + <b>18 §1</b>。导出预览含「包含缩略图」开关；导入四步向导（校验 → 策略 → 进度 → 结果）。</p><p>覆盖/删除二次确认统一文案「<b>照片文件不受影响</b>」；结果含成功/跳过/失败 + 逐根重新匹配根目录。</p><div class="tagrow"><span class="tg">12 S2～S7</span><span class="tg">18 §1</span><span class="tg">四步向导</span></div>'},
+    settings:{t:'S10 · 设置',d:'档位/排序/白名单 · 红线说明 · 待裁决项',s:'<p><b>F10</b> 设置项。缩略图档位、排序、格式白名单、包含子文件夹；「仅 Wi-Fi 下扫描」为 Android 特有。</p><p>「主题 = 跟随系统」是待裁决 P-A03（桌面 12 §11 曾把深色主题列为非目标）。关于页可见 <b>R-1 / R-2</b> 红线。</p><div class="tagrow"><span class="tg">F10</span><span class="tg">P-A03</span><span class="tg">R-1/R-2</span></div>'}
+  };
+
+  /* ---------- 工具 ---------- */
+  function $(s,r){return (r||document).querySelector(s)}
+  function $$(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))}
+  function makeCells(host,count,opts){
+    opts=opts||{};
+    var html='';
+    for(var i=0;i<count;i++){
+      var tone=TONES[i%TONES.length];
+      var star=(opts.star!==false && i%5===0)?'<span class="star">★</span>':'';
+      var broken=(opts.broken && i===count-1);
+      var sel=(opts.sel && i<3);
+      html+='<div class="cell'+(broken?' broken':'')+(sel?' selected':'')+'" data-cell>'
+        +'<div class="tone" style="background:'+tone+'"></div>'
+        +'<div class="img">'+(broken?'▨':'')+'</div>'
+        +'<div class="fname">'+NAMES[i%NAMES.length]+'.JPG</div>'
+        +star
+        +'<span class="selmark'+(sel?' check':'')+'">'+(sel?'✓':'')+'</span>'
+        +'</div>';
+    }
+    host.innerHTML=html;
+  }
+
+  /* ---------- 底部导航 ---------- */
+  var NAV=[['照片','library','▦'],['文件夹','perm','📁'],['索引','index','◉']];
+  function buildNav(){
+    $$('[data-nav]').forEach(function(host){
+      var cur=host.closest('.screen').getAttribute('data-screen');
+      var html='';
+      NAV.forEach(function(n){
+        var on=(n[1]===cur)||(cur==='select'&&n[1]==='library')||(cur==='search'&&n[1]==='library')||(cur==='viewer'&&n[1]==='library')||(cur==='albums'&&n[1]==='library')||(cur==='settings'&&n[1]==='library')||(cur==='transfer'&&n[1]==='index')||(cur==='empty'&&n[1]==='library');
+        var badge=(n[1]==='index'&&cur!=='index')?'<span class="badge">●</span>':'';
+        html+='<button class="tab '+(on?'active':'')+'" data-go="'+n[1]+'"><span class="ico">'+n[2]+'</span>'+n[0]+badge+'</button>';
+      });
+      host.innerHTML=html;
+    });
+  }
+
+  /* ---------- 屏切换 ---------- */
+  var curScreen='empty';
+  function go(name){
+    if(!SCREENS[name])return;
+    curScreen=name;
+    $$('.screen').forEach(function(s){s.classList.toggle('active',s.getAttribute('data-screen')===name)});
+    $$('.nav button').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-go')===name)});
+    $('#stageTitle').textContent=SCREENS[name].t;
+    $('#stageDesc').textContent=SCREENS[name].d;
+    $('#specTitle').textContent=SCREENS[name].t;
+    $('#specBody').innerHTML=SCREENS[name].s;
+    var dark=(name==='viewer');
+    $('#statusbar').classList.toggle('dark',dark);
+    $$('.gesturebar').forEach(function(g){g.classList.toggle('dark',dark)});
+    // 切换屏时隐藏浮层
+    $('#dialogBg').classList.remove('show');
+    $('#toast').classList.remove('show');
+    if(name==='empty'){$('#statusbar').classList.remove('dark')}
+    if(name==='viewer'){
+      var sh=$('#viewerSheet');sh.classList.add('hidden');
+    }
+    buildNav();
+  }
+
+  /* ---------- 全局点击委托 ---------- */
+  document.addEventListener('click',function(e){
+    var t=e.target;
+    // data-go
+    var g=t.closest('[data-go]');
+    if(g){go(g.getAttribute('data-go'));return}
+    // data-back
+    var b=t.closest('[data-back]');
+    if(b){go(b.getAttribute('data-back'));return}
+    // toast
+    var to=t.closest('[data-toast]');
+    if(to){showToast(to.getAttribute('data-toast'));return}
+    // confirm dialog
+    var cf=t.closest('[data-confirm]');
+    if(cf){var parts=cf.getAttribute('data-confirm').split('|');openDialog(parts[0],parts[1]||'');return}
+    // switch
+    var sw=t.closest('[data-switch]');
+    if(sw){sw.classList.toggle('on');return}
+    // scan options
+    var so=t.closest('.scan-opt');
+    if(so){$$('.scan-opt').forEach(function(x){x.classList.remove('on')});so.classList.add('on');return}
+    // chip toggle
+    var ch=t.closest('.chip');
+    if(ch&&!ch.querySelector('.x')){ch.classList.toggle('on');return}
+    // density
+    var dc=t.closest('[data-col]');
+    if(dc){setDensity(dc.getAttribute('data-col'));return}
+    // density button in appbar -> toggle to next
+    if(t.closest('#densityBtn')){cycleDensity();return}
+    // select-all / invert
+    if(t.closest('[data-select-all]')){$$('#selectGrid .cell').forEach(function(c){setSel(c,true)});updateSel();return}
+    if(t.closest('[data-invert]')){$$('#selectGrid .cell').forEach(function(c){setSel(c,!c.classList.contains('selected'))});updateSel();return}
+    // select grid cell
+    var cell=t.closest('#selectGrid .cell');
+    if(cell){setSel(cell,!cell.classList.contains('selected'));updateSel();return}
+    // main grid cell -> viewer
+    var mc=t.closest('#mainGrid .cell, [data-extra] .cell, #resultGrid .cell');
+    if(mc){go('viewer');return}
+    // page arrows
+    var pg=t.closest('[data-page]');
+    if(pg){showToast('翻页 '+(pg.getAttribute('data-page')==='1'?'下一张 →':'← 上一张'));return}
+    // zoom
+    if(t.closest('[data-zoom]')){$('#vphoto').classList.toggle('zoom');return}
+    // sheet
+    if(t.closest('[data-sheet]')){$('#viewerSheet').classList.toggle('hidden');return}
+    // seg tabs (albums / tags, transfer, index tabs)
+    var seg=t.closest('.segtabs button, .idxtabs button');
+    if(seg){
+      var wrap=seg.parentElement;
+      $$('button',wrap).forEach(function(x){x.classList.remove('on')});seg.classList.add('on');
+      if(seg.textContent.indexOf('标签')>=0){$('#tagPanel').style.display='block';$('.albums').style.display='none'}
+      else if(wrap.classList.contains('segtabs')&&seg.closest('[data-screen="albums"]')){$('#tagPanel').style.display='none';$('.albums').style.display=''}
+      return;
+    }
+    // search clear
+    if(t.closest('[data-clear-filter]')){$$('.filter-panel .chip').forEach(function(c){c.classList.remove('on')});showToast('已清除全部筛选');return}
+    if(t.closest('[data-clear-search]')){$('#searchInput').value='';filterResult('');return}
+    // dialog buttons
+    if(t.closest('#dlgCancel')){$('#dialogBg').classList.remove('show');return}
+    if(t.closest('#dlgOk')){$('#dialogBg').classList.remove('show');showToast('已确认（原型演示）');return}
+    // index action buttons
+    if(t.closest('#idxBtn1')){showToast('已暂停索引（后台可继续）');return}
+    if(t.closest('#idxBtn2')){showToast('继续索引');return}
+    // dialog backdrop
+    if(t.id==='dialogBg'){$('#dialogBg').classList.remove('show');return}
+  });
+
+  /* ---------- toast ---------- */
+  var toastTimer;
+  function showToast(msg){
+    $('#toastText').textContent=msg;
+    $('#toast').classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer=setTimeout(function(){$('#toast').classList.remove('show')},1900);
+  }
+  function openDialog(title,body){
+    $('#dlgTitle').textContent=title;$('#dlgBody').textContent=body;
+    $('#dialogBg').classList.add('show');
+  }
+
+  /* ---------- 密度 ---------- */
+  function setDensity(cols){
+    $$('#mainGrid, [data-extra], #resultGrid').forEach(function(g){g.className='grid c'+cols});
+    $$('#densitySeg button').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-col')===cols)});
+    $('#colHint').textContent=cols+' 列';
+  }
+  function cycleDensity(){
+    var cur=$('#densitySeg button.on').getAttribute('data-col');
+    var next=cur==='4'?'3':cur==='3'?'2':'4';
+    setDensity(next);
+  }
+
+  /* ---------- 多选 ---------- */
+  function setSel(c,on){
+    c.classList.toggle('selected',on);
+    var m=c.querySelector('.selmark');
+    m.classList.toggle('check',on);m.textContent=on?'✓':'';
+  }
+  function updateSel(){
+    var n=$$('#selectGrid .cell.selected').length;
+    $('#selCount').textContent='✓ 已选 '+n+' 张';
+  }
+
+  /* ---------- 搜索无结果 ---------- */
+  function filterResult(v){
+    var bad=/zzz|qqq|不存在/i.test(v);
+    $('#resultGrid').style.display=bad?'none':'';
+    $('#noResult').style.display=bad?'block':'none';
+    $('#resultHead').style.display=bad?'none':'flex';
+  }
+  document.addEventListener('input',function(e){
+    if(e.target.id==='searchInput')filterResult(e.target.value);
+  });
+
+  /* ---------- 索引六态 ---------- */
+  var STATE={
+    '空闲':{big:'0 / 0',sub:'暂无索引任务',bar:'0%',txt:'空闲 · 暂无索引任务',dot:'#9aa3b0',b1:'开始',b2:'—'},
+    '准备中':{big:'正在清点…',sub:'扫描目录结构，准备索引',bar:'4%',txt:'准备中：清点目录 …',dot:'#9a6700',b1:'暂停',b2:'继续'},
+    '进行中':{big:'2,718 / 2,740',sub:'缩略图 2,705 · 失败 22 · 待处理 0',bar:'99%',txt:'进行中：已处理 2,718 项（不显示 ETA）',dot:'#2f6fed',b1:'暂停',b2:'继续'},
+    '成功':{big:'2,740 / 2,740',sub:'全部完成 · 失败 0',bar:'100%',txt:'成功：索引完成',dot:'#1b7f4b',b1:'重建',b2:'—'},
+    '失败':{big:'2,718 / 2,740',sub:'失败 22 · 已停止',bar:'99%',txt:'失败：22 项需处理（常驻，不自动收起）',dot:'#ba1a1a',b1:'重试',b2:'继续'},
+    '已取消':{big:'2,718 / 2,740',sub:'已取消 · 可继续',bar:'99%',txt:'已取消：可继续或重新开始',dot:'#9aa3b0',b1:'继续',b2:'重来'}
+  };
+  $('#stateSel').addEventListener('change',function(){
+    var s=STATE[this.value];
+    $('#idxBig').textContent=s.big;
+    $('#idxSummarySub')&&0;
+    $$('.idx-summary .sub').forEach(function(x){x.textContent=s.sub});
+    $('#idxBar').style.width=s.bar;
+    $('#idxStateText').textContent=s.txt;
+    $('#idxDot').style.background=s.dot;
+    $('#idxBtn1').textContent=s.b1;
+    $('#idxBtn2').textContent=s.b2;
+    showToast('状态切换：'+this.value);
+  });
+
+  /* ---------- 初始化 ---------- */
+  makeCells($('#mainGrid'),9);
+  makeCells($('[data-extra]'),6);
+  makeCells($('#resultGrid'),9);
+  makeCells($('#selectGrid'),9);
+  // 默认选中 3 张
+  var sc=$$('#selectGrid .cell');
+  [0,1,3].forEach(function(i){setSel(sc[i],true)});
+  updateSel();
+  buildNav();
+  go('empty');
+
+  /* 出图模式：?screen=xxx&shot=1 —— 供 headless Chrome 逐屏导出 PNG */
+  var qs=(function(){var o={};location.search.replace(/^\?/,'').split('&').forEach(function(p){if(!p)return;var k=p.split('=');o[decodeURIComponent(k[0])]=decodeURIComponent(k[1]||'')});return o})();
+  if(qs.shot==='1'){
+    document.body.classList.add('shot');
+    if(qs.screen&&SCREENS[qs.screen])go(qs.screen);
+    // 出图态：统一隐藏浮层，避免半透明遮罩入镜
+    $('#dialogBg').classList.remove('show');
+    $('#toast').classList.remove('show');
+  }
+})();
+</script>
+</body>
+</html>

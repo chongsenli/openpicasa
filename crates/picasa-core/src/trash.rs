@@ -146,7 +146,12 @@ mod tests {
     #[test]
     fn error_copy_names_the_platform_file_manager() {
         let msg = cross_volume_message(Path::new("/tmp/a.jpg"));
-        assert!(msg.contains("请在文件管理器"), "说明要可读：{msg}");
+        // 「请在……中」这句是**平台无关**的可读性要求；具体叫什么由下面按平台断言。
+        // （早先这里写死「请在文件管理器」，在 macOS 上必然挂——那时叫 Finder。）
+        assert!(
+            msg.contains(&format!("请在{}", file_manager_name())),
+            "说明要可读：{msg}"
+        );
         if !cfg!(target_os = "macos") {
             assert!(!msg.contains("Finder"), "非 macOS 错误信息仍写 Finder：{msg}");
             assert!(msg.contains("文件管理器"), "{msg}");

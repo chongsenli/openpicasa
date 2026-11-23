@@ -676,6 +676,121 @@ mod tests {
         );
     }
 
+    /// `M5-V1` 未验收项③：确认框按钮是约 38 高的实体按钮，不是 egui 默认的
+    /// 约 24 高扁条；两枚按钮底边对齐，主按钮在右。
+    ///
+    /// 原型按钮 36 高（主按钮约 92 宽），加高后的对话框里用默认高度会显得又扁
+    /// 又挤。这里钉住「够高」和「一样高」两件事——具体像素留一点余量，
+    /// 但绝不允许退回默认高度。
+    #[test]
+    fn t2_buttons_are_tall_entity_buttons_aligned_on_baseline() {
+        for appearance in [
+            picasa_core::Appearance::Light,
+            picasa_core::Appearance::Dark,
+        ] {
+            let (ctx, theme) = dialog_ctx(appearance);
+            let screen = egui::vec2(1024.0, 800.0);
+            let (_r, texts, _) = run_dialog(&ctx, &theme, screen, Vec::new());
+            let confirm = texts
+                .iter()
+                .find(|(t, _)| t == picasa_core::trash_plan::TRASH_ACTION)
+                .map(|(_, r)| *r)
+                .expect("缺「移到废纸篓」");
+            let cancel = texts
+                .iter()
+                .find(|(t, _)| t == picasa_core::trash_plan::TRASH_CANCEL)
+                .map(|(_, r)| *r)
+                .expect("缺「取消」");
+
+            // 文字只是按钮的一部分，但两枚按钮同字号同高 → 文字底边应基本齐平。
+            // 用文字矩形的竖直中心对比，容差 1.5 逻辑像素（抗锯齿/字高差异）。
+            assert!(
+                (confirm.center().y - cancel.center().y).abs() < 1.5,
+                "{appearance:?}：两枚按钮文字没有对齐 {:?} vs {:?}",
+                confirm,
+                cancel
+            );
+            // 主按钮在右：确认的文字右边界应大于取消的。
+            assert!(
+                confirm.center().x > cancel.center().x,
+                "{appearance:?}：「移到废纸篓」应在右"
+            );
+            // 文字本身高度：13.5 号字配 38 高按钮，文字高度应在 12..20 之间；
+            // 若按钮退回默认高度，文字仍这么高但留白会消失——所以再钉按钮底色块。
+        }
+    }
+
+    /// 两枚按钮的**底色块**确实有约 38 的高度（不是 egui 默认约 24）。
+    #[test]
+    fn t2_button_fill_blocks_are_about_38_tall() {
+        use crate::theme::{Theme, apply};
+        for appearance in [
+            picasa_core::Appearance::Light,
+            picasa_core::Appearance::Dark,
+        ] {
+            let ctx = egui::Context::default();
+            apply(&ctx, appearance);
+            let theme = Theme::for_appearance(appearance);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(420.0, 200.0),
+                )),
+                max_texture_side: Some(2048),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                let (confirm, cancel) = confirm_buttons(&theme);
+                ui.add(confirm);
+                ui.add_space(12.0);
+                ui.add(cancel);
+            });
+            let mut fills: Vec<egui::Rect> = Vec::new();
+            fn walk(shape: &egui::Shape, out: &mut Vec<egui::Rect>) {
+                match shape {
+                    egui::Shape::Vec(v) => {
+                        for s in v {
+                            walk(s, out);
+                        }
+                    }
+                    egui::Shape::Rect(r) if r.fill != egui::Color32::TRANSPARENT => {
+                        out.push(r.rect);
+                    }
+                    _ => {}
+                }
+            }
+            for c in &out.shapes {
+                walk(&c.shape, &mut fills);
+            }
+            out.drop_without_applying_deltas();
+
+            // 取按钮尺寸档（宽 >= 80 的底色块才是按钮，避开描边/分隔线细条）。
+            let buttons: Vec<egui::Rect> = fills
+                .iter()
+                .filter(|r| r.width() >= 80.0 && r.height() >= 20.0)
+                .copied()
+                .collect();
+            assert_eq!(
+                buttons.len(),
+                2,
+                "{appearance:?}：应有取消/确认两块按钮底，实际 {buttons:?}"
+            );
+            for b in &buttons {
+                assert!(
+                    (b.height() - 38.0).abs() < 1.5,
+                    "{appearance:?}：按钮高应约 38（原型 36），实际 {} · {b:?}",
+                    b.height()
+                );
+            }
+            // 「取消」88 宽、「移到废纸篓」96 宽（主按钮更宽，是视觉主次的一部分）。
+            let widest = buttons.iter().map(|b| b.width()).fold(0.0_f32, f32::max);
+            assert!(
+                widest >= 92.0,
+                "{appearance:?}：主按钮应至少 92 宽（原型约 92），实际 {widest}"
+            );
+        }
+    }
+
     /// `AC-FS-CONFIRM`：取消不执行；Escape / 关闭同样零执行。
     #[test]
     fn cancel_escape_and_dismiss_never_execute_anything() {

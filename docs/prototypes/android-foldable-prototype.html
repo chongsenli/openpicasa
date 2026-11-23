@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenPicasa · 折叠屏展开态设计原型（8 屏 · 探讨稿）</title>
+<style>
+  :root{
+    /* Material 3 浅色基线 —— 与 android-prototype.html 同源（单色主题，不引彩色顶栏/玻璃态） */
+    --md-primary:#2f6fed; --md-on-primary:#ffffff; --md-primary-container:#dce7ff;
+    --md-on-primary-container:#0a2c66;
+    --md-surface:#ffffff; --md-surface-1:#f7f9fc; --md-surface-2:#f0f3f8; --md-surface-3:#e8edf5;
+    --md-on-surface:#1b1b1f; --md-on-surface-var:#44474f; --md-outline:#c3c7d0;
+    --md-secondary-container:#e2e8f2; --md-on-secondary-container:#2a3140;
+    --md-danger:#ba1a1a; --md-ok:#1b7f4b; --md-warn:#9a6700;
+    --md-star:#f2a63b; --md-sel:#2f6fed; --ph:#d9dee6; --ph2:#c9d0da;
+    --shadow:0 1px 3px rgba(0,0,0,.18),0 1px 2px rgba(0,0,0,.10);
+    --shadow-lg:0 6px 18px rgba(0,0,0,.22);
+    --viewer-bg:#101114;
+    --hinge-gutter:#eef1f6;
+    font-synthesis:none;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;font:13px/1.45 -apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif;color:var(--md-on-surface);background:#e7ebf1}
+  .app{display:flex;height:100vh;overflow:hidden}
+
+  /* 左侧屏导航（原型外壳，不是产品界面） */
+  .nav{width:236px;flex:none;background:#1c2230;color:#cdd3dc;padding:16px 12px;overflow:auto}
+  .nav h1{font-size:13.5px;margin:2px 6px 3px;color:#fff;letter-spacing:.3px}
+  .nav .sub{font-size:10.5px;color:#8b95a4;margin:0 6px 12px;line-height:1.55}
+  .nav .grp{font-size:9.5px;color:#6f7a89;letter-spacing:1.2px;margin:15px 6px 6px;text-transform:uppercase}
+  .nav button{display:block;width:100%;text-align:left;border:0;border-radius:9px;background:transparent;color:#cdd3dc;padding:8px 10px;margin:2px 0;cursor:pointer;font-size:12px;transition:.15s}
+  .nav button:hover{background:#2b3341;color:#fff}
+  .nav button.active{background:var(--md-primary);color:#fff;box-shadow:0 2px 8px rgba(47,111,237,.45)}
+  .nav button .sid{opacity:.55;font-size:10px;margin-right:7px;font-variant-numeric:tabular-nums}
+  .nav .note{margin-top:16px;padding:10px;background:#262e3b;border-radius:9px;font-size:10px;color:#9aa4b2;line-height:1.65}
+  .nav .note b{color:#e6c98a}
+  .nav .redline{margin-top:10px;padding:9px 10px;border-left:3px solid #d98b3a;background:#222a36;border-radius:0 8px 8px 0;font-size:10px;color:#aeb7c4;line-height:1.6}
+
+  /* 右侧舞台 */
+  .stage{flex:1;display:flex;flex-direction:column;min-width:0}
+  .stage-bar{height:46px;flex:none;background:#fff;border-bottom:1px solid #dfe3ea;display:flex;align-items:center;gap:12px;padding:0 20px}
+  .stage-bar .t{font-weight:600;font-size:13px}
+  .stage-bar .d{font-size:11px;color:#6b7280}
+  .stage-bar .tag{margin-left:auto;font-size:10px;color:#5a616b;background:#eef1f6;border:1px solid #dfe3ea;padding:3px 10px;border-radius:20px}
+  .canvas{flex:1;overflow:auto;padding:24px;display:flex;align-items:flex-start;justify-content:center;gap:22px;flex-wrap:wrap}
+
+  /* 折叠屏外框：880×682px，内屏 858×660px */
+  .device{width:880px;flex:none;background:#0c0e12;border-radius:26px;padding:11px;box-shadow:0 14px 40px rgba(20,28,44,.32),0 2px 8px rgba(0,0,0,.18);position:relative}
+  .device .cam{position:absolute;top:15px;left:50%;transform:translateX(-50%);width:7px;height:7px;border-radius:50%;background:#23262e;z-index:40}
+  .fold-screen{width:858px;height:660px;background:var(--md-surface);border-radius:16px;overflow:hidden;position:relative;display:flex;flex-direction:column}
+
+  /* 状态栏 / 手势条（共享） */
+  .fstatus{height:28px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:4px 16px 0;font-size:10.5px;font-weight:600;color:#1b1b1f;background:var(--md-surface);border-bottom:1px solid var(--md-surface-2);z-index:30}
+  .fstatus.dark{color:#f2f2f4;background:var(--viewer-bg);border-bottom-color:#26282e}
+  .fstatus .mid{font-weight:500;color:#8a93a0;font-size:10px}
+  .fstatus.dark .mid{color:#8a8f99}
+  .fstatus .icons{display:flex;gap:5px;align-items:center;font-size:9.5px;letter-spacing:.5px}
+  .fstatus .bat{width:14px;height:7px;border:1.3px solid currentColor;border-radius:2px;position:relative;opacity:.85}
+  .fstatus .bat:after{content:"";position:absolute;right:-3px;top:1.3px;width:2px;height:3.5px;background:currentColor;border-radius:0 1px 1px 0}
+  .gesturebar{height:16px;flex:none;display:flex;align-items:center;justify-content:center;background:var(--md-surface)}
+  .gesturebar .pill{width:108px;height:4px;border-radius:3px;background:#1b1b1f;opacity:.5}
+  .gesturebar.dark{background:var(--viewer-bg)}
+  .gesturebar.dark .pill{background:#f2f2f4;opacity:.6}
+
+  /* 屏容器 */
+  .uscreens{flex:1;min-height:0;position:relative}
+  .uscreen{position:absolute;inset:0;display:none;flex-direction:column;overflow:hidden}
+  .uscreen.active{display:flex;animation:fade .18s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+  /* 通用顶栏 */
+  .appbar{height:52px;flex:none;display:flex;align-items:center;gap:6px;padding:0 12px;background:var(--md-surface);border-bottom:1px solid var(--md-surface-3)}
+  .appbar .title{font-size:16px;font-weight:600;letter-spacing:.1px;flex:1;min-width:0}
+  .appbar .ic{width:36px;height:36px;border:0;background:transparent;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;color:var(--md-on-surface-var);font-size:16px;flex:none}
+  .appbar .ic:hover{background:var(--md-surface-2)}
+  .appbar.sel{background:var(--md-primary-container);color:var(--md-on-primary-container)}
+  .appbar.dark{background:var(--viewer-bg);color:#f2f2f4;border-bottom-color:#26282e}
+  .appbar.dark .ic{color:#f2f2f4}
+  .appbar.dark .ic:hover{background:rgba(255,255,255,.1)}
+  .appbar .cnt{font-size:12px;opacity:.85}
+  .tbtn{border:1px solid var(--md-outline);background:var(--md-surface);color:var(--md-on-surface-var);border-radius:18px;padding:6px 12px;font-size:11px;cursor:pointer;font-family:inherit;white-space:nowrap}
+  .tbtn:hover{background:var(--md-surface-2)}
+  .tbtn.on{background:var(--md-secondary-container);border-color:transparent;color:var(--md-on-secondary-container);font-weight:700}
+
+  /* 主体：Rail + 双窗格 */
+  .ubody{flex:1;min-height:0;display:flex}
+  .rail{width:72px;flex:none;background:var(--md-surface-1);border-right:1px solid var(--md-surface-3);display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 4px}
+  .rail .rlogo{width:34px;height:34px;border-radius:11px;background:var(--md-primary-container);color:var(--md-on-primary-container);display:flex;align-items:center;justify-content:center;font-size:17px;margin-bottom:8px}
+  .rail .ritem{width:100%;border:0;background:transparent;border-radius:12px;padding:7px 2px 5px;display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;color:var(--md-on-surface-var);font-family:inherit;position:relative}
+  .rail .ritem .ri{width:38px;height:26px;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:15px}
+  .rail .ritem .rl{font-size:9.5px}
+  .rail .ritem.active{color:var(--md-on-surface);font-weight:700}
+  .rail .ritem.active .ri{background:var(--md-secondary-container);color:var(--md-on-secondary-container)}
+  .rail .ritem .rbadge{position:absolute;top:4px;right:9px;min-width:13px;height:13px;border-radius:7px;background:#ba1a1a;color:#fff;font-size:8px;line-height:13px;text-align:center;font-weight:700}
+  .rail .rsp{flex:1}
+
+  .pane{min-width:0;display:flex;flex-direction:column;overflow:hidden}
+  .list-pane{width:333px;flex:none;background:var(--md-surface-1);border-right:1px solid var(--md-surface-2)}
+  .detail-pane{width:405px;flex:none;background:var(--md-surface)}
+  .pane-head{height:48px;flex:none;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--md-surface-2);font-size:13px;font-weight:700}
+  .pane-head .sp{flex:1}
+  .pane-head .sub{font-size:10.5px;font-weight:400;color:var(--md-on-surface-var)}
+  .pane-scroll{flex:1;min-height:0;overflow:auto}
+  .pane-scroll::-webkit-scrollbar{width:0}
+
+  /* 折痕避让带（竖向，中缝两侧各 24dp，共 48dp） */
+  .hinge-gutter{width:48px;flex:none;background:var(--hinge-gutter);position:relative;border-left:1px solid #e0e5ed;border-right:1px solid #e0e5ed}
+  .hinge-gutter .hinge{position:absolute;top:0;bottom:0;left:50%;width:2px;transform:translateX(-50%);background:linear-gradient(to bottom,#cfd5df,#98a1b0 50%,#cfd5df);box-shadow:-4px 0 7px rgba(20,28,44,.07),4px 0 7px rgba(20,28,44,.07)}
+  .hinge-gutter .hlabel{position:absolute;top:14px;left:50%;transform:translateX(-50%);font-size:8px;color:#a3abba;writing-mode:vertical-rl;letter-spacing:2px;white-space:nowrap}
+  .hinge-gutter .hcap{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);font-size:7.5px;color:#b0b7c3;white-space:nowrap}
+  /* 折痕避让带（横向，桌模式 Flex） */
+  .hinge-gutter.h{width:100%;height:48px;flex:none;border:0;border-top:1px solid #e0e5ed;border-bottom:1px solid #e0e5ed}
+  .hinge-gutter.h .hinge{position:absolute;left:0;right:0;top:50%;height:2px;width:auto;transform:translateY(-50%);background:linear-gradient(to right,#cfd5df,#98a1b0 50%,#cfd5df);box-shadow:0 -4px 7px rgba(20,28,44,.07),0 4px 7px rgba(20,28,44,.07)}
+  .hinge-gutter.h .hlabel{position:absolute;left:14px;top:50%;transform:translateY(-50%);writing-mode:horizontal-tb;font-size:9px;letter-spacing:1px;color:#9aa2b0}
+  .hinge-gutter.h .hcap{position:absolute;right:14px;top:50%;transform:translateY(-50%);bottom:auto;font-size:8.5px;color:#b0b7c3}
+
+  /* 暗屏（U2 查看器 / F1）下的折痕与窗格 */
+  .uscreen.dark .hinge-gutter{background:#15171b;border-color:#2a2d33}
+  .uscreen.dark .hinge-gutter .hinge{background:linear-gradient(to bottom,#2a2e35,#454a54 50%,#2a2e35);box-shadow:-4px 0 8px rgba(0,0,0,.4),4px 0 8px rgba(0,0,0,.4)}
+  .uscreen.dark .hinge-gutter .hlabel,.uscreen.dark .hinge-gutter .hcap{color:#6b707a}
+  .uscreen.dark .hinge-gutter.h .hinge{background:linear-gradient(to right,#2a2e35,#454a54 50%,#2a2e35)}
+
+  /* 通用 M3 控件 */
+  .btn{border:0;border-radius:20px;padding:9px 18px;cursor:pointer;font-size:12.5px;font-weight:600;transition:.12s;white-space:nowrap;font-family:inherit}
+  .btn:active{transform:scale(.97)}
+  .btn.filled{background:var(--md-primary);color:var(--md-on-primary);box-shadow:var(--shadow)}
+  .btn.tonal{background:var(--md-secondary-container);color:var(--md-on-secondary-container)}
+  .btn.outlined{background:transparent;color:var(--md-primary);border:1px solid var(--md-outline)}
+  .btn.text{background:transparent;color:var(--md-primary)}
+  .btn.danger{background:var(--md-danger);color:#fff}
+  .btn.sm{padding:6px 13px;font-size:11px}
+  .btn.block{width:100%;text-align:center}
+  .xfab{display:inline-flex;align-items:center;gap:6px;border:0;border-radius:16px;padding:11px 18px;background:var(--md-primary-container);color:var(--md-on-primary-container);font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;box-shadow:var(--shadow)}
+  .xfab:active{transform:scale(.97)}
+  .chip{display:inline-flex;align-items:center;gap:5px;border-radius:8px;padding:5px 10px;font-size:11px;background:var(--md-surface-2);border:1px solid var(--md-outline);cursor:pointer;font-family:inherit}
+  .chip.on{background:var(--md-secondary-container);border-color:transparent;color:var(--md-on-secondary-container);font-weight:600}
+  .chip .x{opacity:.55;font-size:11px}
+  .card{background:var(--md-surface);border:1px solid var(--md-surface-3);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+  .section{padding:12px 14px 5px;font-size:10.5px;color:var(--md-on-surface-var);font-weight:600;letter-spacing:.4px}
+  .row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--md-surface-2);cursor:pointer}
+  .row:hover{background:var(--md-surface-2)}
+  .row.on{background:var(--md-primary-container);color:var(--md-on-primary-container)}
+  .row .lead{width:30px;height:30px;border-radius:9px;background:var(--md-surface-2);display:flex;align-items:center;justify-content:center;font-size:14px;flex:none}
+  .row.on .lead{background:rgba(255,255,255,.55)}
+  .row .txt{flex:1;min-width:0}
+  .row .txt .a{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .txt .b{font-size:10px;color:var(--md-on-surface-var);margin-top:2px;line-height:1.4}
+  .row.on .txt .b{color:var(--md-on-primary-container);opacity:.8}
+  .row .trail{font-size:10.5px;color:var(--md-on-surface-var);flex:none;font-variant-numeric:tabular-nums}
+  .row.on .trail{color:var(--md-on-primary-container)}
+  .divider{height:1px;background:var(--md-surface-2);margin:4px 0}
+  .pill-num{background:var(--md-primary-container);color:var(--md-on-primary-container);border-radius:20px;padding:2px 9px;font-size:10px;font-weight:700}
+  .red-note{background:#fff4e6;border-left:3px solid #d98b3a;padding:8px 10px;border-radius:0 8px 8px 0;font-size:10.5px;color:#7a5a2a;line-height:1.6;margin:10px 12px}
+
+  /* 说明卡（原型外壳） */
+  .spec{width:330px;flex:none;background:#fff;border:1px solid #dfe3ea;border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);align-self:flex-start}
+  .spec h3{margin:0 0 4px;font-size:14px}
+  .spec .k{font-size:10.5px;color:#8a93a0;letter-spacing:.6px;text-transform:uppercase;margin-bottom:8px}
+  .spec p{font-size:12px;color:#4a515c;line-height:1.7;margin:8px 0}
+  .spec ul{margin:8px 0;padding-left:18px}
+  .spec li{font-size:12px;color:#4a515c;line-height:1.75;margin-bottom:3px}
+  .spec .tagrow{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px}
+  .spec .tg{font-size:10px;background:#eef2f8;border:1px solid #dde3ec;border-radius:20px;padding:3px 9px;color:#5a6472}
+  .spec .red{background:#fff4e6;border-left:3px solid #d98b3a;padding:8px 10px;border-radius:0 8px 8px 0;font-size:11.5px;color:#7a5a2a;line-height:1.6;margin-top:10px}
+
+  /* 图库栅格（展开态 5/4/3 列） */
+  .lib-head{padding:8px 14px 6px}
+  .lib-head .l1{font-size:18px;font-weight:700}
+  .lib-head .l2{font-size:10.5px;color:var(--md-on-surface-var);margin-top:2px}
+  .grouphead{position:sticky;top:0;background:var(--md-surface-1);padding:7px 12px;font-size:11px;font-weight:600;display:flex;align-items:center;gap:8px;z-index:5;border-bottom:1px solid var(--md-surface-2)}
+  .grouphead .sp{flex:1}
+  .grouphead .cnt{font-weight:400;color:var(--md-on-surface-var);font-size:10px}
+  .grid{display:grid;gap:4px;padding:4px}
+  .grid.c5{grid-template-columns:repeat(5,1fr)}
+  .grid.c4{grid-template-columns:repeat(4,1fr)}
+  .grid.c3{grid-template-columns:repeat(3,1fr)}
+  .cell{position:relative;aspect-ratio:1;background:var(--ph);border-radius:8px;overflow:hidden;cursor:pointer}
+  .cell .tone{position:absolute;inset:0}
+  .cell .fname{position:absolute;bottom:0;left:0;right:0;font-size:7.5px;color:#fff;background:linear-gradient(transparent,rgba(0,0,0,.5));padding:7px 3px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cell .star{position:absolute;top:3px;right:3px;font-size:11px;color:var(--md-star);text-shadow:0 1px 2px rgba(0,0,0,.4)}
+  .cell .selmark{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.25);display:none;align-items:center;justify-content:center;font-size:9px;color:#fff}
+  .cell .selmark.check{background:var(--md-sel);border-color:#fff}
+  .cell.selected .selmark{display:flex}
+  .cell.selected{outline:3px solid var(--md-sel);outline-offset:-3px}
+  .density{display:flex;gap:6px;align-items:center;padding:4px 12px 6px;font-size:10.5px;color:var(--md-on-surface-var)}
+  .density .seg{display:flex;background:var(--md-surface-2);border-radius:20px;padding:2px}
+  .density .seg button{border:0;background:transparent;border-radius:18px;padding:4px 11px;font-size:10px;cursor:pointer;font-family:inherit;color:var(--md-on-surface-var)}
+  .density .seg button.on{background:var(--md-secondary-container);color:var(--md-on-secondary-container);font-weight:700}
+  .status-strip{height:26px;flex:none;background:var(--md-surface-1);border-top:1px solid var(--md-surface-2);display:flex;align-items:center;gap:10px;padding:0 12px;font-size:10px;color:var(--md-on-surface-var)}
+  .status-strip .sp{flex:1}
+  .status-strip .idx-dot{width:7px;height:7px;border-radius:50%;background:var(--md-primary);display:inline-block}
+
+  /* 左窗格底部：照片托盘（拖拽投放目标） */
+  .tray{margin:8px 12px;padding:9px;border:1px dashed var(--md-outline);border-radius:12px;background:var(--md-surface)}
+  .tray .th{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;margin-bottom:7px}
+  .tray .th .sp{flex:1}
+  .tray .mini{display:flex;gap:4px}
+  .tray .mini i{width:22px;height:22px;border-radius:5px;background:var(--ph2);display:block}
+  .dropzone{border:1px dashed var(--md-outline);border-radius:10px;padding:9px 11px;margin:0 12px 8px;font-size:11px;display:flex;align-items:center;gap:8px;background:var(--md-surface);cursor:pointer;transition:.15s}
+  .dropzone.hi{background:var(--md-primary-container);border-color:var(--md-primary);color:var(--md-on-primary-container);font-weight:700}
+  .dropzone .di{width:26px;height:26px;border-radius:8px;background:var(--md-surface-2);display:flex;align-items:center;justify-content:center;font-size:13px;flex:none}
+
+  /* 查看器（Supporting pane 常驻） */
+  .viewer-pane{background:var(--viewer-bg);display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;flex-direction:column}
+  .viewer-pane .vphoto{width:74%;aspect-ratio:4/3;border-radius:8px;background:linear-gradient(135deg,#3a4a63,#6d5b73 45%,#c98b5e);box-shadow:0 10px 40px rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.55);font-size:12px;transition:transform .18s ease,width .25s ease}
+  .viewer-pane .vphoto.zoom{transform:scale(1.4)}
+  .viewer-pane .vhint{position:absolute;bottom:10px;left:0;right:0;text-align:center;color:rgba(255,255,255,.45);font-size:10px}
+  .viewer-pane .vnav{position:absolute;top:50%;transform:translateY(-50%);width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.12);border:0;color:#fff;font-size:15px;cursor:pointer;z-index:4}
+  .viewer-pane .vnav.l{left:8px}.viewer-pane .vnav.r{right:8px}
+  .support-pane{width:405px;flex:none;background:#1c1e22;color:#e8e9ec;display:flex;flex-direction:column;overflow:hidden;transition:width .25s ease,opacity .2s ease}
+  .support-pane.collapsed{width:0;opacity:0;border:0}
+  .support-pane .shead{padding:14px 16px 10px;border-bottom:1px solid #2e3137}
+  .support-pane .sf{font-size:13px;font-weight:700}
+  .support-pane .src{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:#9fd3b0;margin-top:5px}
+  .support-pane .meta{padding:12px 16px;font-size:11px;color:#a9adb5;line-height:2;border-bottom:1px solid #2e3137}
+  .support-pane .meta b{color:#e8e9ec;font-weight:600}
+  .support-pane .tags{padding:12px 16px}
+  .support-pane .tags .lb{font-size:10.5px;color:#8f949d;margin-bottom:7px}
+  .support-pane .tags .tg{background:#2c2f35;border:1px solid #3a3e45;border-radius:8px;padding:4px 9px;font-size:10.5px;color:#cfd3da;display:inline-block;margin:0 5px 5px 0}
+  .support-pane .red2{margin:10px 16px;padding:9px 10px;background:#3a2a1c;border-left:3px solid #d98b3a;border-radius:0 8px 8px 0;font-size:10.5px;color:#e2bd8a;line-height:1.65}
+
+  /* 搜索 / 筛选 */
+  .searchbar{display:flex;align-items:center;gap:8px;padding:0 12px}
+  .searchbar .field{flex:1;display:flex;align-items:center;gap:7px;background:var(--md-surface-2);border-radius:24px;padding:7px 12px;font-size:12px}
+  .searchbar .field input{border:0;background:transparent;outline:none;flex:1;font-size:12px;font-family:inherit;min-width:0}
+  .filter-pane{padding:12px}
+  .filter-pane .fl{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:11px}
+  .filter-pane .fl .lb{width:36px;color:var(--md-on-surface-var);flex:none;font-size:10.5px}
+  .filter-pane .fl .chips{display:flex;flex-wrap:wrap;gap:5px;flex:1}
+  .result-head{padding:9px 14px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--md-surface-2)}
+  .noresult{text-align:center;padding:48px 20px;color:var(--md-on-surface-var)}
+  .noresult .big{font-size:38px;margin-bottom:8px}
+
+  /* 多选 CAB */
+  .cab{height:52px;flex:none;background:var(--md-primary-container);color:var(--md-on-primary-container);display:flex;align-items:center;gap:6px;padding:0 12px;overflow:auto}
+  .cab .n{font-size:13px;font-weight:700;white-space:nowrap;margin-right:4px}
+  .cab .sp{flex:1}
+  .cab .btn{padding:6px 12px;font-size:11px}
+
+  /* 索引页 */
+  .idx-summary{margin:12px 14px;padding:14px;border-radius:16px;background:var(--md-primary-container);color:var(--md-on-primary-container)}
+  .idx-summary .big{font-size:21px;font-weight:700}
+  .idx-summary .sub{font-size:10.5px;opacity:.8;margin-top:2px}
+  .progress{height:8px;border-radius:5px;background:rgba(47,111,237,.18);margin:12px 0 6px;overflow:hidden}
+  .progress .bar{height:100%;background:var(--md-primary);border-radius:5px;transition:width .3s}
+  .idx-state{display:flex;align-items:center;gap:8px;font-size:11.5px;font-weight:600}
+  .idx-state .dot{width:9px;height:9px;border-radius:50%;background:var(--md-primary)}
+  .idx-actions{display:flex;gap:7px;margin-top:11px;flex-wrap:wrap}
+  .idxtabs{display:flex;gap:2px;padding:0 8px;border-bottom:1px solid var(--md-surface-2);overflow:auto}
+  .idxtabs button{border:0;background:transparent;padding:9px 9px;font-size:10.5px;cursor:pointer;font-family:inherit;color:var(--md-on-surface-var);white-space:nowrap;border-bottom:2px solid transparent}
+  .idxtabs button.on{color:var(--md-primary);border-color:var(--md-primary);font-weight:700}
+  .offline .lead{background:#f0e9dd}
+  .fail-item{font-size:10.5px;color:var(--md-on-surface-var);padding:7px 14px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--md-surface-2)}
+  .fail-item .fx{color:var(--md-danger);font-weight:700}
+  .state-select{font-size:11px;border:1px solid var(--md-outline);border-radius:8px;padding:5px 7px;font-family:inherit;background:var(--md-surface)}
+
+  /* 相册 / 标签 */
+  .album-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;padding:4px}
+  .album-grid .cell{border-radius:8px}
+  .tagpanel{padding:12px 14px}
+  .tagpanel .tg{background:var(--md-surface-2);border:1px solid var(--md-outline);border-radius:20px;padding:6px 12px;font-size:11px;display:inline-block;margin:0 6px 6px 0}
+  .segtabs{display:flex;gap:4px;padding:0 8px}
+  .segtabs button{flex:1;border:0;border-bottom:2px solid transparent;background:transparent;padding:8px;font-size:11.5px;cursor:pointer;font-family:inherit;color:var(--md-on-surface-var)}
+  .segtabs button.on{color:var(--md-primary);border-color:var(--md-primary);font-weight:700}
+
+  /* 桌模式 Flex（F1）：上半屏大图 + 横向折痕 + 下半屏控制甲板 */
+  .flex-body{flex-direction:column}
+  .flex-top{flex:1;min-height:0;background:var(--viewer-bg);display:flex;align-items:center;justify-content:center;position:relative;flex-direction:column}
+  .flex-top .vphoto{width:42%;aspect-ratio:4/3;border-radius:8px;background:linear-gradient(135deg,#3a4a63,#6d5b73 45%,#c98b5e);box-shadow:0 10px 40px rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.55);font-size:12px;transition:transform .18s ease}
+  .flex-top .vphoto.zoom{transform:scale(1.3)}
+  .flex-top .vhint{position:absolute;bottom:8px;left:0;right:0;text-align:center;color:rgba(255,255,255,.45);font-size:10px}
+  .flex-top .vnav{position:absolute;top:50%;transform:translateY(-50%);width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.12);border:0;color:#fff;font-size:15px;cursor:pointer}
+  .flex-top .vnav.l{left:14px}.flex-top .vnav.r{right:14px}
+  .flex-bottom{height:196px;flex:none;background:#1c1e22;color:#e8e9ec;display:flex;flex-direction:column;padding:10px 16px;gap:8px}
+  .flex-bottom .fmeta{font-size:11px;color:#b4b8c0;display:flex;gap:12px;align-items:center}
+  .flex-bottom .fmeta b{color:#e8e9ec}
+  .filmstrip{display:flex;gap:5px;overflow:hidden;flex:1;min-height:0;align-items:center}
+  .filmstrip i{flex:none;width:58px;height:52px;border-radius:6px;display:block;cursor:pointer}
+  .flex-acts{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+  .flex-acts .btn{background:#2c2f35;color:#e8e9ec}
+
+  /* P0 折叠态回退 */
+  .p0wrap{flex:1;display:flex;align-items:center;justify-content:center;gap:34px;background:var(--md-surface-1);padding:20px}
+  .miniphone{width:186px;height:372px;background:#0c0e12;border-radius:26px;padding:8px;box-shadow:var(--shadow-lg);flex:none}
+  .miniphone .inner{width:100%;height:100%;background:#fff;border-radius:20px;overflow:hidden;display:flex;flex-direction:column}
+  .miniphone .sb{height:20px;display:flex;align-items:center;justify-content:space-between;padding:3px 10px 0;font-size:8px;font-weight:700}
+  .miniphone .ab{height:30px;border-bottom:1px solid var(--md-surface-3);display:flex;align-items:center;padding:0 10px;font-size:10px;font-weight:700}
+  .miniphone .bd{flex:1;background:var(--md-surface-1);display:grid;grid-template-columns:repeat(3,1fr);gap:3px;padding:3px;align-content:start}
+  .miniphone .bd i{aspect-ratio:1;background:var(--ph);border-radius:4px;display:block}
+  .miniphone .tn{height:42px;border-top:1px solid var(--md-surface-3);display:flex;align-items:center;justify-content:space-around;font-size:8px;color:var(--md-on-surface-var)}
+  .miniphone .tn .t{display:flex;flex-direction:column;align-items:center;gap:2px}
+  .miniphone .tn .t.on{color:var(--md-primary);font-weight:700}
+  .p0txt{max-width:330px}
+  .p0txt h2{font-size:18px;margin:0 0 8px}
+  .p0txt p{font-size:12px;color:#4a515c;line-height:1.8;margin:8px 0}
+  .p0txt .map{font-size:11px;background:#fff;border:1px solid #dfe3ea;border-radius:10px;padding:10px 12px;line-height:1.9;margin:12px 0}
+  .p0txt a.btn{display:inline-block;text-decoration:none;margin-top:6px}
+
+  /* 小 toast / 二次确认 dialog */
+  .toast{position:absolute;left:50%;transform:translateX(-50%);bottom:40px;background:#2b2f36;color:#fff;border-radius:10px;padding:10px 14px;font-size:11.5px;box-shadow:var(--shadow-lg);z-index:50;display:none;align-items:center;gap:8px;white-space:nowrap}
+  .toast.show{display:flex;animation:fade .2s ease}
+  .dialog-bg{position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:60;display:none;align-items:center;justify-content:center;padding:24px}
+  .dialog-bg.show{display:flex}
+  .dialog{background:var(--md-surface);border-radius:20px;padding:20px;width:100%;max-width:320px;box-shadow:var(--shadow-lg)}
+  .dialog h4{margin:0 0 8px;font-size:16px}
+  .dialog p{font-size:12px;color:var(--md-on-surface-var);line-height:1.6;margin:0 0 16px}
+  .dialog .acts{display:flex;justify-content:flex-end;gap:6px}
+
+  @media(max-width:900px){
+    .nav{width:170px}.spec{display:none}.canvas{padding:14px;gap:14px}
+  }
+
+  /* 出图模式：?uscreen=xxx&shot=1 —— 只留折叠屏外框，供逐屏导出 PNG */
+  body.shot{background:#eef1f6}
+  body.shot .nav,body.shot .stage-bar,body.shot .spec{display:none!important}
+  body.shot .app{display:block;height:auto;overflow:visible}
+  body.shot .stage{display:block}
+  body.shot .canvas{min-height:100vh;align-items:flex-start;justify-content:center;background:#eef1f6;overflow:visible;
+    padding:0;display:flex;width:100vw}
+  body.shot .device{margin:0 auto;box-shadow:none}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- 屏导航（原型外壳） -->
+  <div class="nav">
+    <h1>OpenPicasa · 折叠屏</h1>
+    <div class="sub">展开态设计原型 v1.0 · 探讨稿<br>8 屏 · 800×720dp 内屏 · 折痕避让 48dp<br>配套 docs/20-折叠屏展开态-界面原型设计.md</div>
+    <div class="grp">A · 展开平铺（竖向折痕）</div>
+    <button data-ugo="u1" class="active"><span class="sid">U1</span>图库 · 列表｜网格</button>
+    <button data-ugo="u2"><span class="sid">U2</span>查看器 · 大图｜常驻信息</button>
+    <button data-ugo="u3"><span class="sid">U3</span>搜索 · 筛选｜结果</button>
+    <button data-ugo="u4"><span class="sid">U4</span>多选整理 · 拖拽投放</button>
+    <button data-ugo="u5"><span class="sid">U5</span>索引管理 · 任务｜详情</button>
+    <button data-ugo="u6"><span class="sid">U6</span>相册与标签 · 列表｜详情</button>
+    <div class="grp">B · 桌模式 Flex（横向折痕）</div>
+    <button data-ugo="f1"><span class="sid">F1</span>上大图｜下控制甲板</button>
+    <div class="grp">C · 折叠回退（外屏）</div>
+    <button data-ugo="p0"><span class="sid">P0</span>回退手机 10 屏</button>
+    <div class="redline"><b>红线</b>：照片目录零写入（R-1）、编辑室入口不存在（R-2）、五处同源、失败不静默、不显示 ETA、不恢复玻璃态。折痕避让带内禁放任何控件。原型为界面探讨，未立项、未实装。</div>
+    <div class="note">核心判断：<b>手机是「压缩」、展开是「解压」</b>。展开态把 19 压下去的层级放回来，回到桌面 11/10 三行骨架同构形态，而非等比拉宽手机窗口。折叠态请见 <a href="android-prototype.html" target="_blank" style="color:#9ec1ff">android-prototype.html</a>。</div>
+  </div>
+
+  <!-- 舞台 -->
+  <div class="stage">
+    <div class="stage-bar">
+      <span class="t" id="stageTitle">U1 · 图库（List–Detail）</span>
+      <span class="d" id="stageDesc">Rail + 左列表 + 右网格 · 折痕落在两窗格 gutter</span>
+      <span class="tag" id="stageTag">姿态 A · 展开平铺 · 800×720dp</span>
+    </div>
+    <div class="canvas">
+      <!-- 折叠屏外框 -->
+      <div class="device">
+        <div class="cam"></div>
+        <div class="fold-screen">
+          <!-- 状态栏（共享） -->
+          <div class="fstatus" id="fstatus">
+            <span>9:41</span>
+            <span class="mid">OpenPicasa · 展开态 · 800×720dp</span>
+            <span class="icons">▮▮▮ &nbsp;WiFi &nbsp;<span class="bat"></span></span>
+          </div>
+
+          <!-- 8 屏 -->
+          <div class="uscreens" id="uscreens">
+
+            <!-- U1 图库 · 列表｜网格 -->
+            <div class="uscreen active" data-uscreen="u1" data-pose="A">
+              <div class="appbar">
+                <div class="title">OpenPicasa · 展开态</div>
+                <button class="tbtn on" data-toast="视图：所有照片（原型演示）">所有照片 ▾</button>
+                <button class="ic" data-ugo="u3" title="搜索">🔍</button>
+                <button class="tbtn" data-toast="排序：拍摄日期（原型演示）">↕ 排序</button>
+                <button class="tbtn" data-ugo="u3">⚑ 筛选</button>
+                <button class="ic" data-toast="溢出菜单：布局 / 设置">≡</button>
+              </div>
+              <div class="ubody">
+                <div data-rail></div>
+                <div class="pane list-pane">
+                  <div class="pane-head">图库 <span class="sp"></span><button class="btn tonal sm" data-toast="Extended FAB：添加关注文件夹（SAF，只读）">＋ 添加文件夹</button></div>
+                  <div class="pane-scroll">
+                    <div class="row on"><div class="lead">▦</div><div class="txt"><div class="a">所有照片</div><div class="b">本机索引 · 2,718 张</div></div><div class="trail">2,718</div></div>
+                    <div class="row"><div class="lead">📁</div><div class="txt"><div class="a">DCIM / Camera</div><div class="b">● 已索引 · 包含子文件夹</div></div><div class="trail">1,204</div></div>
+                    <div class="row"><div class="lead">📁</div><div class="txt"><div class="a">Pictures / 旅行</div><div class="b">● 监视中 · 3 个子目录</div></div><div class="trail">412</div></div>
+                    <div class="row"><div class="lead">★</div><div class="txt"><div class="a">星标</div><div class="b">虚拟集合</div></div><div class="trail">86</div></div>
+                    <div class="row"><div class="lead">🗂</div><div class="txt"><div class="a">旅行 2026</div><div class="b">相册 · 128 张</div></div><div class="trail">128</div></div>
+                    <div class="row"><div class="lead">🗂</div><div class="txt"><div class="a">家人</div><div class="b">相册 · 64 张</div></div><div class="trail">64</div></div>
+                    <div class="row offline"><div class="lead">📁</div><div class="txt"><div class="a">U盘 / 照片</div><div class="b">○ 离线 · 恢复后自动重扫</div></div><div class="trail">—</div></div>
+                    <div class="section" style="padding-top:14px">照片托盘 · 跨窗格拖拽投放目标</div>
+                    <div class="tray" data-drop="照片托盘">
+                      <div class="th"><span>▤ 照片托盘 · 12 张</span><span class="sp"></span><span style="font-size:10px;color:var(--md-primary)">[清空]</span></div>
+                      <div class="mini"><i></i><i></i><i></i></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="hinge-gutter"><div class="hinge"></div><span class="hlabel">折痕 48dp</span><span class="hcap">禁放控件</span></div>
+                <div class="pane detail-pane">
+                  <div class="pane-head">所有照片 <span class="sub">· 2,718 张</span><span class="sp"></span><button class="tbtn" data-ugo="u4">框选</button></div>
+                  <div class="density">缩略图密度
+                    <div class="seg" id="densitySeg">
+                      <button data-col="5" class="on">小</button><button data-col="4">中</button><button data-col="3">大</button>
+                    </div>
+                    <span style="flex:1"></span><span id="colHint">5 列</span>
+                  </div>
+                  <div class="pane-scroll">
+                    <div class="grouphead">2026 年 11 月 <span class="cnt">· 共 86 张</span><span class="sp"></span><span style="font-size:10px">⌄</span></div>
+                    <div class="grid c5" id="mainGrid"></div>
+                    <div class="grouphead">2026 年 10 月 <span class="cnt">· 共 412 张</span><span class="sp"></span><span style="font-size:10px">⌄</span></div>
+                    <div class="grid c5" data-extra></div>
+                  </div>
+                  <div class="status-strip"><span>已选 0</span><span>·</span><span>2,718 张</span><span class="sp"></span><span>索引 <span class="idx-dot"></span> 同源</span></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- U2 查看器 · 大图｜常驻信息 -->
+            <div class="uscreen dark" data-uscreen="u2" data-pose="A">
+              <div class="appbar dark">
+                <button class="ic" data-ugo="u1">←</button>
+                <div class="title">1 / 2,718</div>
+                <button class="ic" data-sheet title="折叠 / 展开信息窗格">ⓘ</button>
+                <button class="ic" data-toast="已加星标（原型演示）">★</button>
+                <button class="ic" data-toast="溢出菜单：无编辑入口（R-2）">⋯</button>
+              </div>
+              <div class="ubody">
+                <div class="viewer-pane" style="flex:1">
+                  <button class="vnav l" data-page="0">‹</button>
+                  <div class="vphoto" id="flexPhoto2" data-zoom>IMG_2043.JPG</div>
+                  <button class="vnav r" data-page="1">›</button>
+                  <div class="vhint">双击 / 捏合缩放 · 左右滑翻页 · 下滑退出</div>
+                </div>
+                <div class="hinge-gutter"><div class="hinge"></div><span class="hlabel">折痕 48dp</span><span class="hcap">禁放控件</span></div>
+                <div class="support-pane" id="supportPane">
+                  <div class="shead"><div class="sf">IMG_2043.JPG</div><div class="src">● 本机索引 · 只读</div></div>
+                  <div class="meta">
+                    <div>拍摄　<b>2026-11-02 14:31</b></div>
+                    <div>尺寸　<b>4032 × 3024 · 4.2 MB</b></div>
+                    <div>相机　<b>Sony A7IV · FE 35mm</b></div>
+                    <div>参数　<b>ISO 200 · f/2.8 · 1/500s</b></div>
+                    <div>GPS　 <b>31.23°N 121.47°E</b></div>
+                    <div>目录　<b>DCIM / Camera</b></div>
+                  </div>
+                  <div class="tags">
+                    <div class="lb">标签</div>
+                    <span class="tg">旅行</span><span class="tg">海边</span><span class="tg">＋ 添加</span>
+                    <div class="lb" style="margin-top:10px">星标</div>
+                    <span class="tg" style="color:var(--md-star)">★ 已星标</span>
+                  </div>
+                  <div class="red2"><b>R-2</b>：无编辑 / 滤镜 / 旋转写回入口；方向只由 EXIF Orientation 决定。Supporting pane 常驻 = 展开态最大收益（手机上滑 sheet 的解压）。</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- U3 搜索 · 筛选｜结果 -->
+            <div class="uscreen" data-uscreen="u3" data-pose="A">
+              <div class="appbar" style="padding-right:12px">
+                <button class="ic" data-ugo="u1">←</button>
+                <div class="searchbar" style="flex:1">
+                  <div class="field"><span style="opacity:.6">🔍</span><input id="searchInput" placeholder="搜索文件名 / 文件夹 / EXIF 日期"><button class="ic" style="width:24px;height:24px" data-clear-search>✕</button></div>
+                </div>
+                <button class="tbtn" data-toast="范围：当前视图 / 全库">范围: 当前视图 ▾</button>
+              </div>
+              <div class="ubody">
+                <div data-rail></div>
+                <div class="pane list-pane">
+                  <div class="pane-head">组合筛选 <span class="sp"></span><button class="btn text sm" data-clear-filter>清除全部</button></div>
+                  <div class="pane-scroll filter-pane">
+                    <div class="fl"><span class="lb">日期</span><div class="chips"><span class="chip">起始</span><span class="chip">结束</span></div></div>
+                    <div class="fl"><span class="lb">类型</span><div class="chips"><span class="chip on">JPEG</span><span class="chip">PNG</span><span class="chip">GIF</span><span class="chip">RAW</span></div></div>
+                    <div class="fl"><span class="lb">星标</span><div class="chips"><span class="chip">★ 仅星标</span></div></div>
+                    <div class="fl"><span class="lb">标签</span><div class="chips"><span class="chip on">旅行</span><span class="chip">家人</span><span class="chip">＋</span></div></div>
+                    <div class="fl"><span class="lb">排序</span><div class="chips"><span class="chip on">拍摄日期 ↓</span></div></div>
+                    <div class="fl"><span class="lb">相机</span><div class="chips"><span class="chip">Sony</span><span class="chip">Canon</span></div></div>
+                    <div class="fl"><span class="lb">字节</span><div class="chips"><span class="chip">≥ 1 MB</span><span class="chip">≤ 20 MB</span></div></div>
+                    <div class="fl"><span class="lb">长边</span><div class="chips"><span class="chip">≥ 2000px</span></div></div>
+                    <button class="btn filled sm block" style="margin-top:4px" data-toast="应用筛选（M4-SEARCH-01～09）">应用筛选</button>
+                    <div style="font-size:9.5px;color:var(--md-on-surface-var);margin-top:10px;line-height:1.6">筛选窗格常驻：边调边看结果。不列「标签 / 人物」等 M1 无数据筛选项。</div>
+                  </div>
+                </div>
+                <div class="hinge-gutter"><div class="hinge"></div><span class="hlabel">折痕 48dp</span><span class="hcap">禁放控件</span></div>
+                <div class="pane detail-pane">
+                  <div class="result-head" id="resultHead">找到 128 张 <span style="font-weight:400;color:var(--md-on-surface-var);font-size:10.5px">· 文件名 / 文件夹 / EXIF 日期</span></div>
+                  <div class="pane-scroll">
+                    <div class="grid c5" id="resultGrid"></div>
+                    <div class="noresult" id="noResult" style="display:none">
+                      <div class="big">🕳</div><div style="font-size:13px;font-weight:600">未找到照片</div>
+                      <div style="font-size:11px;margin-top:6px">不列出「标签 / 人物」等无数据筛选项</div>
+                    </div>
+                    <div style="font-size:10px;color:var(--md-on-surface-var);padding:6px 14px 12px">提示：输入「zzz」可预览无结果空态。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- U4 多选整理 · 拖拽投放 -->
+            <div class="uscreen" data-uscreen="u4" data-pose="A">
+              <div class="cab">
+                <span class="n" id="selCount">✓ 已选 3 张</span>
+                <button class="btn tonal sm" data-select-all>全选</button>
+                <button class="btn tonal sm" data-invert>反选</button>
+                <span class="sp"></span>
+                <button class="btn sm" data-toast="批量加星标（原型演示）">★ 星标</button>
+                <button class="btn sm" data-toast="批量加标签（原型演示）">🏷 标签</button>
+                <button class="btn sm" data-toast="加入相册（也可拖拽到左窗格）">🗂 加入相册</button>
+                <button class="btn sm" data-toast="导出索引（原型演示）">导出</button>
+                <button class="btn sm" style="background:var(--md-danger);color:#fff" data-confirm="删除选中的 3 张？|将从自家索引与相册关系中移除，照片文件不受影响（R-1）。">删除</button>
+              </div>
+              <div class="ubody">
+                <div data-rail></div>
+                <div class="pane list-pane">
+                  <div class="pane-head">投放区 <span class="sub">· 拖拽 / 点按</span></div>
+                  <div class="pane-scroll" style="padding-top:12px">
+                    <div class="dropzone" data-drop="旅行 2026"><span class="di">🗂</span><span>旅行 2026 <span style="color:var(--md-primary)">← 拖到这里加入</span></span></div>
+                    <div class="dropzone" data-drop="家人"><span class="di">🗂</span><span>家人 · 相册</span></div>
+                    <div class="dropzone" data-drop="照片托盘"><span class="di">▤</span><span>照片托盘 · 12 张</span></div>
+                    <div class="red-note"><b>只整理，不写回</b>：拖拽只改自家数据库关系，绝不移动 / 删除原图，也不触发编辑室（R-1 / R-2）。</div>
+                    <div class="section">多选方式</div>
+                    <div style="padding:0 14px;font-size:11px;color:var(--md-on-surface-var);line-height:1.8">展开态恢复桌面 <b>14 §4</b> 的<b>框选 + 点选连选</b>，命中区更大；仍兼容长按。手机 S5 的 CAB 从底部移到顶部。</div>
+                  </div>
+                </div>
+                <div class="hinge-gutter"><div class="hinge"></div><span class="hlabel">折痕 48dp</span><span class="hcap">禁放控件</span></div>
+                <div class="pane detail-pane">
+                  <div class="pane-head">选择栅格 <span class="sub">· 点选切换</span><span class="sp"></span><span class="pill-num" id="selHint">3 / 20</span></div>
+                  <div class="pane-scroll"><div class="grid c5" id="selectGrid"></div></div>
+                  <div class="status-strip"><span>框选 / 点选连选</span><span class="sp"></span><span>拖到右窗格外 → 左窗格投放区</span></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- U5 索引管理 · 任务｜详情 -->
+            <div class="uscreen" data-uscreen="u5" data-pose="A">
+              <div class="appbar">
+                <div class="title">索引管理</div>
+                <button class="tbtn" data-toast="新建索引任务（原型演示）">＋ 新建任务</button>
+                <span style="font-size:10.5px;color:var(--md-on-surface-var)">状态</span>
+                <select class="state-select" id="stateSel">
+                  <option>空闲</option><option>准备中</option><option selected>进行中</option><option>成功</option><option>失败</option><option>已取消</option>
+                </select>
+              </div>
+              <div class="ubody">
+                <div data-rail></div>
+                <div class="pane list-pane">
+                  <div class="idxtabs"><button class="on" data-idxtab>总览</button><button data-idxtab>目录</button><button data-idxtab>失败</button><button data-idxtab>任务</button><button data-idxtab>设置</button></div>
+                  <div class="pane-scroll">
+                    <div class="section">关注的目录 · 3</div>
+                    <div class="row"><div class="lead">📁</div><div class="txt"><div class="a">DCIM / Camera</div><div class="b">● 已索引 · 1,204 张</div></div></div>
+                    <div class="row"><div class="lead">📁</div><div class="txt"><div class="a">Pictures / 旅行</div><div class="b">● 监视中 · 412 张</div></div></div>
+                    <div class="row offline"><div class="lead">📁</div><div class="txt"><div class="a">U盘 / 照片</div><div class="b">○ 离线 · 恢复后自动重扫</div></div></div>
+                    <div class="section" style="padding-top:12px">任务 · 3</div>
+                    <div class="row on"><div class="lead">★</div><div class="txt"><div class="a">任务 #128 导入索引</div><div class="b">● 进行中 · 后台继续</div></div></div>
+                    <div class="row"><div class="lead">★</div><div class="txt"><div class="a">任务 #127 重建索引</div><div class="b">✓ 成功 · 2,740 项</div></div></div>
+                    <div class="row"><div class="lead">★</div><div class="txt"><div class="a">任务 #126 重建索引</div><div class="b">✕ 失败 · 22 项需处理</div></div></div>
+                    <div style="padding:10px 14px;font-size:10px;color:var(--md-on-surface-var);line-height:1.7">离开本页 / 折叠展开 <b>≠ 取消任务</b>（非模态，configuration change 不重建）。</div>
+                  </div>
+                </div>
+                <div class="hinge-gutter"><div class="hinge"></div><span class="hlabel">折痕 48dp</span><span class="hcap">禁放控件</span></div>
+                <div class="pane detail-pane">
+                  <div class="pane-head">总览摘要 <span class="sub">· 常驻，不随标签消失</span></div>
+                  <div class="pane-scroll">
+                    <div class="idx-summary">
+                      <div class="big" id="idxBig">2,718 / 2,740</div>
+                      <div class="sub" id="idxSub">缩略图 2,705 · 失败 22 · 待处理 0</div>
+                      <div class="progress"><div class="bar" id="idxBar" style="width:99%"></div></div>
+                      <div class="idx-state"><span class="dot" id="idxDot"></span><span id="idxStateText">进行中：已处理 2,718 项（不显示 ETA）</span></div>
+                      <div class="idx-actions">
+                        <button class="btn sm" id="idxBtn1">暂停</button>
+                        <button class="btn sm" id="idxBtn2">继续</button>
+                        <button class="btn sm" style="color:var(--md-danger)" data-confirm="删除索引？|只删除自家索引数据库，照片文件不受影响（R-1）。">删除索引</button>
+                      </div>
+                    </div>
+                    <div class="section">失败项 · 22（常驻，不自动收起）</div>
+                    <div class="fail-item"><span class="fx">✕</span><span>IMG_0912.CR2</span><span style="color:var(--md-on-surface-var);flex:1">不支持解码</span><button class="btn text sm" data-toast="重试选中（原型演示）">重试</button></div>
+                    <div class="fail-item"><span class="fx">✕</span><span>DSC_0031.HEIC</span><span style="color:var(--md-on-surface-var);flex:1">解码器未编译</span><button class="btn text sm" data-toast="重试选中（原型演示）">重试</button></div>
+                    <div class="fail-item"><span class="fx">✕</span><span>P1030881.RAW</span><span style="color:var(--md-on-surface-var);flex:1">文件读取失败</span><button class="btn text sm" data-toast="重试选中（原型演示）">重试</button></div>
+                    <div class="section" style="padding-top:12px">离线 / 失联</div>
+                    <div class="fail-item"><span style="color:var(--md-warn)">○</span><span style="flex:1;line-height:1.6">U盘 / 照片 目录不可访问，<b>恢复后自动重扫</b>（不静默退化）</span></div>
+                    <div class="red-note">进度只给「已处理 N 项」；<b>不显示 ETA</b>。失败不静默、不自动收起（12 §0.2 / 18）。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- U6 相册与标签 · 列表｜详情 -->
+            <div class="uscreen" data-uscreen="u6" data-pose="A">
+              <div class="appbar">
+                <div class="title">相册与标签</div>
+                <div class="segtabs" style="flex:none;width:190px"><button class="on" data-seg="albums">相册</button><button data-seg="tags">标签</button></div>
+                <span class="sp" style="flex:1"></span>
+                <button class="xfab" data-toast="新建相册（虚拟集合，不写 .picasa.ini）">＋ 新建相册</button>
+              </div>
+              <div class="ubody">
+                <div data-rail></div>
+                <div class="pane list-pane">
+                  <div class="pane-head">相册 · 3 <span class="sp"></span><span class="sub">虚拟集合</span></div>
+                  <div class="pane-scroll">
+                    <div class="row on"><div class="lead">🗂</div><div class="txt"><div class="a">旅行 2026</div><div class="b">128 张 · 最近更新 11-02</div></div><div class="trail">⋯</div></div>
+                    <div class="row"><div class="lead">🗂</div><div class="txt"><div class="a">家人</div><div class="b">64 张</div></div><div class="trail">⋯</div></div>
+                    <div class="row"><div class="lead">🗂</div><div class="txt"><div class="a">海边</div><div class="b">32 张</div></div><div class="trail">⋯</div></div>
+                  </div>
+                  <div class="tagpanel" id="tagPanel" style="display:none;border-top:1px solid var(--md-surface-2)">
+                    <div class="section" style="padding-left:0">标签管理 · 点按切换</div>
+                    <span class="tg">旅行</span><span class="tg">家人</span><span class="tg">海边</span><span class="tg">＋ 新建</span>
+                  </div>
+                </div>
+                <div class="hinge-gutter"><div class="hinge"></div><span class="hlabel">折痕 48dp</span><span class="hcap">禁放控件</span></div>
+                <div class="pane detail-pane">
+                  <div class="pane-head"><span id="albumTitle">旅行 2026 · 128 张</span><span class="sp"></span><button class="btn text sm" data-toast="改名（原型演示）">改名</button><button class="btn text sm" style="color:var(--md-danger)" data-confirm="删除相册「旅行 2026」？|删除相册不会删除照片文件；这只是自家数据库里的虚拟集合（R-1）。">删除</button></div>
+                  <div class="pane-scroll" id="albumBody"><div class="album-grid" id="albumGrid"></div></div>
+                  <div class="red-note" style="margin:8px 12px">相册是<b>虚拟集合</b>，不是磁盘目录；定义落自家 App 数据库，<b>不写 .picasa.ini</b>（v3.0 数据自立）。删除二次确认「不会删除照片文件」。</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- F1 桌模式 Flex · 上大图｜下控制 -->
+            <div class="uscreen dark" data-uscreen="f1" data-pose="B">
+              <div class="appbar dark">
+                <button class="ic" data-ugo="u2">←</button>
+                <div class="title">1 / 2,718</div>
+                <span class="sp" style="flex:1"></span>
+                <button class="ic" data-toast="信息（Flex 下半屏常驻）">ⓘ</button>
+                <button class="ic" data-toast="已加星标（原型演示）">★</button>
+                <button class="ic" data-toast="溢出菜单：无编辑入口（R-2）">⋯</button>
+              </div>
+              <div class="ubody flex-body">
+                <div class="flex-top">
+                  <button class="vnav l" data-page="0">‹</button>
+                  <div class="vphoto" id="flexPhoto" data-zoom>IMG_2043.JPG</div>
+                  <button class="vnav r" data-page="1">›</button>
+                  <div class="vhint">上半屏只显示照片，不跨折痕放任何控件</div>
+                </div>
+                <div class="hinge-gutter h"><div class="hinge"></div><span class="hlabel">物理折痕 · 横向避让带 48dp</span><span class="hcap">上窗格底 / 下窗格顶各退 24dp</span></div>
+                <div class="flex-bottom">
+                  <div class="fmeta"><b>IMG_2043.JPG</b><span>4032 × 3024</span><span>Sony A7IV</span><span>2026-11-02 14:31</span><span style="color:#9fd3b0">● 本机索引 · 只读</span></div>
+                  <div class="filmstrip" id="filmstrip"></div>
+                  <div class="flex-acts">
+                    <button class="btn sm" data-page="0">← 上一张</button>
+                    <button class="btn sm" data-toast="已加星标（原型演示）">★ 星标</button>
+                    <button class="btn sm" data-toast="加标签（原型演示）">🏷 标签</button>
+                    <button class="btn sm" data-toast="信息（Flex 下半屏）">ⓘ 信息</button>
+                    <button class="btn sm" data-page="1">→ 下一张</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- P0 折叠态回退 -->
+            <div class="uscreen" data-uscreen="p0" data-pose="C">
+              <div class="appbar"><div class="title">折叠态回退 · COMPACT</div><span class="sp" style="flex:1"></span><span class="tbtn on">姿态 C · 外屏</span></div>
+              <div class="p0wrap">
+                <div class="miniphone">
+                  <div class="inner">
+                    <div class="sb"><span>9:41</span><span>▮▮▮</span></div>
+                    <div class="ab">OpenPicasa</div>
+                    <div class="bd"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                    <div class="tn"><span class="t on">▦<br>照片</span><span class="t">📁<br>文件夹</span><span class="t">◉<br>索引</span></div>
+                  </div>
+                </div>
+                <div class="p0txt">
+                  <h2>折叠后 = 回退到手机 10 屏</h2>
+                  <p>折叠 / 展开是 <b>configuration change</b>，不是新页面：索引任务、栅格滚动位置、搜索词、选中集、当前照片序号全部保留（docs/20 §6）。</p>
+                  <div class="map">
+                    Rail → 底部 3 Tab<br>
+                    常驻 Supporting pane → 上滑 bottom sheet<br>
+                    框选 / 拖拽 → 长按多选 + CAB<br>
+                    双窗格 → 单窗格 + 抽屉
+                  </div>
+                  <p style="font-size:11px;color:var(--md-on-surface-var)">同一个信息架构的两个宽度档，不是两套产品；<b>MgmtSnapshot</b> 仍是唯一真相源。</p>
+                  <a class="btn filled" href="android-prototype.html" target="_blank">打开折叠态原型（S1–S10）→</a>
+                </div>
+              </div>
+            </div>
+
+          </div><!-- /uscreens -->
+
+          <!-- 手势条（共享） -->
+          <div class="gesturebar" id="gesturebar"><div class="pill"></div></div>
+
+          <!-- toast -->
+          <div class="toast" id="toast"><span>✓</span><span id="toastText"></span></div>
+          <!-- 二次确认 dialog -->
+          <div class="dialog-bg" id="dialogBg">
+            <div class="dialog">
+              <h4 id="dlgTitle">确认</h4>
+              <p id="dlgBody"></p>
+              <div class="acts"><button class="btn text sm" id="dlgCancel">取消</button><button class="btn filled sm" id="dlgOk">确认</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右侧说明卡 -->
+      <div class="spec" id="spec">
+        <div class="k">当前屏 · 设计说明</div>
+        <h3 id="specTitle">U1 · 图库（List–Detail）</h3>
+        <div id="specBody"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  /* ---------- 数据 ---------- */
+  var TONES = [
+    'linear-gradient(135deg,#7c93b8,#c2a0b5)','linear-gradient(135deg,#c98b5e,#7b6a86)',
+    'linear-gradient(135deg,#6db6a8,#3f6d8e)','linear-gradient(135deg,#b58a8a,#6d7c9e)',
+    'linear-gradient(135deg,#9aa86b,#c2a86b)','linear-gradient(135deg,#8a7bb0,#6a9bb5)',
+    'linear-gradient(135deg,#c07a7a,#9a8ab0)','linear-gradient(135deg,#5f8f86,#b08a6a)'
+  ];
+  var NAMES = ['IMG_2043','DSC_0912','IMG_2044','P1030881','IMG_0987','DSC_0031','IMG_1120','IMG_2051','P1030902'];
+
+  var RAIL =
+    '<div class="rail"><div class="rlogo">▦</div>'+
+    '<button class="ritem active" data-rgo="u1"><span class="ri">▦</span><span class="rl">照片</span></button>'+
+    '<button class="ritem" data-rgo="u1"><span class="ri">📁</span><span class="rl">文件夹</span></button>'+
+    '<button class="ritem" data-rgo="u6"><span class="ri">🗂</span><span class="rl">相册</span></button>'+
+    '<button class="ritem" data-rgo="u5"><span class="ri">◉</span><span class="rl">索引</span><span class="rbadge">●</span></button>'+
+    '<button class="ritem" data-rgo="p0"><span class="ri">⚙</span><span class="rl">设置</span></button>'+
+    '<span class="rsp"></span><div style="font-size:8px;color:#aab2c0;writing-mode:vertical-rl;letter-spacing:1px">72dp</div></div>';
+
+  var USCREENS = {
+    u1:{t:'U1 · 图库（List–Detail）',d:'Rail + 左列表 + 右网格 · 折痕落在两窗格 gutter',pose:'A · 展开平铺',
+      s:'<p>把手机 <b>19</b> 底部 3 Tab <b>解压</b>回常驻 <b>Navigation Rail（72dp）</b>；文件夹列表从全屏页变成 <b>List pane（333dp）</b> 常驻，右 <b>Detail pane（405dp）</b> 是照片栅格。</p><ul><li>密度由窗格宽推导：<b>5 / 4 / 3 列</b>（手机是 4/3/2）</li><li>日期分组头只画在右窗格内，<b>不横跨折痕</b></li><li>Extended FAB（带文字）替代图标 FAB</li><li>底部状态条与列表行、摘要、Rail 角标同源</li></ul><p>折痕避让带 48dp 正好落在两窗格 gutter；分隔手柄不压中缝（§5.4）。</p><div class="tagrow"><span class="tg">F1-13/14/16/22</span><span class="tg">11 §2.1</span><span class="tg">List–Detail</span><span class="tg">Rail 72dp</span></div>'},
+    u2:{t:'U2 · 全屏查看器（Supporting pane）',d:'左暗底大图 + 右常驻信息 · 无编辑入口',pose:'A · 展开平铺',
+      s:'<p>展开态<b>最大收益</b>：手机 S6 的 EXIF / 标签要「上滑 bottom sheet」才看得到，展开态放进 <b>右常驻 Supporting pane</b>，照片与元数据同屏。</p><p>点 <b>ⓘ</b> 可折叠 / 展开右窗格，折叠后退回手机式 sheet 语义，但仍是同一份数据（§6）。双击照片缩放，‹ › 翻页。</p><div class="red"><b>R-2</b>：无编辑 / 滤镜 / 旋转写回入口；方向只由 EXIF Orientation 决定。折痕仍贯穿两窗格之间，避让带内不放控件。</div><div class="tagrow"><span class="tg">F2-*</span><span class="tg">17 S2</span><span class="tg">Supporting pane</span><span class="tg">R-2</span></div>'},
+    u3:{t:'U3 · 搜索（常驻筛选 + 结果）',d:'左筛选窗格常驻 · 右结果网格 · zzz 空态',pose:'A · 展开平铺',
+      s:'<p>手机 S4 的折叠筛选面板 → <b>左窗格常驻组合筛选</b>，边调边看右侧结果。对齐 <b>M4-SEARCH-01～09</b> 八维（日期 / 类型 / 星标 / 标签 / 排序 / 相机 / 字节 / 长边）。</p><p>输入 <b>zzz</b> 预览无结果空态：<b>不列出「标签 / 人物」等 M1 无数据筛选项</b>。</p><div class="tagrow"><span class="tg">M4-SEARCH-*</span><span class="tg">F1-21</span><span class="tg">常驻筛选</span></div>'},
+    u4:{t:'U4 · 多选整理（框选 + 拖拽投放）',d:'顶部 CAB · 跨窗格拖拽 · 删除二次确认',pose:'A · 展开平铺',
+      s:'<p>手机 S5 的「长按 → 菜单 → 选相册」恢复成桌面 <b>14 §4</b> 的 <b>框选 + 点选连选 + 跨窗格拖拽</b>；CAB 从底部移到顶部（与桌面工具栏位置一致）。</p><ul><li>把选中照片拖到左窗格「相册 / 托盘」投放区（点按投放区也可演示）</li><li>已选计数在 CAB / 栅格角标 / 托盘三处同源</li><li>删除必经二次确认「照片文件不受影响」</li></ul><div class="red"><b>R-1 / R-2</b>：拖拽只改自家数据库关系，绝不移动 / 删除原图，不触发编辑室。</div><div class="tagrow"><span class="tg">14 §4</span><span class="tg">F1-18/19</span><span class="tg">drag & drop</span><span class="tg">顶部 CAB</span></div>'},
+    u5:{t:'U5 · 索引管理（任务｜详情）',d:'左任务列表 + 右六态详情 · 失败常驻 · 离线失联',pose:'A · 展开平铺',
+      s:'<p>手机 S8 的滚动长页拆成 <b>左任务/目录 + 右总览详情</b>。<b>总览摘要常驻</b>，不随五标签切换消失（11 §2.1.1）。顶部「状态」下拉切 <b>空闲 / 准备中 / 进行中 / 成功 / 失败 / 已取消</b> 六态。</p><ul><li>进度只给「已处理 N 项」，<b>不显示 ETA</b></li><li>失败项常驻、可重试（不静默）</li><li>离线节点写明原因，恢复后自动重扫</li><li>离开本页 / 折叠展开 ≠ 取消任务</li></ul><div class="tagrow"><span class="tg">M4-IDX-*</span><span class="tg">11 §2.1.2</span><span class="tg">18 离线</span><span class="tg">六态</span></div>'},
+    u6:{t:'U6 · 相册与标签（列表｜详情）',d:'左相册列表 + 右成员网格 · 删除二次确认',pose:'A · 展开平铺',
+      s:'<p><b>F5-01～04</b> + <b>17 S4</b>。相册是<b>虚拟集合</b>不是磁盘目录；点「标签」分段看标签管理。</p><div class="red"><b>D-F08</b>：<code>docs/01</code> §5 的 F5-05（相册写 .picasa.ini）是遗留错误文字，<code>docs/02</code> §5.7 已把 ini 兼容层整体作废。本屏只写自家 App 数据库。</div><p>删除二次确认统一文案「<b>不会删除照片文件</b>」。</p><div class="tagrow"><span class="tg">F5-01～04</span><span class="tg">虚拟集合</span><span class="tg">R-1</span></div>'},
+    f1:{t:'F1 · 桌模式 Flex（上大图｜下控制）',d:'横向折痕 · 上半屏只放照片 · 下半屏控制甲板',pose:'B · 桌模式 Flex',
+      s:'<p>半折叠立在桌上，<b>横向折痕</b>把屏幕分成两半：上半屏<b>只显示照片</b>，任何按钮 / 计数 / 进度都不跨折痕；下半屏是胶片条 + 翻页 + 星标 / 标签 / 信息的「控制甲板」。</p><p>这是折叠屏<b>独有姿态</b>，桌面与手机都没有（D-F06）。横向避让带 48dp，上窗格底 / 下窗格顶各退 24dp。</p><div class="red"><b>R-2</b>：下半屏也没有编辑 / 滤镜 / 旋转写回入口。</div><div class="tagrow"><span class="tg">Flex mode</span><span class="tg">横向折痕</span><span class="tg">F2-*</span><span class="tg">R-2</span></div>'},
+    p0:{t:'P0 · 折叠态回退（COMPACT）',d:'外屏 = 手机 10 屏 · configuration change 不丢状态',pose:'C · 折叠回退',
+      s:'<p>折叠后宽度类回到 COMPACT，直接回退到 <b>docs/19 的 S1–S10</b>：Rail → 底部 3 Tab、常驻 Supporting pane → 上滑 sheet、框选/拖拽 → 长按多选 + CAB、双窗格 → 单窗格。</p><p>这是<b>同一任务的连续状态</b>：索引任务、滚动位置、搜索词、选中集、当前照片序号全保留（§6）。</p><div class="tagrow"><span class="tg">19 S1–S10</span><span class="tg">configuration change</span><span class="tg">单一快照</span></div>'}
+  };
+
+  /* ---------- 工具 ---------- */
+  function $(s,r){return (r||document).querySelector(s)}
+  function $$(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))}
+  function makeCells(host,count,opts){
+    opts=opts||{};
+    var html='';
+    for(var i=0;i<count;i++){
+      var tone=TONES[i%TONES.length];
+      var star=(opts.star!==false && i%5===0)?'<span class="star">★</span>':'';
+      var sel=(opts.sel && i<3);
+      html+='<div class="cell'+(sel?' selected':'')+'"'+(opts.drag?' draggable="true"':'')+' data-cell>'
+        +'<div class="tone" style="background:'+tone+'"></div>'
+        +'<div class="fname">'+NAMES[i%NAMES.length]+'.JPG</div>'
+        +star
+        +'<span class="selmark'+(sel?' check':'')+'">'+(sel?'✓':'')+'</span>'
+        +'</div>';
+    }
+    host.innerHTML=html;
+  }
+
+  /* ---------- 屏切换 ---------- */
+  var curScreen='u1';
+  function go(name){
+    if(!USCREENS[name])return;
+    curScreen=name;
+    $$('.uscreen').forEach(function(s){s.classList.toggle('active',s.getAttribute('data-uscreen')===name)});
+    $$('.nav button').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-ugo')===name)});
+    var u=USCREENS[name];
+    $('#stageTitle').textContent=u.t;
+    $('#stageDesc').textContent=u.d;
+    $('#stageTag').textContent='姿态 '+u.pose+' · 800×720dp';
+    $('#specTitle').textContent=u.t;
+    $('#specBody').innerHTML=u.s;
+    var dark=(name==='u2'||name==='f1');
+    $('#fstatus').classList.toggle('dark',dark);
+    $('#gesturebar').classList.toggle('dark',dark);
+    // Rail 高亮：u1/u2/u3/u4 → 照片，u5 → 索引，u6 → 相册
+    var RAILMAP={u1:0,u2:0,u3:0,u4:0,u5:3,u6:2};
+    $$('.rail').forEach(function(r){
+      $$('.ritem',r).forEach(function(b,i){b.classList.toggle('active',i===RAILMAP[name])});
+    });
+    $('#dialogBg').classList.remove('show');
+    $('#toast').classList.remove('show');
+  }
+
+  /* ---------- 全局点击委托 ---------- */
+  document.addEventListener('click',function(e){
+    var t=e.target;
+    var g=t.closest('[data-ugo]');
+    if(g){go(g.getAttribute('data-ugo'));return}
+    var rg=t.closest('[data-rgo]');
+    if(rg){go(rg.getAttribute('data-rgo'));return}
+    var to=t.closest('[data-toast]');
+    if(to){showToast(to.getAttribute('data-toast'));return}
+    var cf=t.closest('[data-confirm]');
+    if(cf){var parts=cf.getAttribute('data-confirm').split('|');openDialog(parts[0],parts[1]||'');return}
+    var ch=t.closest('.chip');
+    if(ch&&!ch.querySelector('.x')){ch.classList.toggle('on');return}
+    // 密度 5/4/3 列
+    var dc=t.closest('[data-col]');
+    if(dc){setDensity(dc.getAttribute('data-col'));return}
+    // 多选
+    if(t.closest('[data-select-all]')){$$('#selectGrid .cell').forEach(function(c){setSel(c,true)});updateSel();return}
+    if(t.closest('[data-invert]')){$$('#selectGrid .cell').forEach(function(c){setSel(c,!c.classList.contains('selected'))});updateSel();return}
+    var cell=t.closest('#selectGrid .cell');
+    if(cell){setSel(cell,!cell.classList.contains('selected'));updateSel();return}
+    // 普通栅格 → 查看器
+    var mc=t.closest('#mainGrid .cell, [data-extra] .cell, #resultGrid .cell, #albumGrid .cell');
+    if(mc){go('u2');return}
+    // 投放区（点按也可演示拖拽结果）
+    var dz=t.closest('[data-drop]');
+    if(dz){flashDrop(dz);showToast('已把选中集加入「'+dz.getAttribute('data-drop')+'」（仅改自家数据库）');return}
+    // 翻页
+    var pg=t.closest('[data-page]');
+    if(pg){showToast('翻页 '+(pg.getAttribute('data-page')==='1'?'下一张 →':'← 上一张'));return}
+    // 缩放
+    if(t.closest('[data-zoom]')){
+      $$('#flexPhoto, #flexPhoto2').forEach(function(p){p.classList.toggle('zoom')});
+      return;
+    }
+    // 折叠 / 展开 Supporting pane
+    if(t.closest('[data-sheet]')){$('#supportPane').classList.toggle('collapsed');return}
+    // 分段（U6 相册 / 标签）
+    var seg=t.closest('[data-seg]');
+    if(seg){
+      $$('[data-seg]').forEach(function(x){x.classList.remove('on')});seg.classList.add('on');
+      var tag=(seg.getAttribute('data-seg')==='tags');
+      $('#tagPanel').style.display=tag?'block':'none';
+      $('#albumBody').style.display=tag?'none':'';
+      if(tag){$('#albumTitle').textContent='标签管理'}else{$('#albumTitle').textContent='旅行 2026 · 128 张'}
+      return;
+    }
+    // 索引五标签
+    var it=t.closest('[data-idxtab]');
+    if(it){$$('.idxtabs button').forEach(function(x){x.classList.remove('on')});it.classList.add('on');showToast('索引标签：'+it.textContent+'（总览摘要常驻）');return}
+    // 搜索清除 / 筛选清除
+    if(t.closest('[data-clear-filter]')){$$('.filter-pane .chip').forEach(function(c){c.classList.remove('on')});showToast('已清除全部筛选');return}
+    if(t.closest('[data-clear-search]')){$('#searchInput').value='';filterResult('');return}
+    // dialog 按钮
+    if(t.closest('#dlgCancel')){$('#dialogBg').classList.remove('show');return}
+    if(t.closest('#dlgOk')){$('#dialogBg').classList.remove('show');showToast('已确认：照片文件不受影响');return}
+    if(t.id==='dialogBg'){$('#dialogBg').classList.remove('show');return}
+    // 索引动作
+    if(t.closest('#idxBtn1')){showToast('已暂停索引（后台可继续，非模态）');return}
+    if(t.closest('#idxBtn2')){showToast('继续索引');return}
+  });
+
+  /* ---------- toast / dialog ---------- */
+  var toastTimer;
+  function showToast(msg){
+    $('#toastText').textContent=msg;
+    $('#toast').classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer=setTimeout(function(){$('#toast').classList.remove('show')},1900);
+  }
+  function openDialog(title,body){
+    $('#dlgTitle').textContent=title;$('#dlgBody').textContent=body;
+    $('#dialogBg').classList.add('show');
+  }
+
+  /* ---------- 密度 ---------- */
+  function setDensity(cols){
+    $$('#mainGrid, [data-extra], #resultGrid, #selectGrid, #albumGrid').forEach(function(g){g.className='grid c'+cols});
+    $$('#densitySeg button').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-col')===cols)});
+    $('#colHint').textContent=cols+' 列';
+  }
+
+  /* ---------- 多选 ---------- */
+  function setSel(c,on){
+    c.classList.toggle('selected',on);
+    var m=c.querySelector('.selmark');
+    m.classList.toggle('check',on);m.textContent=on?'✓':'';
+  }
+  function updateSel(){
+    var n=$$('#selectGrid .cell.selected').length;
+    $('#selCount').textContent='✓ 已选 '+n+' 张';
+    $('#selHint').textContent=n+' / '+$$('#selectGrid .cell').length;
+  }
+
+  /* ---------- 搜索无结果 ---------- */
+  function filterResult(v){
+    var bad=/zzz|qqq|不存在/i.test(v);
+    $('#resultGrid').style.display=bad?'none':'';
+    $('#noResult').style.display=bad?'block':'none';
+    $('#resultHead').style.display=bad?'none':'flex';
+  }
+  document.addEventListener('input',function(e){
+    if(e.target.id==='searchInput')filterResult(e.target.value);
+  });
+
+  /* ---------- 索引六态 ---------- */
+  var STATE={
+    '空闲':{big:'0 / 0',sub:'暂无索引任务',bar:'0%',txt:'空闲 · 暂无索引任务',dot:'#9aa3b0',b1:'开始',b2:'—'},
+    '准备中':{big:'正在清点…',sub:'扫描目录结构，准备索引',bar:'4%',txt:'准备中：清点目录 …',dot:'#9a6700',b1:'暂停',b2:'继续'},
+    '进行中':{big:'2,718 / 2,740',sub:'缩略图 2,705 · 失败 22 · 待处理 0',bar:'99%',txt:'进行中：已处理 2,718 项（不显示 ETA）',dot:'#2f6fed',b1:'暂停',b2:'继续'},
+    '成功':{big:'2,740 / 2,740',sub:'全部完成 · 失败 0',bar:'100%',txt:'成功：索引完成',dot:'#1b7f4b',b1:'重建',b2:'—'},
+    '失败':{big:'2,718 / 2,740',sub:'失败 22 · 已停止',bar:'99%',txt:'失败：22 项需处理（常驻，不自动收起）',dot:'#ba1a1a',b1:'重试',b2:'继续'},
+    '已取消':{big:'2,718 / 2,740',sub:'已取消 · 可继续',bar:'99%',txt:'已取消：可继续或重新开始',dot:'#9aa3b0',b1:'继续',b2:'重来'}
+  };
+  $('#stateSel').addEventListener('change',function(){
+    var s=STATE[this.value];
+    $('#idxBig').textContent=s.big;
+    $('#idxSub').textContent=s.sub;
+    $('#idxBar').style.width=s.bar;
+    $('#idxStateText').textContent=s.txt;
+    $('#idxDot').style.background=s.dot;
+    $('#idxBtn1').textContent=s.b1;
+    $('#idxBtn2').textContent=s.b2;
+    showToast('状态切换：'+this.value);
+  });
+
+  /* ---------- 拖拽投放（HTML5 drag & drop 演示） ---------- */
+  function flashDrop(el){
+    el.classList.add('hi');
+    setTimeout(function(){el.classList.remove('hi')},900);
+  }
+  document.addEventListener('dragstart',function(e){
+    var c=e.target.closest('#selectGrid .cell');
+    if(c){e.dataTransfer&&e.dataTransfer.setData('text/plain','photo');}
+  });
+  document.addEventListener('dragover',function(e){
+    var dz=e.target.closest('[data-drop]');
+    if(dz){e.preventDefault();dz.classList.add('hi')}
+  });
+  document.addEventListener('dragleave',function(e){
+    var dz=e.target.closest('[data-drop]');
+    if(dz){dz.classList.remove('hi')}
+  });
+  document.addEventListener('drop',function(e){
+    var dz=e.target.closest('[data-drop]');
+    if(dz){e.preventDefault();flashDrop(dz);showToast('已把选中集拖入「'+dz.getAttribute('data-drop')+'」（仅整理）')}
+  });
+
+  /* ---------- 初始化 ---------- */
+  $$('[data-rail]').forEach(function(h){h.outerHTML=RAIL});
+  makeCells($('#mainGrid'),20);
+  makeCells($('[data-extra]'),10);
+  makeCells($('#resultGrid'),20);
+  makeCells($('#selectGrid'),20,{drag:true});
+  makeCells($('#albumGrid'),16);
+  // 默认选中 3 张（makeCells 不预选，显式设定）
+  var sc=$$('#selectGrid .cell');
+  [0,1,3].forEach(function(i){setSel(sc[i],true)});
+  updateSel();
+  // F1 胶片条
+  var fs='';
+  for(var i=0;i<12;i++){fs+='<i style="background:'+TONES[i%TONES.length]+'" data-page="'+(i%2)+'"></i>'}
+  $('#filmstrip').innerHTML=fs;
+  go('u1');
+
+  /* 出图模式：?uscreen=xxx&shot=1 —— 供 headless Chrome 逐屏导出 PNG */
+  var qs=(function(){var o={};location.search.replace(/^\?/,'').split('&').forEach(function(p){if(!p)return;var k=p.split('=');o[decodeURIComponent(k[0])]=decodeURIComponent(k[1]||'')});return o})();
+  if(qs.shot==='1'){
+    document.body.classList.add('shot');
+    if(qs.uscreen&&USCREENS[qs.uscreen])go(qs.uscreen);
+    $('#dialogBg').classList.remove('show');
+    $('#toast').classList.remove('show');
+  }
+})();
+</script>
+</body>
+</html>

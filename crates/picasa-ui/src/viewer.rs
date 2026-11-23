@@ -124,7 +124,7 @@ pub struct StageLayout {
     pub status: Rect,
     /// 主图 + 说明条 + 胶片条所在的列。信息栏打开时变窄。
     pub stage: Rect,
-    /// 照片卡片（V1：圆角浅色卡片，照片与卡片边缘留白）。
+    /// 照片区外框：`canvas` 由它向内收 18 得到，四周留白给落影留出空间。
     pub card: Rect,
     /// 主图可用区域（比较模式下仍是整个画布）。
     pub canvas: Rect,
@@ -639,11 +639,11 @@ pub fn show(
     //
     // r7 产品把圆角做在**白色外框**上、图片本身是直角，实窗里看起来就是
     // 「方图套在圆角白框里」。原型是照片本身有圆角、直接落在展厅底色上
-    // （亮色 21、暗色 5），没有那一圈白色画框。这里改成：不再铺满整块卡片，
+    // （亮色 22、暗色 6），没有那一圈白色画框。这里改成：不再铺满整块卡片，
     // 只在照片自己的矩形上给一层落影，圆角加在图片本身（见 `paint_rounded_image`）。
     //
-    // 暗房仍保留一档略深的底（照片落在比背景更深一档的面上），只是同一尺寸，
-    // 不会在照片外加一圈可见的浅色边框。
+    // 两套主题都不再画「卡片底」——照片直接落在展厅底色上，靠落影与背景分开
+    // （原型 `.stage img` 就是这样：只有 border-radius + box-shadow，没有底板）。
 
     // ---- 主图尺寸 / 适合 ----
     let (iw, ih) = if viewer.tex_size.x > 0.0 {
@@ -2761,6 +2761,71 @@ mod tests {
         // 关闭后主图恢复宽度
         let reopened = layout(stage_rect(), false, false);
         assert!((reopened.canvas.width() - closed.canvas.width()).abs() < 0.5);
+    }
+
+    /// `M5-V1` 未验收项①：信息栏按窗口宽度的 25% 取宽，并夹在 300–480。
+    ///
+    /// 钉住的是**原型锚点**，不是实现细节：原型 v1.4 在 1280 逻辑宽下
+    /// `.info-panel` 是 328（含 8px 左内边距，净 320 = 25%），r7 产品固定
+    /// 336 在 1920 下只有 17.5%，所以看起来过窄。这几个数字一旦漂了，
+    /// 「按原型比例」这句话就不成立了。
+    #[test]
+    fn info_panel_width_follows_prototype_ratio_with_clamps() {
+        // 原型锚点：1280 → 320（25%），1920 → 480（25%，正好撞上限）。
+        assert!(
+            (info_panel_width(1280.0) - 320.0).abs() < 0.5,
+            "1280 逻辑宽应得原型宽 320，实际 {}",
+            info_panel_width(1280.0)
+        );
+        assert!(
+            (info_panel_width(1920.0) - 480.0).abs() < 0.5,
+            "1920 应得 480（上限），实际 {}",
+            info_panel_width(1920.0)
+        );
+        // 上限：再宽也不继续变胖，否则超宽屏把主图压没。
+        assert!((info_panel_width(3840.0) - INFO_MAX_W).abs() < 0.5);
+        // 下限：窄窗仍保底 300（缩略图 + 四小卡还排得开）。
+        assert!((info_panel_width(1100.0) - INFO_MIN_W).abs() < 0.5);
+        // 比例段内单调：1280..1920 之间严格跟着 25% 走。
+        for w in [1280.0_f32, 1400.0, 1600.0, 1800.0] {
+            assert!(
+                (info_panel_width(w) - w * INFO_RATIO).abs() < 0.5,
+                "{w} 应按 {INFO_RATIO} 比例取宽"
+            );
+        }
+        // 窗口比下限还窄时不能反超窗口本身（面板不许吃掉整个舞台）。
+        for w in [400.0_f32, 320.0, 300.0] {
+            let panel = info_panel_width(w);
+            assert!(panel <= w, "{w} 时面板 {panel} 反超了窗口宽度");
+            assert!((panel - INFO_MIN_W.min(w)).abs() < 0.5, "{w} 应收敛到上限");
+        }
+        // 退化输入不产出负宽。
+        assert_eq!(info_panel_width(0.0), 0.0);
+        assert_eq!(info_panel_width(-10.0), 0.0);
+    }
+
+    /// `M5-V1` 未验收项②：圆角加在**照片本身**上，亮色大圆角、暗色小圆角。
+    ///
+    /// 原型 `.stage img` 亮色 `border-radius:22px`、暗色 `6px`。此前 r7 把
+    /// 圆角做在外层白色画框上（照片本身直角），实窗看起来是「方图套白框」，
+    /// 正是这一项要修掉的问题。
+    #[test]
+    fn photo_radius_matches_prototype_per_theme() {
+        assert_eq!(
+            photo_radius(&Theme::for_appearance(Appearance::Light)),
+            22.0,
+            "亮色照片圆角应为原型 22"
+        );
+        assert_eq!(
+            photo_radius(&Theme::for_appearance(Appearance::Dark)),
+            6.0,
+            "暗色照片圆角应为原型 6"
+        );
+        // 亮暗两套必须真的不同（原型刻意分两档，不是同一个值换皮）。
+        assert_ne!(
+            photo_radius(&Theme::for_appearance(Appearance::Light)),
+            photo_radius(&Theme::for_appearance(Appearance::Dark))
+        );
     }
 
     /// 信息栏开关是纯切换：打开一次变关、再开一次变开（I 键同路径）。
