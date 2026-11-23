@@ -2409,7 +2409,7 @@ fn text_button(
 }
 
 /// `object-fit: cover` 的 UV 子矩形：保持图片比例、按目标框**裁切**而不是内缩。
-fn cover_uv(outer: Rect, tex: Vec2) -> Rect {
+pub(crate) fn cover_uv(outer: Rect, tex: Vec2) -> Rect {
     let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     if tex.x <= 0.0 || tex.y <= 0.0 || outer.width() <= 0.0 || outer.height() <= 0.0 {
         return full;
@@ -2453,7 +2453,7 @@ pub fn photo_radius(theme: &Theme) -> f32 {
 /// 用带 brush 的 `RectShape`：tessellator 会按圆角路径做带 UV 的填充，
 /// 因此四角是真的圆角（不是直角贴图叠在圆角底上）。`uv` 为纹理子矩形，
 /// 主图 / 预览 / 比较图都是整张 0..1。
-fn paint_rounded_image(
+pub(crate) fn paint_rounded_image(
     painter: &egui::Painter,
     tex: egui::TextureId,
     rect: Rect,

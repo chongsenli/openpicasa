@@ -723,7 +723,9 @@ fn install_fonts(ctx: &egui::Context, appearance: Appearance) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use picasa_core::{Appearance, CELL_MAX_PX, CELL_MIN_PX, DEFAULT_CELL_PX, ZoomState};
+    use picasa_core::{
+        Appearance, CELL_MAX_PX, CELL_MIN_PX, DEFAULT_CELL_PX, RESET_CELL_PX, ZoomState,
+    };
 
     fn c(hex: &str) -> Color32 {
         let h = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap();
@@ -823,7 +825,8 @@ mod tests {
         assert_eq!(before.to_setting(), after.to_setting());
         assert_eq!(CELL_MIN_PX, 22.0);
         assert_eq!(CELL_MAX_PX, 512.0);
-        assert_eq!(DEFAULT_CELL_PX, 96.0);
+        assert_eq!(DEFAULT_CELL_PX, 144.0, "新建默认按原型 THUMB_DEFAULT");
+        assert_eq!(RESET_CELL_PX, 96.0, "⌘0 复位按原型 THUMB_RESET");
         // 主题的圆角/颜色不同，但都不携带任何尺寸范围。
         assert_ne!(light.radius_thumb, dark.radius_thumb);
     }

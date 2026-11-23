@@ -2860,8 +2860,10 @@ mod tests {
     /// 守的是「一屏更密」这组常量，别被后续调参悄悄改回去。
     #[test]
     fn m41_default_density_constants() {
-        // M5-TB-10 / §11 #1：默认边长**保持产品事实 96**（原型 144 未采纳）。
-        assert_eq!(picasa_core::DEFAULT_CELL_PX, 96.0);
+        // M5-TB-10 / §11 #1 原写「默认边长保持 96」；2026-11-23 产品拍板按原型改：
+        // 新建默认 144（`THUMB_DEFAULT`），`⌘0` 复位仍是 96（`THUMB_RESET`）。
+        assert_eq!(picasa_core::DEFAULT_CELL_PX, 144.0);
+        assert_eq!(picasa_core::RESET_CELL_PX, 96.0);
         assert_eq!(Metrics::FILENAME_H, 9.0);
         assert_eq!(Metrics::FILENAME_GAP, 0.5);
         assert_eq!(Metrics::FILENAME_FONT_SIZE, 11.0);

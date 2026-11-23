@@ -309,6 +309,12 @@ pub struct OpenPicasaApp {
     /// 已应用的后台结果 revision（丢弃乱序到达的旧结果）。
     tag_counts_applied: u64,
     sidebar_albums: Vec<(String, i64)>,
+    /// 相册名 → 封面照片行（暗色相册组的三列缩略图卡用）。
+    ///
+    /// 原型把封面存在相册对象上（建相册时选中的第一张，`js/app.js:303`），
+    /// 应用侧 `albums` 表没有 cover 列，只能在脏标记刷新时按成员表取 id 最小那张。
+    /// 和 `sidebar_albums` 同源同生命周期，不每帧查库。
+    sidebar_album_covers: Vec<(String, Option<PhotoRow>)>,
     /// IDX-21：左栏「导入的索引」分组数据（App 缓存，不每帧查库）。
     sidebar_import_groups: Vec<crate::sidebar::ImportGroup>,
     /// IDX-21：「导入的索引」分组折叠状态。
@@ -412,7 +418,7 @@ impl OpenPicasaApp {
             progress: IndexProgressUi::new(),
             watch: picasa_core::WatchManager::new(),
             // `settings.grid_cell_px`（`07-A` ZOOM-06）：全局一份，不按文件夹记忆（P-28）。
-            // 读库失败/没设过 → 默认刻度（`ZoomState::from_setting(None)`）。
+            // 读库失败/没设过 → 新建默认 144（`ZoomState::from_setting(None)`）。
             zoom: picasa_core::ZoomState::from_setting(zoom_setting),
             full_verify: picasa_core::FullVerifyScheduler::new(),
             atlas: crate::atlas::ThumbAtlas::new(),
@@ -497,6 +503,7 @@ impl OpenPicasaApp {
             tag_counts: crate::tag_counts_task::TagCountsService::new(db_file),
             tag_counts_applied: 0,
             sidebar_albums: Vec::new(),
+            sidebar_album_covers: Vec::new(),
             sidebar_groups_dirty: true,
             index_run_started: None,
             index_run_stopped_at: None,
@@ -1483,6 +1490,23 @@ impl OpenPicasaApp {
             // M4.2 `M42-UI-05`：同时留一份 name→id，供改名/删除/加入照片调用
             // Core 的 `*_album(id, ..)`；`sidebar_albums` 仍只画 (name,count)。
             self.sidebar_album_ids = albums.iter().map(|a| (a.name.clone(), a.id)).collect();
+            // 暗色相册组要画封面：取每个相册 id 最小的那张成员。
+            // 只有脏标记刷新时才查（相册增删改名 / 索引完成都会置脏），帧内不查库。
+            self.sidebar_album_covers = albums
+                .iter()
+                .map(|a| {
+                    let cover = db
+                        .album_photo_ids(a.id)
+                        .ok()
+                        .and_then(|ids| ids.first().copied())
+                        .and_then(|pid| {
+                            db.photos_by_ids(&[pid])
+                                .ok()
+                                .and_then(|rows| rows.into_iter().next())
+                        });
+                    (a.name.clone(), cover)
+                })
+                .collect();
             self.sidebar_albums = albums
                 .into_iter()
                 .map(|a| (a.name, a.photo_count))
@@ -2497,7 +2521,8 @@ impl OpenPicasaApp {
                 self.step_zoom(1);
                 ctx.request_repaint();
             }
-            // M5-KB-08：`⌘0` 回 96 px（§11 #1 的默认边长未裁定，不在这里定稿）。
+            // M5-KB-08：`⌘0` 回 96 px（原型 `THUMB_RESET`；新建默认是 144，
+            // 两者分开，见 `picasa_core::RESET_CELL_PX` / `DEFAULT_CELL_PX`）。
             KeyAction::ZoomReset => {
                 self.zoom.reset();
                 self.zoom.end_drag(std::time::Instant::now());
@@ -3076,6 +3101,8 @@ impl OpenPicasaApp {
                         // IDX-22 ②：当前生效的标签筛选 → 行高亮。
                         // `self.lib.filter` 是 `Option<PhotoFilter>`，这里借出。
                         tags_active: self.lib.filter.as_ref().and_then(|f| f.tag.as_deref()),
+                        album_covers: &self.sidebar_album_covers,
+                        album_active: self.lib.filter.as_ref().and_then(|f| f.album.as_deref()),
                         tags_sort: self.lib.tags_sort(),
                         show_zero_tags: self.lib.show_zero_tags(),
                         tags_in_view: &self.sidebar_tags_in_view,

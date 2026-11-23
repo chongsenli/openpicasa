@@ -39,12 +39,25 @@ pub const CELL_MAX_PX: f32 = 512.0;
 /// 档位边界是 [`tier_boundaries`]。
 pub const SNAP_POINTS: [f32; 3] = [48.0, 128.0, 256.0];
 
-/// 默认刻度（`07-A` §2.3：`⌘0` 回到它）。
+/// 默认刻度：**全新库**的起始边长，以及 `settings.grid_cell_px` 没设过时的取值。
 ///
-/// M4.1 `M41-UI-03`：由 128 降到 **96**，让全新库 / `⌘0` 复位时一屏能看到更多行
-/// （行距 162 → 121 px）。96 本就在 [`LOG_STEPS`] 里，不新增档位。
+/// M4.1 `M41-UI-03` 曾由 128 降到 96；`M5-TB-10` / §11 #1 原写「保持产品事实 96，
+/// 原型 144 未采纳」。2026-11-23 产品拍板**改按原型**：原型
+/// `js/data.js:74` 的 `THUMB_DEFAULT = 144`，故这里回到 144（`css/app.css:7`
+/// 的 `--thumb-size:144px` 同值）。
+///
+/// 与 [`RESET_CELL_PX`] 是两个不同的数——原型把「新建时的默认」和「`⌘0` 复位到哪」
+/// 分开了，`THUMB_DEFAULT = 144` 而 `THUMB_RESET = 96`。
+///
 /// 老用户已保存的 `grid_cell_px` 偏好仍优先（`ZoomState::from_setting`），不会被覆盖。
-pub const DEFAULT_CELL_PX: f32 = 96.0;
+pub const DEFAULT_CELL_PX: f32 = 144.0;
+
+/// `⌘0` 复位到哪（`07-A` §2.3 / `M5-KB-06`）。
+///
+/// 原型 `js/data.js:74` 的 `THUMB_RESET = 96`，`js/app.js:2351-2355` 里
+/// `⌘0` 走的就是这个值，**不是** [`DEFAULT_CELL_PX`]（144）。
+/// 96 能让一屏看到更多行，是「复位」这个动作想要的效果。
+pub const RESET_CELL_PX: f32 = 96.0;
 
 /// 拖到刻度点附近多少 px 内就吸附。
 pub const TIER_SNAP_PX: f32 = 6.0;
@@ -429,11 +442,11 @@ impl ZoomState {
         next
     }
 
-    /// `⌘0`：回到默认刻度。
+    /// `⌘0`：回到**复位刻度** [`RESET_CELL_PX`]（96），不是新建默认 144。
     pub fn reset(&mut self) -> f32 {
-        self.cell_px = DEFAULT_CELL_PX;
+        self.cell_px = RESET_CELL_PX;
         self.last_change = Some(std::time::Instant::now());
-        DEFAULT_CELL_PX
+        RESET_CELL_PX
     }
 
     /// 滚轮缩放（`07-A` ZOOM-03）。返回新的 `cell_px`。
@@ -685,10 +698,10 @@ mod tests {
     }
 
     #[test]
-    fn reset_goes_back_to_the_default_mark() {
+    fn reset_goes_back_to_the_reset_mark() {
         let mut z = ZoomState::new(400.0);
-        assert_eq!(z.reset(), DEFAULT_CELL_PX);
-        assert_eq!(z.cell_px(), DEFAULT_CELL_PX);
+        assert_eq!(z.reset(), RESET_CELL_PX);
+        assert_eq!(z.cell_px(), RESET_CELL_PX);
     }
 
     #[test]
@@ -740,8 +753,14 @@ mod tests {
         for w in LOG_STEPS.windows(2) {
             assert!(w[0] < w[1], "对数档位必须严格递增：{w:?}");
         }
-        // 默认刻度在档位表里
-        assert!(LOG_STEPS.contains(&DEFAULT_CELL_PX));
+        // M5-TB-10 起默认刻度按原型取 144（`THUMB_DEFAULT`），不在 12 档对数表里；
+        // 旧的「默认必须落在对数档上」口径随之作废，只要求落在量程内。
+        assert!(
+            !LOG_STEPS.contains(&DEFAULT_CELL_PX),
+            "144 不是对数档，别把它塞进 LOG_STEPS"
+        );
+        // 编译期就把「默认刻度在量程内」钉死，不用运行期断言。
+        const { assert!(DEFAULT_CELL_PX > CELL_MIN_PX && DEFAULT_CELL_PX < CELL_MAX_PX) };
     }
 
     /// `M5-TB-10` / `M5-KB-06/07`：键盘与滑块共用**线性** 16 px 一档，
@@ -751,13 +770,13 @@ mod tests {
         assert_eq!(KEYBOARD_STEP_PX, 16.0);
         let mut v = DEFAULT_CELL_PX;
         v = step_linear(v, 1, KEYBOARD_STEP_PX);
-        assert_eq!(v, 112.0, "96 大一档 = 112，不是对数刻度的 128");
+        assert_eq!(v, 160.0, "144 大一档 = 160（线性 16 px，不看对数表）");
         v = step_linear(v, 1, KEYBOARD_STEP_PX);
-        assert_eq!(v, 128.0);
+        assert_eq!(v, 176.0);
         v = step_linear(v, -1, KEYBOARD_STEP_PX);
-        assert_eq!(v, 112.0);
+        assert_eq!(v, 160.0);
         v = step_linear(v, -1, KEYBOARD_STEP_PX);
-        assert_eq!(v, 96.0);
+        assert_eq!(v, 144.0);
 
         // 从非刻度值出发也走同一线性步长（⌘1/⌘2 与滑块同一状态）
         assert_eq!(step_linear(100.0, 1, KEYBOARD_STEP_PX), 116.0);
@@ -811,18 +830,18 @@ mod tests {
     /// 值、夹紧、落库口径三者一致，不再依赖任何桌面脚本。
     #[test]
     fn slider_reaches_512_and_persists_it() {
-        let mut z = ZoomState::new(DEFAULT_CELL_PX);
+        let mut z = ZoomState::new(RESET_CELL_PX);
         // ① 滑块直接拖到上限（`egui::Slider::integer()` 给出的就是整数）
         assert!(z.set_cell_px(CELL_MAX_PX, t(0)));
         assert_eq!(z.cell_px(), 512.0);
         // ② 落库口径：`to_setting()` 就是 preferences 里写的那个整数
         assert_eq!(z.to_setting(), 512);
-        // ③ 重启恢复：从 preferences 读回来仍是 512，不夹回 96 也不吸到刻度点
+        // ③ 重启恢复：从 preferences 读回来仍是 512，不夹回默认 144 也不吸到刻度点
         assert_eq!(ZoomState::from_setting(Some(512.0)).cell_px(), 512.0);
         assert_eq!(ZoomState::from_setting(Some(512.0)).to_setting(), 512);
 
-        // ④ 键盘从 96 一路加也停在上限
-        let mut z = ZoomState::new(DEFAULT_CELL_PX);
+        // ④ 键盘从复位刻度 96 一路加也停在上限
+        let mut z = ZoomState::new(RESET_CELL_PX);
         let mut v = z.cell_px();
         let mut steps = 0;
         while !at_linear_bound(v, 1) {
@@ -838,13 +857,15 @@ mod tests {
         assert!(at_linear_bound(z.cell_px(), 1));
     }
 
-    /// `M5-R1-closeout`：`⌘0` 必须精确回到 96（产品事实，不随 §11 #1 改）。
+    /// `M5-R1-closeout` + 原型 `THUMB_RESET`：`⌘0` 必须精确回到 96，
+    /// 与新建默认 144 分开（`js/data.js:74` 的两个常量）。
     #[test]
     fn reset_returns_to_product_default_96() {
         let mut z = ZoomState::new(400.0);
         assert_eq!(z.reset(), 96.0);
-        assert_eq!(z.cell_px(), DEFAULT_CELL_PX);
+        assert_eq!(z.cell_px(), RESET_CELL_PX);
         assert_eq!(z.to_setting(), 96);
+        assert_ne!(RESET_CELL_PX, DEFAULT_CELL_PX, "复位值和新建默认必须分开");
         // 从 512 回 96 也一样
         let mut z = ZoomState::new(512.0);
         z.reset();

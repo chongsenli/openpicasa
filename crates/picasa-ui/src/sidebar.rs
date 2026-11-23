@@ -148,8 +148,16 @@ pub struct SidebarCtx<'a> {
     /// 相关子查询计数，绘制每帧都跑会拖慢缩略图展示（实机反馈的性能回归）。
     pub tags: &'a [(String, i64)],
     pub albums: &'a [(String, i64)],
+    /// 相册名 → 封面照片行（App 缓存）。
+    ///
+    /// 暗色相册组按原型画成三列缩略图卡（`js/app.js:890-916` 的 `<div class="alb-covers">`），
+    /// 亮色仍是文字行。封面取相册里 id 最小的那张（原型存的是建相册时选中的第一张，
+    /// 应用侧 `albums` 表没有 cover 列，只能按成员表取，见 `refresh_sidebar_groups`）。
+    pub album_covers: &'a [(String, Option<PhotoRow>)],
     /// IDX-22 ②：当前生效的标签筛选（行高亮选中态）；无则 None。
     pub tags_active: Option<&'a str>,
+    /// 当前生效的相册筛选（暗色缩略图卡据此画选中环，原型 `.cover.on`）；无则 None。
+    pub album_active: Option<&'a str>,
     /// IDX-22 ④：标签排序方式（组头菜单据此打勾）。
     pub tags_sort: picasa_core::TagsSort,
     /// IDX-22 ⑥：是否显示 0 计数标签（菜单据此打勾）。
@@ -250,19 +258,7 @@ pub fn show(
                             Some(ctx.tags_in_view)
                         },
                     ),
-                    "相册" => m4_group(
-                        ui,
-                        ctx.theme,
-                        "相册",
-                        ctx.albums_collapsed,
-                        ctx.albums.to_vec(),
-                        &mut actions,
-                        false,
-                        None,
-                        picasa_core::TagsSort::Name,
-                        false,
-                        None,
-                    ),
+                    "相册" => album_group(ui, &mut *ctx, &mut actions),
                     "文件夹" => {
                         section_title(ui, ctx.theme, "文件夹", ctx.folders_collapsed, &mut actions);
                         if !ctx.folders_collapsed {
@@ -337,26 +333,18 @@ fn section_title(
 /// 与「文件夹」组刻意区分：这里是**应用内虚拟集合**，数据只存自有 DB，
 /// 不会在磁盘上新建目录。组头带「＋」新建入口，行显示计数。
 ///
-/// M4.3 `IDX-22` 增量（仅标签组）：
-/// - ② 行右侧计数右对齐；名称超长按字符截断 + 悬停给全名；
-///   当前生效的标签筛选行画选中底色（`active`）。
-/// - ④⑥ 组头「⋯」菜单切排序方式 / 显示空标签（相册组没有这个菜单）。
+/// 分组头（标题 + 右端「＋」；标签组多一枚「⋯」菜单）。
 ///
-/// 参数确实多（组头 + 列表 + 三个标签专属项），拆成结构体只会让两个调用点更啰嗦；
-/// 收在一个私有函数里，代价只有一个 allow。
-#[allow(clippy::too_many_arguments)]
-fn m4_group(
+/// 标签组与相册组共用这一份——相册组在暗色下换的是**行**的画法（缩略图卡），
+/// 组头不该跟着分叉（`M5` §3 要求两套主题的信息架构一致）。
+fn group_header(
     ui: &mut Ui,
     theme: &Theme,
     title: &str,
-    collapsed: bool,
-    items: Vec<(String, i64)>,
-    actions: &mut Vec<SidebarAction>,
     is_tag: bool,
-    active: Option<&str>,
     tags_sort: picasa_core::TagsSort,
     show_zero_tags: bool,
-    in_view: Option<&[(String, i64)]>,
+    actions: &mut Vec<SidebarAction>,
 ) {
     let (rect, resp) = ui.allocate_exact_size(
         vec2(ui.available_width().max(1.0), Metrics::SIDEBAR_SECTION_H),
@@ -423,9 +411,49 @@ fn m4_group(
             actions.push(SidebarAction::ToggleSectionM4(title.to_string()));
         }
     }
+}
+
+/// M4.3 `IDX-22` 增量（仅标签组）：
+/// - ② 行右侧计数右对齐；名称超长按字符截断 + 悬停给全名；
+///   当前生效的标签筛选行画选中底色（`active`）。
+/// - ④⑥ 组头「⋯」菜单切排序方式 / 显示空标签（相册组没有这个菜单）。
+///
+/// 组头本身在 [`group_header`]：相册组暗色换的是**行**的画法，组头两套主题一致。
+///
+/// 参数确实多（组头 + 列表 + 三个标签专属项），拆成结构体只会让两个调用点更啰嗦；
+/// 收在一个私有函数里，代价只有一个 allow。
+#[allow(clippy::too_many_arguments)]
+fn m4_group(
+    ui: &mut Ui,
+    theme: &Theme,
+    title: &str,
+    collapsed: bool,
+    items: Vec<(String, i64)>,
+    actions: &mut Vec<SidebarAction>,
+    is_tag: bool,
+    active: Option<&str>,
+    tags_sort: picasa_core::TagsSort,
+    show_zero_tags: bool,
+    in_view: Option<&[(String, i64)]>,
+) {
+    group_header(ui, theme, title, is_tag, tags_sort, show_zero_tags, actions);
     if collapsed {
         return;
     }
+    rows(ui, theme, items, actions, is_tag, active, in_view);
+}
+
+/// 一组文字行（标签组 / 亮色相册组共用）。
+#[allow(clippy::too_many_arguments)]
+fn rows(
+    ui: &mut Ui,
+    theme: &Theme,
+    items: Vec<(String, i64)>,
+    actions: &mut Vec<SidebarAction>,
+    is_tag: bool,
+    active: Option<&str>,
+    in_view: Option<&[(String, i64)]>,
+) {
     for (name, count) in items {
         let (r, row_resp) = ui.allocate_exact_size(
             vec2(ui.available_width().max(1.0), Metrics::SIDEBAR_ROW_H),
@@ -514,6 +542,164 @@ fn m4_group(
                 name.clone(),
                 row_resp.interact_pointer_pos().unwrap_or(r.center()),
             ));
+        }
+    }
+}
+
+/// 相册组：亮色文字行，暗色三列缩略图卡。
+///
+/// 原型 `js/app.js:890-916` 两套主题画法不同（亮色 `<a class="row">`、
+/// 暗色 `<div class="alb-covers">` 三列封面），但**行为一致**：点击筛到该相册、
+/// 右键弹出改名/删除/加入照片、当前相册有选中态（`M5` §3 允许主题换画法，
+/// 不允许出现「只有某套主题能用」的分叉）。
+///
+/// 封面取相册里 id 最小的那张成员（原型存的是建相册时选中的第一张；
+/// 应用侧 `albums` 表没有 cover 列，只能按成员表取，见 `refresh_sidebar_groups`）。
+fn album_group(ui: &mut Ui, ctx: &mut SidebarCtx<'_>, actions: &mut Vec<SidebarAction>) {
+    let theme = *ctx.theme;
+    group_header(
+        ui,
+        &theme,
+        "相册",
+        false,
+        picasa_core::TagsSort::Name,
+        false,
+        actions,
+    );
+    if ctx.albums_collapsed {
+        return;
+    }
+    if !theme.dark {
+        rows(ui, &theme, ctx.albums.to_vec(), actions, false, None, None);
+        return;
+    }
+    album_covers(ui, ctx, actions);
+}
+
+/// 暗色相册封面的列数与间距（原型 `.alb-covers`：`grid-template-columns:1fr 1fr 1fr`、
+/// `gap:6px`、`padding:2px 6px 8px`）。
+const ALBUM_COLS: usize = 3;
+const ALBUM_GAP: f32 = 6.0;
+const ALBUM_PAD_X: f32 = 6.0;
+const ALBUM_LABEL_H: f32 = 17.0;
+/// 封面与名字之间的间距（原型 `.cover{gap:4px}`）。
+const ALBUM_COVER_LABEL_GAP: f32 = 4.0;
+
+/// 一格封面的边长：三列等宽、扣掉左右内边距与列间距。
+pub fn album_cover_side(total_w: f32) -> f32 {
+    if !total_w.is_finite() || total_w <= 0.0 {
+        return 0.0;
+    }
+    let inner_w = (total_w - ALBUM_PAD_X * 2.0).max(0.0);
+    let gaps = ALBUM_GAP * (ALBUM_COLS as f32 - 1.0);
+    ((inner_w - gaps) / ALBUM_COLS as f32).max(0.0)
+}
+
+/// 封面下那行名字能放几个字符（10px 居中，按每字 6px 估）。
+pub fn album_label_chars(side: f32) -> usize {
+    if !side.is_finite() || side <= 0.0 {
+        return 1;
+    }
+    ((side / 6.0).floor() as usize).max(1)
+}
+
+/// 暗色相册组的三列封面（原型 `.cover img{aspect-ratio:1;object-fit:cover;border-radius:8px}`、
+/// `.cover span{font-size:10px}`）。
+fn album_covers(ui: &mut Ui, ctx: &mut SidebarCtx<'_>, actions: &mut Vec<SidebarAction>) {
+    let cols = ALBUM_COLS;
+    let gap = ALBUM_GAP;
+    let pad_x = ALBUM_PAD_X;
+
+    let theme = *ctx.theme;
+    let total_w = ui.available_width();
+    if total_w < 2.0 || ctx.albums.is_empty() {
+        return;
+    }
+    let side = album_cover_side(total_w).max(1.0);
+    let cell_h = side + ALBUM_COVER_LABEL_GAP + ALBUM_LABEL_H;
+
+    let items = ctx.albums.to_vec();
+    let covers = ctx.album_covers;
+    let mut budget = cols;
+
+    for chunk in items.chunks(cols) {
+        let (row_rect, _) = ui.allocate_exact_size(vec2(total_w, cell_h + gap), Sense::hover());
+        if row_rect.width() < 2.0 || !row_rect.is_finite() {
+            continue;
+        }
+        for (i, (name, count)) in chunk.iter().enumerate() {
+            let left = row_rect.left() + pad_x + i as f32 * (side + gap);
+            let cell = Rect::from_min_size(pos2(left, row_rect.top() + 2.0), vec2(side, side));
+            if cell.width() < 2.0 || !cell.is_finite() {
+                continue;
+            }
+            let resp = ui.interact(
+                Rect::from_min_size(pos2(left, row_rect.top() + 2.0), vec2(side, cell_h)),
+                ui.scope_id().with(("alb-cover", name.as_str())),
+                Sense::click(),
+            );
+            let p = ui.painter_at(row_rect);
+            let selected = ctx.album_active == Some(name.as_str());
+            let hovered = resp.hovered();
+            let ring = if selected {
+                Some(Stroke::new(2.0, theme.selected))
+            } else if hovered {
+                Some(Stroke::new(1.0, theme.hairline))
+            } else {
+                None
+            };
+            let cover = covers
+                .iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, row)| row.as_ref());
+            match cover {
+                Some(row) => {
+                    let state = ctx
+                        .cache
+                        .get(ui.ctx(), ctx.db, ctx.service, row, &mut budget);
+                    if let TexState::Ready(tex, size) = state {
+                        // 封面是正方形 cover：按 `object-fit:cover` 裁 UV，不压扁。
+                        let uv = crate::viewer::cover_uv(cell, size);
+                        crate::viewer::paint_rounded_image(&p, tex, cell, 8.0, uv);
+                    } else {
+                        p.rect_filled(cell, 8.0, theme.chip_bg);
+                    }
+                }
+                None => {
+                    p.rect_filled(cell, 8.0, theme.chip_bg);
+                }
+            }
+            if let Some(stroke) = ring {
+                p.rect_stroke(cell, 8.0, stroke, StrokeKind::Outside);
+            }
+            // 名字：10px、居中、单行截断（原型 `.cover span`）。
+            let label_rect = Rect::from_min_size(
+                pos2(left, cell.bottom() + ALBUM_COVER_LABEL_GAP),
+                vec2(side, ALBUM_LABEL_H),
+            );
+            let max_chars = album_label_chars(side);
+            let shown = picasa_core::truncate_label(name, max_chars);
+            p.text(
+                label_rect.center(),
+                Align2::CENTER_CENTER,
+                &shown,
+                FontId::new(10.0, egui::FontFamily::Proportional),
+                theme.text_disabled,
+            );
+            let resp = if shown != *name {
+                resp.on_hover_text(format!("{name} · {count} 张"))
+            } else {
+                resp.on_hover_text(format!("{count} 张"))
+            };
+            if resp.clicked() {
+                actions.push(SidebarAction::FilterByAlbum(name.clone()));
+            }
+            if resp.secondary_clicked() {
+                actions.push(SidebarAction::AlbumContext(
+                    name.clone(),
+                    resp.interact_pointer_pos().unwrap_or(cell.center()),
+                ));
+            }
         }
     }
 }
@@ -1165,6 +1351,77 @@ mod m5_sidebar_order_tests {
         // 设置组与「索引管理」子项整组不存在（不是隐藏）。
         assert!(!SIDEBAR_GROUPS.contains(&"设置"));
         assert!(!SIDEBAR_GROUPS.iter().any(|g| g.contains("索引管理")));
+    }
+
+    /// 暗色相册卡的三列几何（原型 `.alb-covers`：三列、`gap:6px`、左右 6px）。
+    ///
+    /// 目标是「三格等宽 + 两处间距 + 左右内边距 = 可用宽」，且格宽随侧栏宽度线性变。
+    #[test]
+    fn album_cover_grid_is_three_equal_columns() {
+        for total_w in [200.0_f32, 264.0, 320.0] {
+            let side = album_cover_side(total_w);
+            assert!(side > 0.0, "{total_w} 宽应算得出正边长，实际 {side}");
+            let expect = (total_w - ALBUM_PAD_X * 2.0 - ALBUM_GAP * 2.0) / 3.0;
+            assert!(
+                (side - expect).abs() < 0.01,
+                "{total_w} 宽：三列等分应为 {expect}，实际 {side}"
+            );
+            // 三格 + 两间距 + 两侧内边距刚好铺满，不溢出也不留缝。
+            let used = side * 3.0 + ALBUM_GAP * 2.0 + ALBUM_PAD_X * 2.0;
+            assert!(
+                (used - total_w).abs() < 0.01,
+                "铺满可用宽：{used} vs {total_w}"
+            );
+        }
+        // 宽到能装下时，边长应比窄的时候大（不是写死的常量）。
+        assert!(album_cover_side(320.0) > album_cover_side(200.0));
+        // 退化输入不产生 NaN / 负数（窄窗过渡帧会传 0 或负）。
+        assert_eq!(album_cover_side(0.0), 0.0);
+        assert_eq!(album_cover_side(-10.0), 0.0);
+        assert!(album_cover_side(f32::NAN).is_finite());
+    }
+
+    /// 封面下那行名字的截断宽（10px 字、按 6px/字估），窄到放不下也至少留 1 字。
+    #[test]
+    fn album_label_chars_follow_the_cell_side() {
+        assert_eq!(album_label_chars(0.0), 1);
+        assert_eq!(album_label_chars(-5.0), 1);
+        assert_eq!(album_label_chars(6.0), 1);
+        assert_eq!(album_label_chars(60.0), 10);
+        assert!(album_label_chars(120.0) > album_label_chars(60.0));
+    }
+
+    /// 相册组两套主题画法不同、**行为必须一致**（`M5` §3：允许主题换画法，
+    /// 不允许「只有某套主题能用」）。
+    ///
+    /// 这条是源码锁：`album_group` 必须按 `theme.dark` 分派，而缩略图卡那条路
+    /// 必须自己发 `FilterByAlbum` / `AlbumContext`——否则暗色下点击、右键会静默失效，
+    /// 而只测 `rows()` 是测不出来的。
+    #[test]
+    fn dark_album_covers_keep_the_same_actions_as_rows() {
+        let src = include_str!("sidebar.rs");
+        let start = src.find("fn album_group(").expect("album_group 应存在");
+        let end = src.find("fn favorites(").expect("favorites 应在其后");
+        let block = &src[start..end];
+        assert!(
+            block.contains("if !theme.dark"),
+            "相册组应按主题分派\n{block}"
+        );
+        assert!(block.contains("album_covers(ui, ctx, actions)"));
+        // 卡片那条路要保留与文字行相同的三个行为。
+        let covers = &block[block.find("fn album_covers(").expect("album_covers 应存在")..];
+        assert!(
+            covers.contains("SidebarAction::FilterByAlbum"),
+            "暗色卡片点击要能筛相册"
+        );
+        assert!(
+            covers.contains("SidebarAction::AlbumContext"),
+            "暗色卡片右键要能出相册菜单"
+        );
+        assert!(
+            covers.contains("ctx.album_active"),
+            "暗色卡片要画当前相册的选中环"
+        );
     }
 
     /// `M5-SH-04`：左栏空态指向顶栏导入，不再指向已删除的「… → 添加文件夹…」。

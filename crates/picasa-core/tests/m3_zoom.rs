@@ -13,8 +13,9 @@
 //! 而后者在弱机上就是明显的卡顿与闪烁，且**不会报任何错**。
 
 use picasa_core::zoom::{
-    CELL_MAX_PX, CELL_MIN_PX, DEFAULT_CELL_PX, LOG_STEPS, SNAP_POINTS, TIER_HYSTERESIS_PX, TexTier,
-    ZOOM_SETTLE_MS, ZoomState, snap_to_point, step_log, tier_for, uses_atlas,
+    CELL_MAX_PX, CELL_MIN_PX, DEFAULT_CELL_PX, LOG_STEPS, RESET_CELL_PX, SNAP_POINTS,
+    TIER_HYSTERESIS_PX, TexTier, ZOOM_SETTLE_MS, ZoomState, snap_to_point, step_log, tier_for,
+    uses_atlas,
 };
 use std::time::{Duration, Instant};
 
@@ -161,8 +162,11 @@ fn zoom_range_is_22_to_512_with_twelve_log_marks() {
     assert_eq!(LOG_STEPS.len(), 12);
     assert_eq!(LOG_STEPS[0], 22.0);
     assert_eq!(LOG_STEPS[11], 512.0);
-    // 默认刻度在表里
-    assert!(LOG_STEPS.contains(&DEFAULT_CELL_PX));
+    // M5-TB-10（2026-11-23 按原型改）：新建默认 144 不是对数档；
+    // `⌘0` 复位到 RESET_CELL_PX = 96，仍然在对数表里。
+    assert_eq!(DEFAULT_CELL_PX, 144.0);
+    assert!(!LOG_STEPS.contains(&DEFAULT_CELL_PX));
+    assert!(LOG_STEPS.contains(&RESET_CELL_PX));
 }
 
 #[test]
