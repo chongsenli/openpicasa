@@ -1889,19 +1889,33 @@ fn collect_ids(node: &FolderNode, out: &mut Vec<i64>) {
 /// 搜索框里输入 `2011` / `2011-05` / `2011-05-13` 时，转成一个日期区间匹配拍摄时间。
 ///
 /// 这是 F1-21「EXIF 拍摄日期」这一路数据源；纯文件名搜索不受影响（OR 关系）。
-/// 某一年的拍摄日期范围（epoch 秒）。时间轴 / 筛选面板共用同一条算式。
+/// 某一年的拍摄日期范围（epoch 秒，半开区间 `[start, end)`）。
+/// 时间轴 / 筛选面板共用同一条算式。
+///
+/// ## 为什么是本地时区 + 半开区间
+///
+/// 年份行、日期分组头（[`group_by_day`]）和副标题的拍摄时间跨度
+/// （`picasa_ui::app::photo_date_span`）都按**本地日**给用户看。如果这里按
+/// UTC 切年，UTC+8 下本地 1 月 1 日 00:00–07:59 拍的照片会被算进上一年，
+/// 用户点「2024」却看到一张写着「2025年1月1日」的组头。所以这里与
+/// [`parse_date_range`] 的整年分支保持同一个口径：Local 的 1 月 1 日零点。
+///
+/// 区间是**半开**的（含 start、不含 end），下一年 1 月 1 日零点整那张照片
+/// 属于下一年而不是这一年；SQL 侧必须同样用 `>= start AND < end`，
+/// 不能用 `BETWEEN`（闭区间会把两端零点各多算一张）。
 pub fn year_range_seconds(year: i32) -> (i64, i64) {
-    use chrono::TimeZone;
-    let start = chrono::Utc
-        .with_ymd_and_hms(year, 1, 1, 0, 0, 0)
-        .single()
-        .map(|t| t.timestamp())
-        .unwrap_or(0);
-    let end = chrono::Utc
-        .with_ymd_and_hms(year + 1, 1, 1, 0, 0, 0)
-        .single()
-        .map(|t| t.timestamp())
-        .unwrap_or(i64::MAX / 2);
+    use chrono::{Local, NaiveDate, TimeZone};
+    let midnight = |y: i32| -> Option<i64> {
+        let d = NaiveDate::from_ymd_opt(y, 1, 1)?;
+        // DST 跳变时某个本地零点可能不存在/出现两次，`earliest` 取第一个实例，
+        // 比 `single()` 更不容易在夏令时地区整条返回 None。
+        Local
+            .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
+            .earliest()
+            .map(|t| t.timestamp())
+    };
+    let start = midnight(year).unwrap_or(0);
+    let end = midnight(year + 1).unwrap_or(i64::MAX / 2);
     (start, end)
 }
 

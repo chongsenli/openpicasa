@@ -5479,6 +5479,73 @@ pub fn folder_ctx_items(is_root: bool) -> Vec<&'static str> {
 }
 
 #[cfg(test)]
+mod m5_date_span_tests {
+    use super::photo_date_span;
+    use chrono::{Local, TimeZone};
+    use picasa_db::PhotoRow;
+
+    fn row(taken: i64) -> PhotoRow {
+        PhotoRow {
+            id: 1,
+            folder_id: 1,
+            folder_path: "/x".into(),
+            name: "x.jpg".into(),
+            size_bytes: 0,
+            mtime_ns: taken * 1_000_000_000,
+            width: None,
+            height: None,
+            orientation: None,
+            taken_at: Some(taken),
+            taken_at_src: 1,
+            thumb_state: 0,
+            decoder_ver: 0,
+            eff_taken_at: taken,
+            starred: false,
+        }
+    }
+    fn local(y: i32, m: u32, d: u32, h: u32) -> i64 {
+        Local
+            .with_ymd_and_hms(y, m, d, h, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp()
+    }
+
+    /// M5-SH-02：同一天的两张照片只显示一个日期；跨日显示 `起—止`（em dash）。
+    #[test]
+    fn span_collapses_same_day_and_uses_em_dash_across_days() {
+        assert_eq!(photo_date_span(&[]), None);
+        let same = [row(local(2024, 5, 21, 6)), row(local(2024, 5, 21, 23))];
+        assert_eq!(photo_date_span(&same).as_deref(), Some("2024-05-21"));
+        let cross = [row(local(2024, 5, 21, 6)), row(local(2024, 5, 23, 18))];
+        assert_eq!(
+            photo_date_span(&cross).as_deref(),
+            Some("2024-05-21—2024-05-23")
+        );
+    }
+
+    /// 跨年边界必须按**本地日**算：本地 12-31 23:59 与本地 1-1 00:01 是两天。
+    #[test]
+    fn span_follows_local_days_across_new_year() {
+        let cross = [row(local(2011, 12, 31, 23)), row(local(2012, 1, 1, 0) + 60)];
+        assert_eq!(
+            photo_date_span(&cross).as_deref(),
+            Some("2011-12-31—2012-01-01")
+        );
+    }
+
+    /// 没有有效拍摄时间的照片不参与跨度计算。
+    #[test]
+    fn span_ignores_photos_without_effective_time() {
+        let mut bad = row(0);
+        bad.eff_taken_at = 0;
+        assert_eq!(photo_date_span(&[bad]), None);
+        let rows = [row(0), row(local(2020, 1, 2, 9))];
+        assert_eq!(photo_date_span(&rows).as_deref(), Some("2020-01-02"));
+    }
+}
+
+#[cfg(test)]
 mod m5r5_tests {
     use super::{error_banner_visible, folder_ctx_items, library_scope, viewer_scope};
 

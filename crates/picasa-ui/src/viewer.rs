@@ -1099,14 +1099,26 @@ fn draw_topbar(
 
     // 文件名：紧跟缩放簇之后的固定槽位，右对齐；再往右才是信息胶囊。
     // 不再被推到远右端（V1.4 原型里两者都贴着缩放控件）。
+    //
+    // 窄窗时槽位会被 top_tail() 压窄；这里按原型 `.vfile` 的
+    // `text-overflow:ellipsis` 逐字符截断补 `…`，不再靠 clip_rect 硬切掉
+    // 右端（硬切会把文件名后半段连同扩展名一起吞掉，且没有省略提示）。
     let name_slot = filename_slot_rect(top);
     let chip = info_toggle_rect(top);
     if name_slot.width() > 20.0 {
+        let name_font = FontId::new(12.0, egui::FontFamily::Proportional);
+        let shown = truncate_to_width(
+            painter,
+            &row.name,
+            12.0,
+            (name_slot.width() - 2.0).max(1.0),
+            fg,
+        );
         painter.with_clip_rect(name_slot).text(
             pos2(name_slot.right(), top.center().y),
             Align2::RIGHT_CENTER,
-            &row.name,
-            FontId::new(12.0, egui::FontFamily::Proportional),
+            shown,
+            name_font,
             fg,
         );
     }
@@ -1517,26 +1529,10 @@ fn draw_statusbar(
         format!("{}%", (viewer.zoom * 100.0).round() as i32)
     };
     let left_font = FontId::new(11.5, egui::FontFamily::Proportional);
-    let left_text = format!(
-        "{}   {}   第 {} / {} 张   {}",
-        row.name,
-        dims,
-        viewer.index + 1,
-        photo_count,
-        zoom_text
-    );
-    let left_w = painter
-        .layout_no_wrap(left_text.clone(), left_font.clone(), ink)
-        .size()
-        .x;
-    painter.text(
-        pos2(bar.left() + 10.0, bar.center().y),
-        Align2::LEFT_CENTER,
-        left_text,
-        left_font,
-        ink,
-    );
 
+    // 右侧快捷键提示先量宽：窄窗时必须先给它留出位置，再做文件名截断，
+    // 否则左段会一直铺过去、和提示文字叠在一起（原型 .vstat 是 flex + gap，
+    // 每段各占自己的宽度，不会互相压）。
     let hint = if viewer.info_open {
         "I 隐藏信息 · Space 切背景 · C 并排比较 · ←/→ 翻页 · Esc 返回"
     } else {
@@ -1547,6 +1543,40 @@ fn draw_statusbar(
         .layout_no_wrap(hint.to_string(), hint_font.clone(), ink_soft)
         .size()
         .x;
+
+    // 文件名后面的固定尾段（尺寸 / 第 i/n 张 / 缩放）保持完整，只压文件名本身。
+    let tail = format!(
+        "   {}   第 {} / {} 张   {}",
+        dims,
+        viewer.index + 1,
+        photo_count,
+        zoom_text
+    );
+    let tail_w = painter
+        .layout_no_wrap(tail.clone(), left_font.clone(), ink)
+        .size()
+        .x;
+    let left_start = bar.left() + 10.0;
+    let left_limit = bar.right() - 10.0 - hint_w - 12.0; // 12 = 与提示的最小间距
+    let name_budget = (left_limit - left_start - tail_w).max(0.0);
+    let shown_name = if name_budget < 12.0 {
+        String::new()
+    } else {
+        truncate_to_width(painter, &row.name, 11.5, name_budget, ink)
+    };
+    let left_text = format!("{shown_name}{tail}");
+    let left_w = painter
+        .layout_no_wrap(left_text.clone(), left_font.clone(), ink)
+        .size()
+        .x;
+    painter.text(
+        pos2(left_start, bar.center().y),
+        Align2::LEFT_CENTER,
+        left_text,
+        left_font,
+        ink,
+    );
+
     painter.text(
         pos2(bar.right() - 10.0, bar.center().y),
         Align2::RIGHT_CENTER,
@@ -2734,6 +2764,30 @@ mod tests {
         (action, texts)
     }
 
+    /// 同上，但用调用方给的窗口尺寸（窄窗文件名截断测试用）。
+    fn run_stage_in(
+        viewer: &mut Viewer,
+        rows: &[PhotoRow],
+        appearance: Appearance,
+        rect: Rect,
+    ) -> (Option<ViewerAction>, Vec<String>) {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, appearance);
+        let theme = Theme::for_appearance(appearance);
+        let input = egui::RawInput {
+            screen_rect: Some(rect),
+            max_texture_side: Some(2048),
+            ..Default::default()
+        };
+        let mut action = None;
+        let out = ctx.run_ui(input, |ui| {
+            action = show(ui, viewer, rows, &theme, true, &[]);
+        });
+        let texts = texts(&out);
+        out.drop_without_applying_deltas();
+        (action, texts)
+    }
+
     fn texts(out: &egui::FullOutput) -> Vec<String> {
         fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
             match shape {
@@ -3182,6 +3236,57 @@ mod tests {
             assert!(name.right() <= chip.left(), "w={w} 文件名与胶囊重叠");
             assert!((chip.width() - 96.0).abs() < 0.01, "胶囊宽度固定");
         }
+    }
+
+    /// 窄窗长文件名：顶栏按原型 `.vfile` 的 `text-overflow:ellipsis` 截断补 `…`，
+    /// 不再靠 clip_rect 把右端（含扩展名）硬切掉。
+    #[test]
+    fn long_filename_is_ellipsized_not_hard_clipped_in_a_narrow_window() {
+        let long = "a-very-long-photo-file-name-that-needs-ellipsis.jpg";
+        let mut row = photo(1, 1_600_000_000);
+        row.name = long.to_string();
+        // 760 逻辑宽时文件名槽位约 126 px，远小于这段文件名。
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(760.0, 820.0));
+        assert!(
+            filename_slot_rect(rect).width() < 150.0,
+            "测试需要收窄的槽位"
+        );
+        let mut v = Viewer::new(0);
+        let (_, texts) = run_stage_in(&mut v, &[row], Appearance::Light, rect);
+        let shown = texts.iter().find(|t| t.contains("a-very-long"));
+        let shown = shown.expect("顶栏应画出文件名").as_str();
+        assert!(shown.ends_with('…'), "截断应补省略号：{shown}");
+        assert!(shown.len() < long.len(), "长名应被截短：{shown}");
+        assert!(!shown.contains(".jpg"), "被吞掉的尾部不应残留半截：{shown}");
+    }
+
+    /// 宽窗（文件名槽位够宽）不应出现省略号，完整文件名照常显示。
+    #[test]
+    fn short_filename_is_not_ellipsized_on_a_wide_window() {
+        let name = "IMG_0001.jpg";
+        let mut row = photo(1, 1_600_000_000);
+        row.name = name.to_string();
+        let mut v = Viewer::new(0);
+        let (_, texts) = run_stage_in(&mut v, &[row], Appearance::Light, stage_rect());
+        assert!(
+            texts.iter().any(|t| t == name),
+            "宽窗应完整显示文件名：{texts:?}"
+        );
+    }
+
+    /// 窄窗底栏：文件名先被截断，保证「第 i/n 张」与右侧提示仍完整、不重叠。
+    #[test]
+    fn long_filename_in_statusbar_keeps_tail_and_hint_visible() {
+        let mut row = photo(1, 1_600_000_000);
+        row.name = "an-extremely-long-file-name-for-the-status-bar-test.jpg".to_string();
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(760.0, 820.0));
+        let mut v = Viewer::new(0);
+        let (_, texts) = run_stage_in(&mut v, &[row], Appearance::Light, rect);
+        let all = texts.join("\n");
+        assert!(all.contains("第 1 / 1 张"), "尾段应保留：{all}");
+        assert!(all.contains("4000 × 3000"), "尺寸段应保留：{all}");
+        assert!(all.contains("Esc 返回"), "右侧提示应保留：{all}");
+        assert!(all.contains('…'), "长文件名应补省略号：{all}");
     }
 
     /// V6：展厅控件常驻——空闲很久后顶栏 / 说明条 / 胶片条 / 信息栏 / 底栏仍在。

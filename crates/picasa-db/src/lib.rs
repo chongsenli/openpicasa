@@ -1572,13 +1572,24 @@ impl Db {
     }
 
     /// 时间轴（用户功能 #7）：按「有效拍摄时间」的年份分组计数。
-    /// 只统计可见根；年份取 `strftime('%Y', eff, 'unixepoch')`，eff 是秒。
+    /// 只统计可见根；年份取 `strftime('%Y', eff, 'unixepoch', 'localtime')`，eff 是秒。
+    ///
+    /// ## 必须带 `'localtime'`
+    ///
+    /// 这一行是侧栏「年份」的来源，点下去走 [`Db::photos_filtered`] 的
+    /// `taken_range`，而那个区间来自 [`picasa_core::year_range_seconds`]（本地时区零点）。
+    /// 日期分组头（`picasa_core::group_by_day`）也按本地日。三处必须同一个时区口径，
+    /// 否则 UTC+8 下 1 月 1 日凌晨拍的照片会落在「2025」那一行，点进去却出现在
+    /// 「2024」的筛选结果里（`date_group_counts` 已经因为同样的原因带着 `'localtime'`）。
     pub fn timeline_years(&self) -> Result<Vec<(i32, i64)>> {
         let eff = self.eff_col();
+        // ⚠️ `WHERE` 不能省：`active_root_clause()` 返回的是条件表达式本身（不带 `WHERE`），
+        // 早先这里少写了一个 `WHERE`，整条 SQL 语法错误，而调用方 `sidebar` 用的是
+        // `if let Ok(years)`，错误被静默吞掉 —— 表现就是「侧栏根本没有年份行」。
         let sql = format!(
-            "SELECT CAST(strftime('%Y', {eff}, 'unixepoch') AS INTEGER) AS y, COUNT(*) AS n
+            "SELECT CAST(strftime('%Y', {eff}, 'unixepoch', 'localtime') AS INTEGER) AS y, COUNT(*) AS n
              FROM photos p JOIN folders f ON f.id = p.folder_id
-             {}
+             WHERE {}
              GROUP BY y ORDER BY y DESC",
             self.active_root_clause(),
         );
@@ -1802,8 +1813,15 @@ impl Db {
             where_sql.push_str(" WHERE 1=1");
         }
         if let Some((from, to)) = filter.taken_range {
-            // 走「有效拍摄时间」（缺失回退 mtime），与排序同口径
-            where_sql.push_str(&format!(" AND {} BETWEEN {from} AND {to}", self.eff_col()));
+            // 走「有效拍摄时间」（缺失回退 mtime），与排序同口径。
+            // 半开区间 `[from, to)`：`year_range_seconds` / `parse_date_range` 给的是
+            // 「今年 1 月 1 日零点 .. 明年 1 月 1 日零点」，用 `BETWEEN` 会把下一年
+            // 零点整那一张也吞进来（闭区间含右端）。
+            where_sql.push_str(&format!(
+                " AND {} >= {from} AND {} < {to}",
+                self.eff_col(),
+                self.eff_col()
+            ));
         }
         if !filter.formats.is_empty() {
             // 格式名 → 数字编码。UI 的 slug 是 `jpeg` 不是扩展名 `jpg`；
@@ -2006,7 +2024,10 @@ impl Db {
         // 日期区间是**收窄条件（AND）**，不是并列条件（OR）：
         // 「搜 苏州 + 限定 2011 年」应当是交集；空关键字时 LIKE '%%' 恒真，AND 依然等价于纯日期筛选。
         if date_range.is_some() {
-            sql.push_str(" AND p.taken_at BETWEEN ?2 AND ?3");
+            // 半开区间，与 `parse_date_range` / `year_range_seconds` 的右端语义一致：
+            // 「2011」给的是 2011-01-01 零点 .. 2012-01-01 零点，用 BETWEEN 会把
+            // 2012-01-01 零点整那张也搜出来（那已经是下一年）。
+            sql.push_str(" AND p.taken_at >= ?2 AND p.taken_at < ?3");
         }
         if let Some(ids) = folder_ids {
             if ids.is_empty() {

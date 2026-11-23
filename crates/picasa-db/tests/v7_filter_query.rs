@@ -171,3 +171,123 @@ fn filter_respects_scope_and_starred_readback() {
     let rows = db.photos_from_visible(None, SortSpec::default(), 10, 0).unwrap();
     assert!(rows[0].starred);
 }
+
+/// 日期范围是**半开**区间 `[from, to)`，右端那一秒不算进来。
+///
+/// 这条来自真实边界：`year_range_seconds(2011)` 给的是「2011-01-01 零点 ..
+/// 2012-01-01 零点」，用 `BETWEEN` 会把 2012-01-01 00:00:00 整那张也筛选出来，
+/// 而它属于 2012 年。
+#[test]
+fn taken_range_is_half_open_on_the_right() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (db, path) = make_db(tmp.path());
+    seed(
+        &path,
+        &[
+            ("before.jpg", 1, 100, 100, 99),
+            ("at-from.jpg", 1, 100, 100, 100),
+            ("inside.jpg", 1, 100, 100, 150),
+            ("at-to.jpg", 1, 100, 100, 200),
+            ("after.jpg", 1, 100, 100, 201),
+        ],
+    );
+
+    let sort = SortSpec {
+        key: SortKey::TakenAt,
+        descending: false,
+    };
+    let f = PhotoFilter {
+        taken_range: Some((100, 200)),
+        ..Default::default()
+    };
+    assert_eq!(
+        names(&db.photos_filtered(None, &f, sort, 100, 0).unwrap()),
+        vec!["at-from.jpg", "inside.jpg"],
+        "右端点 at-to.jpg 必须排除（半开区间）"
+    );
+    // 计数与列表同口径
+    assert_eq!(db.count_photos_filtered(None, &f).unwrap(), 2);
+}
+
+/// 搜索结果里的日期区间同样是半开，且与 `photos_filtered` 走同一条边界语义。
+#[test]
+fn search_date_range_is_half_open_on_the_right() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (db, path) = make_db(tmp.path());
+    seed(
+        &path,
+        &[
+            ("shot-2011.jpg", 1, 100, 100, 100),
+            ("shot-2012.jpg", 1, 100, 100, 200),
+        ],
+    );
+
+    // 关键字留空 → LIKE '%%' 恒真，等于纯日期筛选
+    let hits = db.search("", Some((100, 200)), None, 100).unwrap();
+    assert_eq!(
+        names(&hits),
+        vec!["shot-2011.jpg"],
+        "2012 零点那张不能被 2011 搜出来"
+    );
+}
+
+/// 侧栏年份分桶必须按**本地时区**（`strftime(..., 'localtime')`），
+/// 与 `group_by_day` / `year_range_seconds` 三处同口径。
+///
+/// 用 SQLite 自己算本地零点：`strftime('%s', 'YYYY-01-01 00:00:00', 'utc')` 把
+/// 「本地时间」当输入、减掉时区偏移后给出 UTC epoch 秒。这样测试不依赖宿主机
+/// 具体在哪个时区，但能真正验证「本地 1 月 1 日零点」落在哪一年。
+#[test]
+fn timeline_years_buckets_by_local_year() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (db, path) = make_db(tmp.path());
+    let local_midnight = |y: i32| -> i64 {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.query_row(
+            "SELECT CAST(strftime('%s', ?1, 'utc') AS INTEGER)",
+            rusqlite::params![format!("{y:04}-01-01 00:00:00")],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    // 本地 2011-01-01 00:00:00 与本地 2011-06-01 12:00:00，都属于 2011
+    let a = local_midnight(2011);
+    let c = a + 180 * 86_400;
+    seed(
+        &path,
+        &[
+            ("newyear.jpg", 1, 100, 100, a),
+            ("midyear.jpg", 1, 100, 100, c),
+        ],
+    );
+
+    let years = db.timeline_years().unwrap();
+    assert_eq!(
+        years,
+        vec![(2011, 2)],
+        "本地 1 月 1 日零点必须算 2011 年，不能被 UTC 推到 2010：{years:?}"
+    );
+}
+
+/// 被关掉的关注文件夹不能因为「年份行」这个入口又漏出来。
+#[test]
+fn timeline_years_respects_active_roots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (db, path) = make_db(tmp.path());
+    seed(&path, &[("in.jpg", 1, 100, 100, 100)]);
+    // 插一条关掉的根 + 一张属于它的照片（ID 由 seed 分配后手动改挂）
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO roots (id, path, path_key, state) VALUES (2, '/closed', '/closed', 1);
+             INSERT INTO folders (id, path, path_key, is_online, root_id, parent_id, name, direct_count)
+                VALUES (2, '/closed', '/closed', 1, 2, NULL, 'closed', 0);
+             UPDATE photos SET folder_id = 2 WHERE name = 'in.jpg';",
+        )
+        .unwrap();
+    }
+    assert!(
+        db.timeline_years().unwrap().is_empty(),
+        "关闭的根里那张不能被时间轴统计"
+    );
+}

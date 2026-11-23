@@ -41,7 +41,10 @@ pub struct PhotoInput {
 /// 筛选面板一次传一份，新增维度不用改全链路签名。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PhotoFilter {
-    /// 拍摄日期范围（epoch 秒，含端点）。
+    /// 拍摄日期范围（epoch 秒，**半开** `[from, to)`）。
+    ///
+    /// 右端不含：`year_range_seconds` 给的是「今年 1 月 1 日 .. 明年 1 月 1 日」，
+    /// 下一年零点整那张属于下一年。
     pub taken_range: Option<(i64, i64)>,
     /// 格式类：`jpeg` / `png` / `gif` / `webp` / `bmp` / `tiff` / `svg` / `heic` / `raw`。
     /// 空集 = 不过滤。RAW 与 JPEG 扩展名混在 `.JPG` 里靠 `photos.format` 列区分。

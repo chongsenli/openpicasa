@@ -545,6 +545,14 @@ pub fn text_styles(dark: bool) -> Vec<(TextStyle, FontId)> {
 ///
 /// 切换主题时**再调一次**即可：样式与字体都是幂等的重建，不依赖系统外观
 /// （Linux / Xvfb 上系统主题固定也不影响两套主题的验收）。
+///
+/// 关键：`System` 偏好**不能**用 `ctx.set_theme(Dark/Light)` 把 egui 的
+/// `theme_preference` 钉死。钉死后 egui 每帧 `sync_window_theme()` 会给
+/// NSWindow 下发固定 appearance，winit 的 `observeValueForKeyPath` 见到
+/// 窗口 appearance 被自定义就不再发 `WindowEvent::ThemeChanged`，于是 OS
+/// 深浅色切换传不到 `ctx.system_theme()`，`sync_theme` 永远早退、配色卡住。
+/// 两套 style 已由下面的 `all_styles_mut` 各自配好，`System` 下让 egui
+/// 自己按系统挑即可；显式 `Light` / `Dark` 才钉死。
 pub fn apply(ctx: &egui::Context, appearance: Appearance) {
     // 跟随系统：先读 OS 深浅色，再落成具体主题（无系统信息时按亮色）。
     if appearance.is_system()
@@ -555,12 +563,18 @@ pub fn apply(ctx: &egui::Context, appearance: Appearance) {
     let theme = Theme::for_appearance(appearance);
     install_fonts(ctx, appearance);
 
-    // 钉死 egui 的控件调色板，不跟随系统深色。
-    ctx.set_theme(if theme.dark {
-        egui::Theme::Dark
+    if appearance.is_system() {
+        // 交还系统：egui 下发 `SystemDefault`，NSWindow 不设自定义 appearance，
+        // OS 切换才能继续经 `ThemeChanged` 更新 `ctx.system_theme()`。
+        ctx.options_mut(|opt| opt.theme_preference = egui::ThemePreference::System);
     } else {
-        egui::Theme::Light
-    });
+        // 显式亮 / 暗：钉死 egui 的控件调色板，不跟随系统深色。
+        ctx.set_theme(if theme.dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+    }
 
     ctx.all_styles_mut(|style| {
         for (style_kind, font_id) in text_styles(theme.dark) {
@@ -886,5 +900,39 @@ mod tests {
     fn hex_helper_round_trips() {
         assert_eq!(hex(c("#0485f7")), "#0485f7");
         assert_eq!(hex(c("c8c8cc")), "#c8c8cc");
+    }
+
+    /// 跟随系统时不能把 egui 的 `theme_preference` 钉死为 Light/Dark。
+    ///
+    /// 钉死后 winit 会给 NSWindow 设固定 appearance，`ThemeChanged` 不再上报，
+    /// OS 深浅色切换就传不到应用（详见 `apply` 文档注释）。显式亮/暗则必须钉死。
+    #[test]
+    fn apply_system_keeps_egui_theme_preference_on_system() {
+        let ctx = egui::Context::default();
+        apply(&ctx, Appearance::System);
+        let pref = ctx.options(|o| o.theme_preference);
+        assert_eq!(
+            pref,
+            egui::ThemePreference::System,
+            "跟随系统必须让 egui 自己按系统选主题"
+        );
+
+        apply(&ctx, Appearance::Dark);
+        assert_eq!(
+            ctx.options(|o| o.theme_preference),
+            egui::ThemePreference::Dark
+        );
+        apply(&ctx, Appearance::Light);
+        assert_eq!(
+            ctx.options(|o| o.theme_preference),
+            egui::ThemePreference::Light
+        );
+
+        // 再切回 System 必须能恢复（不是第一次调用才生效）。
+        apply(&ctx, Appearance::System);
+        assert_eq!(
+            ctx.options(|o| o.theme_preference),
+            egui::ThemePreference::System
+        );
     }
 }
