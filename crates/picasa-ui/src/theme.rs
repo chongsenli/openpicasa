@@ -275,14 +275,19 @@ impl Theme {
 
     fn from_spec(s: &ThemeSpec) -> Self {
         let dark = s.appearance().is_dark();
-        // 暗色强调柔底 `#00dfe114`：alpha = 0x14。
+        // 暗色强调柔底 `#00dfe114`：8% 青色。
+        //
+        // 必须用 `from_rgba_unmultiplied`：`Color32` 存的是**预乘**色，若把
+        // `(0x00,0xdf,0xe1)` 原样塞进 premultiplied 版本，实际透明度 8% 却带着
+        // 满亮度的通道值，叠在深底上会变成一条实心高亮青块（M5-V1 顶栏「照片信息」
+        // 打开态就是这样露出来的）。
         let accent_soft = if dark {
-            Color32::from_rgba_premultiplied(0x00, 0xdf, 0xe1, 0x14)
+            Color32::from_rgba_unmultiplied(0x00, 0xdf, 0xe1, 0x14)
         } else {
             rgb(s.accent_soft)
         };
         let hairline = if dark {
-            Color32::from_rgba_premultiplied(255, 255, 255, 0x14)
+            Color32::from_rgba_unmultiplied(255, 255, 255, 0x14)
         } else {
             Color32::from_rgba_premultiplied(0, 0, 0, 0x12)
         };
@@ -304,7 +309,9 @@ impl Theme {
             separator,
             hairline,
             cell_border: if dark {
-                Color32::from_rgba_premultiplied(255, 255, 255, 0x1f)
+                // 白 + alpha 必须走 unmultiplied：`Color32` 存预乘色，把
+                // (255,255,255,0x1f) 直接塞进 premultiplied 会被当成满亮度白。
+                Color32::from_rgba_unmultiplied(255, 255, 255, 0x1f)
             } else {
                 Color32::from_rgba_premultiplied(0, 0, 0, 0x1f)
             },
@@ -358,7 +365,7 @@ impl Theme {
             disclosure_green: rgb(s.accent),
             toolbar_bg: rgb(s.win),
             toolbar_border: if dark {
-                Color32::from_rgba_premultiplied(255, 255, 255, 0x12)
+                Color32::from_rgba_unmultiplied(255, 255, 255, 0x12)
             } else {
                 Color32::from_rgba_premultiplied(0, 0, 0, 0x14)
             },
@@ -763,15 +770,21 @@ mod tests {
         assert_eq!(hex(t.text_disabled), "#7c7c7c", "弱文字");
         assert_eq!(hex(t.selected), "#00dfe1", "强调");
         assert_eq!(hex(t.accent_ink), "#00dfe1", "强调文字");
-        assert_eq!(
-            (
-                t.accent_soft.r(),
-                t.accent_soft.g(),
-                t.accent_soft.b(),
-                t.accent_soft.a()
-            ),
-            (0x00, 0xdf, 0xe1, 0x14),
-            "强调柔底 #00dfe114"
+        // `Color32` 内部是**预乘**色，直接读通道会被 alpha 缩过（0xdf→0x11）；
+        // 断言「叠加到深底上之后的观感」才对得上 `#00dfe114` 这个 8% 柔底。
+        assert_eq!(t.accent_soft.a(), 0x14, "强调柔底 alpha = 8%");
+        // 8% alpha 下预乘只有 8 位精度，反解量化误差可达 ±10，按容差比色相。
+        let un = t.accent_soft.to_srgba_unmultiplied();
+        let near = |got: u8, want: u8| (got as i32 - want as i32).abs() <= 12;
+        assert!(
+            near(un[0], 0x00) && near(un[1], 0xdf) && near(un[2], 0xe1),
+            "强调柔底色相应为 #00dfe1，反解得 {:?}",
+            (un[0], un[1], un[2])
+        );
+        assert!(
+            t.accent_soft.r() < 0x40,
+            "柔底必须仍是半透明：预乘后的红通道应接近 0，实际 {}",
+            t.accent_soft.r()
         );
         assert_eq!(hex(t.menu_bg), "#1c1c1c", "卡片");
         assert_eq!(hex(t.sidebar_hover), "#232323", "悬停");

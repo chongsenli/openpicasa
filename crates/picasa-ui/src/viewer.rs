@@ -232,7 +232,7 @@ const TB_BACK_W: f32 = 72.0;
 const TB_BACK_GAP: f32 = 14.0;
 const TB_HEART_W: f32 = 28.0;
 const TB_HEART_GAP: f32 = 8.0;
-const TB_REVEAL_W: f32 = 94.0;
+const TB_REVEAL_W: f32 = 28.0;
 const TB_REVEAL_GAP: f32 = 10.0;
 const TB_COMPARE_W: f32 = 52.0;
 const TB_COMPARE_GAP: f32 = 6.0;
@@ -244,6 +244,9 @@ const TB_ACTUAL_W: f32 = 50.0;
 const TB_ZOOM_MINUS_W: f32 = 28.0;
 const TB_ZOOM_PLUS_W: f32 = 28.0;
 const TB_ZOOM_GAP: f32 = 4.0;
+/// 缩放读数（「适合」/「120%」）的固定宽：原型 `.zoom-readout{min-width:40px;
+/// text-align:right;font-size:11px;color:var(--faint)}`，夹在 − 与 + 之间。
+const TB_ZOOM_READOUT_W: f32 = 44.0;
 const TB_TRACK_H: f32 = 28.0;
 const TB_NAME_W: f32 = 150.0;
 const TB_NAME_GAP: f32 = 14.0;
@@ -272,6 +275,8 @@ pub fn zoom_track_rect(top: Rect) -> Rect {
                 + TB_ACTUAL_W
                 + TB_ZOOM_MINUS_W
                 + TB_ZOOM_GAP
+                + TB_ZOOM_READOUT_W
+                + TB_ZOOM_GAP
                 + TB_ZOOM_PLUS_W,
             TB_TRACK_H,
         ),
@@ -289,9 +294,22 @@ pub fn zoom_button_rects(top: Rect) -> (Rect, Rect) {
     (
         Rect::from_min_size(pos2(x, y), vec2(TB_ZOOM_MINUS_W, 24.0)),
         Rect::from_min_size(
-            pos2(x + TB_ZOOM_MINUS_W + TB_ZOOM_GAP, y),
+            pos2(
+                x + TB_ZOOM_MINUS_W + TB_ZOOM_GAP + TB_ZOOM_READOUT_W + TB_ZOOM_GAP,
+                y,
+            ),
             vec2(TB_ZOOM_PLUS_W, 24.0),
         ),
+    )
+}
+
+/// 缩放读数矩形（「适合」或「120%」），夹在 − 与 + 之间。
+pub fn zoom_readout_rect(top: Rect) -> Rect {
+    let track = zoom_track_rect(top);
+    let (minus, _) = zoom_button_rects(top);
+    Rect::from_min_size(
+        pos2(minus.right() + TB_ZOOM_GAP, track.top() + 2.0),
+        vec2(TB_ZOOM_READOUT_W, 24.0),
     )
 }
 
@@ -933,7 +951,8 @@ fn draw_topbar(
         Icon::Heart,
         fav.shrink(7.0),
         if row.starred { theme.star } else { fg },
-        1.5,
+        // 原型：已收藏是实心（stroke 0），未收藏是 1.75 描边。
+        if row.starred { 0.0 } else { 1.5 },
     );
     let fav_resp = ui.interact(fav, ui.scope_id().with("viewer-fav"), Sense::hover());
     fav_resp.on_hover_text(if row.starred {
@@ -943,20 +962,27 @@ fn draw_topbar(
     });
     x = fav.right() + TB_HEART_GAP;
 
-    if slim_button(
+    // 显示位置：原型是**纯图标按钮**（`<button class="ib" title="显示位置">` +
+    // locate 图钉），不写文字 —— 文字版留给索引管理菜单（那里的菜单项必须可读）。
+    let reveal = Rect::from_center_size(
+        pos2(x + TB_REVEAL_W / 2.0, top.center().y),
+        vec2(TB_REVEAL_W, 24.0),
+    );
+    let reveal_resp = slim_button(
         painter,
         ui,
         ui.scope_id().with("viewer-reveal"),
-        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(TB_REVEAL_W, 24.0)),
+        reveal,
         Icon::Reveal,
-        reveal_label(),
+        None,
+        1.5,
         fg,
-    )
-    .clicked()
-    {
+    );
+    if reveal_resp.clicked() {
         *action = Some(ViewerAction::Reveal);
     }
-    x += TB_REVEAL_W + TB_REVEAL_GAP;
+    reveal_resp.on_hover_text(reveal_label());
+    x = reveal.right() + TB_REVEAL_GAP;
 
     // 比较：只有至少两张时才点亮；状态如实反映当前是否并排。
     if text_button(
@@ -1037,6 +1063,25 @@ fn draw_topbar(
     {
         *action = Some(ViewerAction::ZoomOut);
     }
+    // 原型 `.zoom-readout`：− 与 + 之间夹当前缩放读数（「适合」或「120%」），
+    // 只读、不可点，颜色比按钮淡一档。
+    let readout = zoom_readout_rect(top);
+    let zoom_label = if viewer.fit_pending || !viewer.user_zoomed {
+        "适合".to_string()
+    } else {
+        format!("{}%", (viewer.zoom * 100.0).round() as i32)
+    };
+    painter.with_clip_rect(readout).text(
+        readout.center(),
+        Align2::CENTER_CENTER,
+        zoom_label,
+        FontId::new(11.0, egui::FontFamily::Proportional),
+        if light {
+            theme.text_secondary
+        } else {
+            Color32::from_white_alpha(150)
+        },
+    );
     if text_button(
         painter,
         ui,
@@ -1096,7 +1141,11 @@ fn draw_info_chip(
 ) -> egui::Response {
     let resp = ui.interact(rect, id, Sense::click());
     let radius = rect.height() / 2.0;
-    let fill = if resp.hovered() {
+    // 原型 `.info-toggle.on{background:var(--accent-soft);color:var(--accent-ink);
+    // box-shadow:none}`：打开时是**浅强调底**，不是一圆圈描边。
+    let fill = if active {
+        theme.accent_soft
+    } else if resp.hovered() {
         theme.sidebar_hover
     } else if theme.dark {
         Color32::from_white_alpha(18)
@@ -1104,22 +1153,18 @@ fn draw_info_chip(
         theme.viewer_card
     };
     painter.rect_filled(rect, radius, fill);
-    let stroke_color = if active {
-        theme.ring_outer
-    } else {
-        theme.hairline
-    };
-    let stroke_w = if active { 1.5 } else { 1.0 };
-    painter.rect_stroke(
-        rect,
-        radius,
-        Stroke::new(stroke_w, stroke_color),
-        egui::StrokeKind::Inside,
-    );
+    if !active {
+        painter.rect_stroke(
+            rect,
+            radius,
+            Stroke::new(1.0, theme.hairline),
+            egui::StrokeKind::Inside,
+        );
+    }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
-    let color = if active { theme.ring_outer } else { fg };
+    let color = if active { theme.accent_ink } else { fg };
     let icon_rect =
         Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(12.0, 12.0));
     icons::draw(painter, Icon::Info, icon_rect, color, 1.5);
@@ -1513,7 +1558,6 @@ fn draw_statusbar(
     draw_star_and_tags(
         painter,
         bar,
-        row.starred,
         &viewer.tags,
         bar.left() + 10.0 + left_w + 12.0,
         bar.right() - 20.0 - hint_w,
@@ -1555,7 +1599,7 @@ fn draw_info_panel(
     );
 
     let card = panel.shrink2(vec2(8.0, 8.0));
-    let radius = if theme.dark { 14.0 } else { 16.0 };
+    let radius = info_card_radius(theme);
     painter.rect_filled(card, radius, theme.viewer_card);
     painter.rect_stroke(
         card,
@@ -2116,15 +2160,20 @@ fn draw_info_dark(
     y
 }
 
-/// 信息栏缩略图：等比填入圆角槽位，没有纹理就画中性占位（不画假照片）。
+/// 信息栏卡片的圆角。原型 `.pc{border-radius:var(--radius-card)}`：亮 26 / 暗 22。
+/// r7 之前写死 16 / 14，卡片看起来比原型「方」。
+pub fn info_card_radius(theme: &Theme) -> f32 {
+    theme.radius_card
+}
+
+/// 信息栏的方形缩略图：**cover 裁切 + 圆角**（原型 `.ph2 img{width:64px;
+/// height:64px;border-radius:16px;object-fit:cover}`；暗色 52px / 10）。
+///
+/// r7 之前用 `fit_rect` 按图片比例内缩，横图被压成 64×40、且不裁圆角。
 fn draw_info_thumb(painter: &egui::Painter, viewer: &Viewer, rect: Rect, theme: &Theme) {
     if let Some(tex) = viewer.tex.as_ref() {
-        painter.image(
-            tex.id(),
-            fit_rect(rect, viewer.tex_size),
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        let uv = cover_uv(rect, viewer.tex_size);
+        paint_rounded_image(painter, tex.id(), rect, theme.radius_thumb.min(16.0), uv);
     } else {
         painter.rect_filled(rect, 8.0, theme.chip_bg);
         icons::draw(
@@ -2255,13 +2304,17 @@ fn compare_badge(
     painter.galley(rect.min + vec2(7.0, 3.0), galley, ink);
 }
 
+/// 顶栏的小图标按钮。`label` 为 `None` 时只画图标（原型 `.ib` 的纯图标按钮，
+/// 如「显示位置」），否则图标在左、文字在右。
+#[allow(clippy::too_many_arguments)]
 fn slim_button(
     painter: &egui::Painter,
     ui: &Ui,
     id: egui::Id,
     rect: Rect,
     icon: Icon,
-    label: &str,
+    label: Option<&str>,
+    icon_stroke: f32,
     fg: Color32,
 ) -> egui::Response {
     let resp = ui.interact(rect, id, Sense::click());
@@ -2269,16 +2322,23 @@ fn slim_button(
         painter.rect_filled(rect, 3.0, Color32::from_white_alpha(28));
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
-    let icon_rect =
-        Rect::from_center_size(pos2(rect.left() + 12.0, rect.center().y), vec2(13.0, 13.0));
-    icons::draw(painter, icon, icon_rect, fg, 1.4);
-    painter.text(
-        pos2(rect.left() + 22.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        label,
-        FontId::new(11.5, egui::FontFamily::Proportional),
-        fg,
-    );
+    let icon_rect = match label {
+        Some(_) => Rect::from_center_size(
+            pos2(rect.left() + 12.0, rect.center().y),
+            vec2(13.0, 13.0),
+        ),
+        None => Rect::from_center_size(rect.center(), vec2(15.0, 15.0)),
+    };
+    icons::draw(painter, icon, icon_rect, fg, icon_stroke);
+    if let Some(label) = label {
+        painter.text(
+            pos2(rect.left() + 22.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::new(11.5, egui::FontFamily::Proportional),
+            fg,
+        );
+    }
     resp
 }
 
@@ -2296,10 +2356,13 @@ fn zoom_cell(
     theme: &Theme,
 ) -> egui::Response {
     let resp = ui.interact(rect, id, Sense::click());
+    // 选中态是**满格胶囊**：原型 `.zoom-seg b{height:24px;border-radius:999px}`，
+    // 轨道 padding 2，胶囊正好 24 高、圆角取半高。此前按 2px 内缩画成 20 高，
+    // 看着比原型小一圈。
     if active {
-        painter.rect_filled(rect.shrink2(vec2(0.0, 2.0)), 12.0, theme.seg_active);
+        painter.rect_filled(rect, rect.height() / 2.0, theme.seg_active);
     } else if resp.hovered() {
-        painter.rect_filled(rect.shrink2(vec2(0.0, 2.0)), 12.0, theme.sidebar_hover);
+        painter.rect_filled(rect, rect.height() / 2.0, theme.sidebar_hover);
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -2343,6 +2406,27 @@ fn text_button(
         color,
     );
     resp
+}
+
+/// `object-fit: cover` 的 UV 子矩形：保持图片比例、按目标框**裁切**而不是内缩。
+fn cover_uv(outer: Rect, tex: Vec2) -> Rect {
+    let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    if tex.x <= 0.0 || tex.y <= 0.0 || outer.width() <= 0.0 || outer.height() <= 0.0 {
+        return full;
+    }
+    let tex_aspect = tex.x / tex.y;
+    let box_aspect = outer.width() / outer.height();
+    if tex_aspect > box_aspect {
+        // 图更宽：左右裁掉，取中间一段。
+        let w = box_aspect / tex_aspect;
+        let x0 = (1.0 - w) / 2.0;
+        Rect::from_min_max(pos2(x0, 0.0), pos2(x0 + w, 1.0))
+    } else {
+        // 图更高：上下裁掉，取中间一段。
+        let h = tex_aspect / box_aspect;
+        let y0 = (1.0 - h) / 2.0;
+        Rect::from_min_max(pos2(0.0, y0), pos2(1.0, y0 + h))
+    }
 }
 
 /// 等比放进 `outer`（长边贴合，短边留白，不裁切不拉伸）。
@@ -2463,12 +2547,16 @@ fn caption_summary(viewer: &Viewer) -> String {
     parts.join(" · ")
 }
 
-/// M42-UI-01 / VW-14：底栏里的「星标 + 标签 chips」只读显示。
+/// 底栏**只画标签 chips**（M42-UI-01 / VW-14：只读，超宽收成 `+N`）。
+///
+/// 原型 `.vstat` 只有「文件名 / 宽×高 / 第 i / n 张 / 缩放」四段，星标与
+/// 「收藏」字样不在底栏 —— 它们属于主图下方说明条（`carve_star_and_tags`）。
+/// 说明书 §4.5 要求「底栏收藏与标签只读」，收藏仍在说明条上只读可见，
+/// 这里不重复画一颗星。
 #[allow(clippy::too_many_arguments)]
 fn draw_star_and_tags(
     painter: &egui::Painter,
     bar: Rect,
-    starred: bool,
     tags: &[String],
     start_x: f32,
     max_x: f32,
@@ -2482,16 +2570,6 @@ fn draw_star_and_tags(
         return;
     }
     let ink = stage_ink(bg);
-
-    if starred {
-        let r = 6.0;
-        let c = pos2(x + r, cy);
-        icons::draw_star(painter, c, r, Color32::GOLD);
-        x += r * 2.0 + 3.0;
-        let galley = painter.layout_no_wrap("收藏".to_owned(), font.clone(), ink);
-        painter.galley(pos2(x, cy - galley.size().y / 2.0), galley, Color32::WHITE);
-        x += 26.0 + 8.0;
-    }
 
     let chip_color = if is_bright(bg) {
         Color32::from_black_alpha(24)
@@ -2960,6 +3038,113 @@ mod tests {
                 "{appearance:?}：点胶囊应开关信息栏"
             );
         }
+    }
+
+    /// 缩放簇：− 与 + 之间夹一个只读读数（原型 `.zoom-readout`），
+    /// 三者在轨道内互不重叠，读数能表达「适合」与百分比两种状态。
+    #[test]
+    fn zoom_cluster_has_a_readout_between_minus_and_plus() {
+        let lay = layout(stage_rect(), true, false);
+        let top = lay.top;
+        let track = zoom_track_rect(top);
+        let (minus, plus) = zoom_button_rects(top);
+        let readout = zoom_readout_rect(top);
+        assert!(track.contains_rect(readout), "读数应在轨道内");
+        assert!(minus.right() <= readout.left() + 0.01, "读数在 − 之后");
+        assert!(readout.right() <= plus.left() + 0.01, "读数在 + 之前");
+        assert_eq!(track.right(), plus.right() + TB_TRACK_PAD, "轨道右端与 + 对齐");
+
+        // 适合态写「适合」，放大态写百分比。
+        let rows = photos(2);
+        let mut v = Viewer::new(0);
+        let (_a, texts) = run_stage(&mut v, &rows, Appearance::Light, &[]);
+        let all = texts.join("\n");
+        assert!(all.contains("适合"), "默认应显示「适合」：{all}");
+        v.zoom_actual();
+        v.zoom_in();
+        let (_a2, texts2) = run_stage(&mut v, &rows, Appearance::Light, &[]);
+        let all2 = texts2.join("\n");
+        assert!(all2.contains("125%"), "放大后应显示百分比：{all2}");
+    }
+
+    /// 顶栏「显示位置」按原型是**纯图标**（locate 图钉），不再是一条带文字的宽按钮。
+    #[test]
+    fn reveal_button_is_icon_only_and_compact() {
+        let lay = layout(stage_rect(), true, false);
+        let heart = Rect::from_min_size(
+            pos2(lay.top.left() + TB_PAD + TB_BACK_W + TB_BACK_GAP, lay.top.top() + 10.0),
+            vec2(TB_HEART_W, 24.0),
+        );
+        let reveal_w = TB_REVEAL_W;
+        assert!(
+            reveal_w <= heart.width() + 4.0,
+            "原型 `.ib` 是 30×30 图标按钮：显示位置 {reveal_w} 宽，收藏钮才 {} 宽",
+            heart.width()
+        );
+        let rows = photos(2);
+        let mut v = Viewer::new(0);
+        let (_a, texts) = run_stage(&mut v, &rows, Appearance::Light, &[]);
+        let all = texts.join("\n");
+        assert!(
+            !all.contains("在 Finder 中显示") && !all.contains("在文件管理器中显示"),
+            "顶栏不该再写文字：{all}"
+        );
+        // 能力仍在：文字留给索引管理菜单与悬停提示。
+        assert!(reveal_label().contains("显示"));
+    }
+
+    /// 信息栏缩略图是**正方形 cover + 圆角**，不是按比例内缩的变形图。
+    #[test]
+    fn info_thumb_uses_cover_crop_not_fit() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(64.0, 64.0));
+        // 横图 3:2：左右裁掉，UV 高度满、宽度收窄。
+        let uv = cover_uv(rect, vec2(3000.0, 2000.0));
+        assert!((uv.height() - 1.0).abs() < 1e-6, "横图不该上下裁");
+        assert!(uv.width() < 1.0 && uv.width() > 0.6, "应左右裁：{uv:?}");
+        assert!((uv.center().x - 0.5).abs() < 1e-6, "居中裁切");
+        // 竖图反过来：上下裁、宽度满。
+        let uv2 = cover_uv(rect, vec2(2000.0, 3000.0));
+        assert!((uv2.width() - 1.0).abs() < 1e-6, "竖图不该左右裁");
+        assert!(uv2.height() < 1.0);
+        // 边长相同（正方形）不裁。
+        let uv3 = cover_uv(rect, vec2(800.0, 800.0));
+        assert!((uv3.width() - 1.0).abs() < 1e-6 && (uv3.height() - 1.0).abs() < 1e-6);
+        // 退化输入不 panic
+        assert_eq!(cover_uv(rect, vec2(0.0, 0.0)).width(), 1.0);
+    }
+
+    /// 信息栏卡片圆角走主题 token（原型 `--radius-card` 亮 26 / 暗 22）。
+    #[test]
+    fn info_card_radius_follows_theme_card_token() {
+        let light = Theme::for_appearance(Appearance::Light);
+        let dark = Theme::for_appearance(Appearance::Dark);
+        assert_eq!(info_card_radius(&light), 26.0);
+        assert_eq!(info_card_radius(&dark), 22.0);
+        assert_eq!(info_card_radius(&light), light.radius_card);
+        assert_eq!(info_card_radius(&dark), dark.radius_card);
+    }
+
+    /// 底栏按原型只有「文件名 / 尺寸 / 第 i-n 张 / 缩放」四段：
+    /// 不再画星标与「收藏」字样（收藏在说明条上只读可见）。
+    /// 标签 chips 仍必须保留（说明书 §4.5、VW-14）。
+    #[test]
+    fn statusbar_shows_no_star_but_keeps_readonly_tags() {
+        let rows = photos(3);
+        let mut v = Viewer::new(1); // 第 2 张 starred = true
+        v.tags = vec!["旅行".into()];
+        let (_a, texts) = run_stage(&mut v, &rows, Appearance::Light, &[]);
+        let all = texts.join("\n");
+        assert!(all.contains("第 2 / 3 张"), "哨兵：四段信息仍在：{all}");
+        // 底栏没有「收藏」两字（说明条那边是「收藏 · 旅行」一行，只出现一次）
+        assert_eq!(
+            texts.iter().filter(|t| t.as_str() == "收藏").count(),
+            1,
+            "「收藏」只该出现在说明条：{all}"
+        );
+        assert!(all.contains("旅行"), "标签 chips 必须保留：{all}");
+        // 四段信息仍在
+        assert!(all.contains("IMG_0002"));
+        assert!(all.contains("4000 × 3000"));
     }
 
     /// 工具条仍有缩放 −/+，且两者都在顶栏内、不互相重叠。

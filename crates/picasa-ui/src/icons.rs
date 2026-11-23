@@ -19,7 +19,7 @@ pub enum Icon {
     Back,
     /// 添加文件夹（folder + plus）
     AddFolder,
-    /// 在文件管理器中显示（放大镜）
+    /// 在文件管理器中显示 / 显示位置（定位水滴，原型 `locate`）
     Reveal,
     /// 排序（长短竖条）
     Sort,
@@ -62,6 +62,8 @@ pub enum Icon {
     Share,
     /// 收藏心形
     Heart,
+    /// 五角星（侧栏「星标」行；与心形不同，原型 `icon("star", 15)`）
+    Star,
     /// 书本/相簿（左栏相簿行图标）
     Album,
     /// 照片堆叠（左栏「图库」行图标）
@@ -137,10 +139,14 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
             painter.line_segment([pos2(c.x - 4.0, c.y), pos2(c.x + 4.0, c.y)], s);
             painter.line_segment([pos2(c.x, c.y - 4.0), pos2(c.x, c.y + 4.0)], s);
         }
+        // 显示位置：原型 `locate` 是水滴形图钉（<circle cx=12 cy=11 r=3> + 水滴轮廓），
+        // 不是放大镜。这里画水滴轮廓 + 中心圆孔。
         Icon::Reveal => {
-            let c = ip(0.42, 0.42);
-            painter.circle_stroke(c, rect.width() * 0.24, s);
-            painter.line_segment([pos2(c.x + 6.0, c.y + 6.0), ip(0.95, 0.95)], s);
+            painter.add(Shape::closed_line(
+                locate_points(rect),
+                egui::epaint::PathStroke::new(stroke, color),
+            ));
+            painter.circle_stroke(ip(0.5, 0.44), rect.width() * 0.13, s);
         }
         Icon::Sort => {
             painter.line_segment([ip(0.05, 0.25), ip(0.95, 0.25)], s);
@@ -184,6 +190,21 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
         Icon::ChevronDown => {
             painter.line_segment([ip(0.12, 0.32), ip(0.5, 0.72)], s);
             painter.line_segment([ip(0.5, 0.72), ip(0.88, 0.32)], s);
+        }
+        // 五角星：侧栏「星标」行。原型这里用的是 `star` 而不是心形
+        // （心形只出现在收藏按钮上：顶栏批量收藏、查看器单张收藏）。
+        Icon::Star => {
+            let c = rect.center();
+            let outer = rect.width().min(rect.height()) * 0.5;
+            if stroke <= 0.0 {
+                draw_star(painter, c, outer, color);
+            } else {
+                let pts = star_points(c, outer, outer * 0.45).to_vec();
+                painter.add(Shape::closed_line(
+                    pts,
+                    egui::epaint::PathStroke::new(stroke, color),
+                ));
+            }
         }
         Icon::Tray => {
             let body = Rect::from_min_max(ip(0.05, 0.42), ip(0.95, 0.95));
@@ -381,18 +402,31 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
                 Stroke::new(stroke * 1.2, color),
             );
         }
-        // 心形：两段贝塞尔近似（egui 无贝塞尔，用三点二次近似）
+        // 心形：原型 `M19.5 12.6 12 20l-7.5-7.4A4.5 4.5 0 0 1 12 6.2a4.5 4.5 0 0 1 7.5 6.4z`
+        // 的等价折线（两段半径 4.5 的真圆弧 + 茎部直线）。**stroke <= 0 表示实心**：
+        // 收藏态是实心、未收藏是描边（原型 `icon("heart", 15, starred ? 0 : 1.75)`）。
         Icon::Heart => {
-            let c = ip(0.5, 0.38);
-            painter.circle_filled(ip(0.28, 0.36), rect.width() * 0.19, color);
-            painter.circle_filled(ip(0.72, 0.36), rect.width() * 0.19, color);
-            let bottom = ip(0.5, 0.88);
-            painter.add(Shape::convex_polygon(
-                vec![ip(0.12, 0.44), ip(0.88, 0.44), bottom],
-                color,
-                Stroke::NONE,
-            ));
-            let _ = c;
+            let pts = heart_points(rect);
+            if stroke <= 0.0 {
+                // 凹多边形不能用 `convex_polygon`：走中心顶点扇形 Mesh（同 `draw_star`）。
+                let mut mesh = Mesh::default();
+                let n = pts.len() as f32;
+                let cx = pts.iter().map(|p| p.x).sum::<f32>() / n;
+                let cy = pts.iter().map(|p| p.y).sum::<f32>() / n;
+                mesh.colored_vertex(pos2(cx, cy), color); // #0 = 形心
+                for &p in &pts {
+                    mesh.colored_vertex(p, color);
+                }
+                for i in 0..pts.len() {
+                    mesh.add_triangle(0, 1 + i as u32, 1 + ((i + 1) % pts.len()) as u32);
+                }
+                painter.add(mesh);
+            } else {
+                painter.add(Shape::closed_line(
+                    pts,
+                    egui::epaint::PathStroke::new(stroke, color),
+                ));
+            }
         }
         // 相簿/书本：打开的书（两页）
         Icon::Album => {
@@ -624,6 +658,83 @@ pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f
     }
 }
 
+/// 图钉（定位）的水滴轮廓，按原型 `locate` 的 `<path d="M12 21s7-6.2 7-11a7 7
+/// 0 1 0-14 0c0 4.8 7 11 7 11z"/>` 换算（viewBox 0 0 24 24，闭合折线，首尾不重复）。
+/// 顶部是半径 7 的圆弧、底部收成尖角，中心圆孔由调用方另画。
+pub fn locate_points(rect: Rect) -> Vec<Pos2> {
+    const NORM: [(f32, f32); 14] = [
+        (0.500, 0.875),
+        (0.275, 0.602),
+        (0.223, 0.506),
+        (0.209, 0.398),
+        (0.236, 0.292),
+        (0.300, 0.204),
+        (0.393, 0.145),
+        (0.500, 0.125),
+        (0.607, 0.145),
+        (0.700, 0.204),
+        (0.764, 0.292),
+        (0.791, 0.398),
+        (0.777, 0.506),
+        (0.725, 0.602),
+    ];
+    NORM.iter()
+        .map(|(x, y)| {
+            pos2(
+                rect.left() + x * rect.width(),
+                rect.top() + y * rect.height(),
+            )
+        })
+        .collect()
+}
+
+/// 心形的轮廓顶点（**闭合**，首尾不重复），按原型 SVG path 换算成 0–1 归一化坐标。
+///
+/// 原型：`M19.5 12.6 12 20l-7.5-7.4A4.5 4.5 0 0 1 12 6.2a4.5 4.5 0 0 1 7.5 6.4z`
+/// （viewBox 0 0 24 24）。顺序照 path 走：右肩 → 直线到心尖 (12,20) → 直线到左肩
+/// (4.5,12.6) → 左瓣半圆到凹口 (12,6.2) → 右瓣半圆回到右肩。
+///
+/// 两段 `A4.5` 声明的半径 4.5 小于弦长 9.86/2，SVG 规范要求等比放大到 4.929，
+/// 圆心分别是 (8.25,9.4) 与 (15.75,9.4)；各取半圆 10 段折线逼近。
+/// 外接框 0.139–0.861 × 0.187–0.833，视觉重心略高于中线，与原型一致。
+///
+/// 保留为**纯函数**便于测试：顶点顺序必须是连续的（相邻点距离远小于半个图形），
+/// 且相对形心同向绕行（扇形三角化不产生自交）。
+pub fn heart_points(rect: Rect) -> Vec<Pos2> {
+    const NORM: [(f32, f32); 22] = [
+        (0.8125, 0.5250),
+        (0.5000, 0.8333),
+        (0.1875, 0.5250),
+        (0.1539, 0.4702),
+        (0.1390, 0.4077),
+        (0.1440, 0.3436),
+        (0.1687, 0.2843),
+        (0.2104, 0.2354),
+        (0.2652, 0.2019),
+        (0.3277, 0.1869),
+        (0.3918, 0.1920),
+        (0.4512, 0.2166),
+        (0.5000, 0.2583),
+        (0.5488, 0.2166),
+        (0.6082, 0.1920),
+        (0.6723, 0.1869),
+        (0.7348, 0.2019),
+        (0.7896, 0.2354),
+        (0.8313, 0.2843),
+        (0.8560, 0.3436),
+        (0.8610, 0.4077),
+        (0.8461, 0.4702),
+    ];
+    NORM.iter()
+        .map(|(x, y)| {
+            pos2(
+                rect.left() + x * rect.width(),
+                rect.top() + y * rect.height(),
+            )
+        })
+        .collect()
+}
+
 /// M4.2 M42-UI-01：五角星的 10 个顶点（5 个外尖 + 5 个内凹，交替）。
 ///
 /// 从正上方起、每 36° 一个点，外半径 `outer`、内半径 `inner`。
@@ -682,6 +793,100 @@ mod tests {
         assert!((pts[0].x - c.x).abs() < 0.001);
         assert!(pts[0].y < c.y);
         assert_eq!(pts.len(), 10);
+    }
+
+    /// 心形轮廓：顶点连续（相邻点不会跳半个图形）、同向绕形心、跨满整个 rect。
+    ///
+    /// 这条钉住的是**形状本身**：旧实现是两个圆 + 一个三角，渲染成实心药丸；
+    /// 现在的 21 点折线来自原型的两段真圆弧，凹口在正上方中央。
+    #[test]
+    fn heart_points_form_a_continuous_concave_outline() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(24.0, 24.0));
+        let pts = heart_points(rect);
+        assert_eq!(pts.len(), 22, "原型 path 换算出的顶点数");
+        // 相邻点距离不超过对角线的一半（不能跨跳）
+        let diag = rect.size().length();
+        for i in 0..pts.len() {
+            let a = pts[i];
+            let b = pts[(i + 1) % pts.len()];
+            let d = (b - a).length();
+            assert!(d > 0.0 && d < diag * 0.5, "第 {i} 段长度异常：{d}");
+        }
+        // 凹口：正上方中央应有一个点**低于**左右两肩（y 更大 = 更靠下）
+        let cx = rect.center().x;
+        let notch = pts
+            .iter()
+            .min_by(|a, b| {
+                let da = (a.x - cx).abs();
+                let db = (b.x - cx).abs();
+                da.partial_cmp(&db).unwrap()
+            })
+            .unwrap();
+        let shoulder = pts
+            .iter()
+            .filter(|p| p.y < notch.y)
+            .count();
+        assert!(shoulder >= 2, "心形上半应有比凹口更高的两肩");
+        // 凹口必须在正中偏上：x 落在 0.45–0.55，且比两肩低至少 5% 高度
+        let cx_n = (notch.x - rect.left()) / rect.width();
+        let cy_n = (notch.y - rect.top()) / rect.height();
+        assert!(
+            (0.45..=0.55).contains(&cx_n),
+            "凹口应在水平中央，实际 x={cx_n}"
+        );
+        let highest = pts
+            .iter()
+            .map(|p| (p.y - rect.top()) / rect.height())
+            .fold(f32::MAX, f32::min);
+        assert!(
+            cy_n - highest > 0.05,
+            "凹口要比两肩低出可感知的深度：凹口 y={cy_n}，最高肩 y={highest}"
+        );
+        // 心尖在正中、且是全图最低点（心形下半是两条直线收成一点）
+        let tip = pts
+            .iter()
+            .max_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
+            .unwrap();
+        assert!(((tip.x - rect.center().x).abs()) < rect.width() * 0.02, "心尖应在正中");
+        assert!(
+            (tip.y - rect.top()) / rect.height() > 0.80,
+            "心尖应落到接近底部"
+        );
+        // 外接框：跨满大半，但留出描边余量
+        let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+        for p in &pts {
+            x0 = x0.min(p.x);
+            x1 = x1.max(p.x);
+            y0 = y0.min(p.y);
+            y1 = y1.max(p.y);
+        }
+        assert!(x1 - x0 > rect.width() * 0.6, "心形太窄");
+        assert!(y1 - y0 > rect.height() * 0.6, "心形太扁");
+        assert!(x0 > rect.left() && x1 < rect.right());
+        assert!(y0 > rect.top() && y1 < rect.bottom());
+    }
+
+    /// 定位图钉：水滴尖在正下方中央，顶部圆弧左右对称，中心留出圆孔位置。
+    #[test]
+    fn locate_points_are_a_symmetric_pin_with_a_bottom_tip() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(24.0, 24.0));
+        let pts = locate_points(rect);
+        assert_eq!(pts.len(), 14);
+        let tip = pts[0];
+        assert!(
+            (tip.x - rect.center().x).abs() < 0.01,
+            "水滴尖应在中线：{tip:?}"
+        );
+        assert!(tip.y > rect.bottom() - rect.height() * 0.2, "尖角应在底部");
+        // 左右对称：每个点都能找到镜像点
+        for p in &pts {
+            let mirror_x = 2.0 * rect.center().x - p.x;
+            assert!(
+                pts.iter()
+                    .any(|q| (q.x - mirror_x).abs() < 0.01 && (q.y - p.y).abs() < 0.01),
+                "缺少镜像点：{p:?}"
+            );
+        }
     }
 
     #[test]

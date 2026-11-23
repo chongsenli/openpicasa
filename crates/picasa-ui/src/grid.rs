@@ -1336,7 +1336,9 @@ pub fn show(
             let mut frame = img_rect;
             // M4.1 `M41-UI-02`：三种布局统一圆角（此前 masonry 是 0.0 直角）。
             // M5-TB-10：极小尺寸（约 22–64 px）按边长收窄，避免看起来像胶囊。
-            let frame_radius = thumb_radius_for(cell_px);
+            // M5-V1：正常尺寸走**主题** token（原型 `.cell` 亮 16 / 暗 10），
+            // 此前误用无主题的 `thumb_radius_for`，两套主题都画成 8px。
+            let frame_radius = themed_thumb_radius(theme, cell_px);
             // M4.2 `M42-PERF-00`：本格是否画了占位（未出图）。只做统计，不改绘制。
             let mut blank = placeholder;
             if placeholder {
@@ -3064,6 +3066,32 @@ mod tests {
             assert!(themed_thumb_radius(&theme, 22.0) < 4.0, "22px 不能像胶囊");
             assert!(themed_thumb_radius(&theme, 22.0) <= theme.radius_thumb);
         }
+    }
+
+    /// M5-V1：**绘制路径**必须走主题圆角，不能再用无主题的 `thumb_radius_for`。
+    ///
+    /// 只看函数本身测不出这个问题：`themed_thumb_radius` 早就存在且单测通过，
+    /// 但绘制循环里调的是另一支，结果亮暗两套都画 8px。所以这里锁源码，
+    /// 钉住「画格子的那一行」用的就是主题版。
+    #[test]
+    fn m5_v1_grid_draw_path_uses_themed_thumb_radius() {
+        let src = include_str!("grid.rs");
+        let draw_loop = src
+            .split("pub fn show(")
+            .nth(1)
+            .expect("找不到 grid::show");
+        let draw_loop = draw_loop
+            .split("#[cfg(test)]")
+            .next()
+            .expect("grid::show 之后应有测试模块");
+        assert!(
+            draw_loop.contains("let frame_radius = themed_thumb_radius(theme, cell_px);"),
+            "绘制路径必须用主题圆角（亮 16 / 暗 10），否则两套主题都画成 8px"
+        );
+        assert!(
+            !draw_loop.contains("let frame_radius = thumb_radius_for(cell_px);"),
+            "绘制路径不得再退回无主题的 thumb_radius_for"
+        );
     }
 
     #[test]

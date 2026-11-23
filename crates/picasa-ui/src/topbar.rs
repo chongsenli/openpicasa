@@ -614,7 +614,14 @@ fn icon_btn_ex(
         theme.text_disabled
     };
     let inner = rect.shrink(rect.width() * 0.28);
-    icons::draw(painter, icon, inner, color, 1.4);
+    // 收藏心形：选中（全部已收藏）时是实心（stroke 0），否则 1.4 描边 ——
+    // 原型 `icon("heart", 15, allStarred ? 0 : 1.75, allStarred ? "currentColor" : "none")`。
+    let icon_stroke = if selected && icon == Icon::Heart {
+        0.0
+    } else {
+        1.4
+    };
+    icons::draw(painter, icon, inner, color, icon_stroke);
     if enabled {
         resp.clone().on_hover_text(tooltip);
     }

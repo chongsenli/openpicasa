@@ -563,7 +563,8 @@ fn favorites(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut Vec
         &t,
         "星标",
         count,
-        Icon::Heart,
+        // 原型侧栏这一行是五角星（`icon("star", 15)`），心形只用于收藏按钮。
+        Icon::Star,
         starred_on,
         true,
         ctx.has_focus,
