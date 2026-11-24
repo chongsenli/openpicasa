@@ -197,6 +197,7 @@ impl GridLayout {
         show_filename: bool,
     ) -> Self {
         let gap = Metrics::CELL_GAP;
+        let gap_y = Metrics::CELL_GAP_Y;
         let pad = Metrics::GRID_PAD;
 
         let usable = (width - 2.0 * pad).max(cell);
@@ -228,8 +229,8 @@ impl GridLayout {
             } else {
                 0.0
             };
-            // 每行占 (cell_h + gap)，行间 gap 由这个式子统一吃掉
-            y += header + rows as f32 * (cell_h + gap) + gap;
+            // 每行占 (cell_h + gap_y)，行间竖直间距用 CELL_GAP_Y（水平列间距仍是 CELL_GAP）
+            y += header + rows as f32 * (cell_h + gap_y) + gap_y;
         }
 
         let total_h = y + pad;
@@ -405,7 +406,7 @@ impl GridLayout {
         let row = local / self.cols;
         let col = local % self.cols;
         let x = Metrics::GRID_PAD + col as f32 * (self.cell + Metrics::CELL_GAP);
-        let y = g.y + self.header() + row as f32 * (self.cell_h + Metrics::CELL_GAP);
+        let y = g.y + self.header() + row as f32 * (self.cell_h + Metrics::CELL_GAP_Y);
         Some(Rect::from_min_size(pos2(x, y), vec2(self.cell, self.cell)))
     }
 
@@ -491,7 +492,7 @@ impl GridLayout {
         for g in &mut self.groups {
             g.y = y;
             let rows = g.count.div_ceil(self.cols);
-            y += header + rows as f32 * (self.cell_h + Metrics::CELL_GAP) + Metrics::CELL_GAP;
+            y += header + rows as f32 * (self.cell_h + Metrics::CELL_GAP_Y) + Metrics::CELL_GAP_Y;
         }
         self.total_h = y + Metrics::GRID_PAD;
     }
@@ -552,7 +553,7 @@ impl GridLayout {
     /// 分组 `gi` 内、与 `top` 相交的第一行的全局索引（向上 overscan 一行）。
     fn first_index_in(&self, gi: usize, top: f32) -> usize {
         let g = &self.groups[gi];
-        let pitch = self.cell_h + Metrics::CELL_GAP;
+        let pitch = self.cell_h + Metrics::CELL_GAP_Y;
         let local_y = top - g.y - self.header();
         let row = if local_y <= 0.0 {
             0
@@ -566,7 +567,7 @@ impl GridLayout {
     /// 分组 `gi` 内、与 `bottom` 相交的最后一行之后的全局索引（向下 overscan 一行）。
     fn last_index_in(&self, gi: usize, bottom: f32) -> usize {
         let g = &self.groups[gi];
-        let pitch = self.cell_h + Metrics::CELL_GAP;
+        let pitch = self.cell_h + Metrics::CELL_GAP_Y;
         let local_y = bottom - g.y - self.header();
         let row = if local_y <= 0.0 {
             0
@@ -670,7 +671,7 @@ impl GridLayout {
             if local_y < 0.0 {
                 return None;
             }
-            let row = (local_y / (self.cell_h + Metrics::CELL_GAP)).floor() as usize;
+            let row = (local_y / (self.cell_h + Metrics::CELL_GAP_Y)).floor() as usize;
             let col_x = pos.x - Metrics::GRID_PAD;
             if col_x < 0.0 {
                 return None;
@@ -2413,8 +2414,8 @@ mod tests {
         // 这里用 `cell_h` 而不是硬写边长，否则以后调文件名行高又会静默错位。
         assert_eq!(
             second_row.top(),
-            r0.top() + layout.cell_h + Metrics::CELL_GAP,
-            "第二行应正好下移一个行距（cell_h 含文件名行）"
+            r0.top() + layout.cell_h + Metrics::CELL_GAP_Y,
+            "第二行应正好下移一个行距（cell_h 含文件名行，竖直间距用 CELL_GAP_Y）"
         );
     }
 
@@ -2920,6 +2921,42 @@ mod tests {
         // 整体视觉距离（行高+间距）= 9.5，正好是旧值 19 的一半
         let visual = Metrics::FILENAME_H + gap;
         assert!((visual - 9.5).abs() < 0.01, "视觉距离没减半：{visual}");
+    }
+
+    /// 用户 2026-11-24：方格视图「图片和图片之间的高度缩减一半」——
+    /// 竖直行间距用 CELL_GAP_Y（= CELL_GAP/2），水平列间距仍是 CELL_GAP 不变。
+    #[test]
+    fn vertical_gap_is_half_of_horizontal_gap() {
+        assert_eq!(Metrics::CELL_GAP_Y, Metrics::CELL_GAP / 2.0);
+        assert_eq!(Metrics::CELL_GAP, 16.0, "水平列间距保持 M3.2 定稿");
+        assert_eq!(Metrics::CELL_GAP_Y, 8.0, "竖直行间距减半");
+
+        let photos = same_day(40);
+        // 关掉文件名行，让 cell_h == cell，纯量格间留白（否则会掺进 FILENAME_H）
+        let layout = GridLayout::build_in_viewport_opts(
+            &photos,
+            1000.0,
+            1000.0,
+            Metrics::CELL_SIZES[0],
+            false,
+            ViewMode::Grid,
+            false,
+        );
+        assert!(layout.cols >= 2);
+        let r0 = layout.thumb_rect(0).unwrap();
+        let r1 = layout.thumb_rect(1).unwrap();
+        let r2 = layout.thumb_rect(layout.cols).unwrap();
+        let gap_x = r1.left() - r0.right();
+        let gap_y = r2.top() - r0.bottom();
+        assert!(
+            (gap_x - Metrics::CELL_GAP).abs() < 0.01,
+            "水平间距不变：{gap_x}"
+        );
+        assert!(
+            (gap_y - Metrics::CELL_GAP_Y).abs() < 0.01,
+            "竖直间距减半：{gap_y}"
+        );
+        assert!(gap_y < gap_x, "竖直比水平更紧凑");
     }
 
     /// `M41-UI-02`：三种布局的 cell_h / 文件名占位都用同一个 FILENAME_H，

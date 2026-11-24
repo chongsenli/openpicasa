@@ -502,6 +502,10 @@ impl Metrics {
     pub const SEG_H: f32 = 36.0;
     pub const ZOOM_PILL_H: f32 = 32.0;
     pub const CELL_GAP: f32 = 16.0;
+    /// 方格视图的竖直行间距：水平列间距 CELL_GAP 的一半。
+    /// 用户 2026-11-24 要求「图片和图片之间的高度缩减一半」，只压竖直方向，
+    /// 水平列间距保持 M3.2 定稿的 16px 不变。
+    pub const CELL_GAP_Y: f32 = Self::CELL_GAP / 2.0;
     pub const GRID_PAD: f32 = 32.0;
     pub const GROUP_HEADER_H: f32 = 30.0;
     pub const FILENAME_H: f32 = 9.0;
