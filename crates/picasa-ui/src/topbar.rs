@@ -40,6 +40,30 @@ pub fn toolbar_center_y(rect: Rect) -> f32 {
     rect.top() + Metrics::TOPBAR_TITLE_H + Metrics::TOPBAR_TOOL_H / 2.0
 }
 
+/// 首页标题带里 egui 自绘应用名 `OpenPicasa` 的中心点（窗口相对坐标）。
+///
+/// macOS 隐藏了 AppKit 原生标题（`viewport_builder().with_title_shown(false)`），
+/// 应用名改由这里自绘——对齐原型 `css/app.css` 的 `.appname`（标题带居中、12px）。
+/// 红绿灯在标题带左端（x≈0..78），故文字水平居中于整窗时不会与它重叠。
+/// 查看器走 `viewer::layout`，不调用本函数，按原型不画应用名。
+pub fn app_name_center(rect: Rect) -> Pos2 {
+    pos2(
+        rect.left() + rect.width() / 2.0,
+        rect.top() + Metrics::TOPBAR_TITLE_H / 2.0,
+    )
+}
+
+/// 在标题带自绘应用名（仅 macOS——其余平台 AppKit 原生标题仍在）。
+fn draw_app_name(painter: &egui::Painter, rect: Rect, theme: &Theme) {
+    painter.text(
+        app_name_center(rect),
+        Align2::CENTER_CENTER,
+        "OpenPicasa",
+        FontId::new(12.0, egui::FontFamily::Proportional),
+        theme.text_secondary,
+    );
+}
+
 /// 顶栏产出的动作，由 App 执行（顶栏自己不碰状态）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum TopbarAction {
@@ -209,6 +233,10 @@ pub fn show(
     // M4.1 v1.7：用户裁决「按钮样式回退到 M4」——玻璃整套（模糊底图/折射/
     // 色散/水波纹）移除，顶栏恢复 M4 的纯色底。
     painter.rect_filled(rect, 0.0, theme.toolbar_bg);
+    // H8：macOS 隐藏了 AppKit 原生标题，应用名在标题带自绘（居中，避开红绿灯）。
+    // 查看器不经过这里，按原型 .appname{display:none} 不画；其余平台保留原生标题。
+    #[cfg(target_os = "macos")]
+    draw_app_name(&painter, rect, theme);
     // 底边发丝线（半透明，压在内容上不抢眼）
     painter.line_segment(
         [
@@ -1519,5 +1547,16 @@ mod m41_tests {
             );
             assert!(r.top() >= Metrics::TOPBAR_TITLE_H, "控件侵入标题带：{r:?}");
         }
+    }
+
+    /// H8：macOS 隐藏 AppKit 原生标题后，egui 自绘的应用名须落在标题带正中，
+    /// 且水平上远离左端红绿灯（x≈0..78）——不能像原生标题那样盖住红绿灯。
+    #[test]
+    fn m5_v1_app_name_is_centered_and_clears_traffic_lights() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, Metrics::TOPBAR_H));
+        let c = app_name_center(rect);
+        assert_eq!(c.y, Metrics::TOPBAR_TITLE_H / 2.0, "应用名在标题带竖直中线");
+        assert_eq!(c.x, 640.0, "应用名水平居中");
+        assert!(c.x - 60.0 > 78.0, "应用名左缘须远离红绿灯区（x≈0..78）");
     }
 }

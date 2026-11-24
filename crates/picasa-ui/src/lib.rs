@@ -84,8 +84,12 @@ pub fn run() -> eframe::Result {
 
 /// 窗口 viewport：尺寸 / 标题 / app_id / 图标 / macOS 自绘顶栏。
 ///
-/// H8：标题**始终显示** `OpenPicasa`（`with_title_shown(true)`），macOS 也不再隐藏；
-/// 其余窗口行为（fullsize content view、titlebar、红绿灯位置）保持不变。
+/// H8：应用名 `OpenPicasa` **始终可见**——但 macOS 上不再让 AppKit 画原生标题：
+/// `fullsize_content_view` 下原生标题会盖在自绘顶栏上，和红绿灯、查看器返回按钮
+/// 挤成一团（原生截图 OCR 实锤：三者重叠在 x≈16..163）。macOS 改为隐藏原生标题
+/// （`with_title_shown(false)`，只隐藏标题文字、红绿灯由 `titlebar_buttons_hidden`
+/// 独立控制不受影响），应用名由 egui 在首页标题带自绘；查看器按原型
+/// `.win.viewer .titlebar .appname{display:none}` 不画。其余平台保留原生标题栏。
 fn viewport_builder() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
         // U-01：首次打开是横向偏宽、非最大化的窗口（⚠️待核对具体尺寸）
@@ -100,8 +104,11 @@ fn viewport_builder() -> egui::ViewportBuilder {
         // 摆在顶栏（TOPBAR_H）的垂直中线、左侧留白处。
         .with_fullsize_content_view(cfg!(target_os = "macos"))
         .with_titlebar_shown(!cfg!(target_os = "macos"))
-        // H8：窗口标题始终显示 "OpenPicasa"（macOS 也不隐藏）。
-        .with_title_shown(true)
+        // H8：应用名始终可见。macOS 自绘顶栏下隐藏 AppKit 原生标题文字——
+        // 否则它压在红绿灯右侧、正好盖住查看器返回按钮（x≈72..163）。
+        // 首页应用名改由 egui 自绘（topbar.rs），查看器按原型不画。
+        // 非 macOS 保留系统标题栏原生显示。
+        .with_title_shown(!cfg!(target_os = "macos"))
 }
 
 /// 窗口图标。图来自 `packaging/logo.png`，由 `packaging/make_icons.py --single`
@@ -240,13 +247,18 @@ pub fn clear_log_file() -> std::io::Result<u64> {
 mod tests {
     use super::*;
 
-    /// H8：窗口标题始终是 `OpenPicasa` 且**显示**（macOS 也不再隐藏），
+    /// H8：应用名始终是 `OpenPicasa`。macOS 自绘顶栏下**隐藏** AppKit 原生标题
+    /// （否则与红绿灯、查看器返回按钮重叠），由 egui 自绘应用名；其余平台保留原生标题。
     /// 其余窗口行为（fullsize content view / titlebar / 尺寸）保持原样。
     #[test]
-    fn h8_window_title_is_openpicasa_and_always_shown() {
+    fn h8_window_title_is_openpicasa_and_visible_on_every_platform() {
         let vp = viewport_builder();
         assert_eq!(vp.title.as_deref(), Some("OpenPicasa"), "窗口标题");
-        assert_eq!(vp.title_shown, Some(true), "标题必须显示（macOS 也不隐藏）");
+        assert_eq!(
+            vp.title_shown,
+            Some(!cfg!(target_os = "macos")),
+            "macOS 隐藏原生标题（egui 自绘应用名）；其余平台显示原生标题"
+        );
         assert_eq!(
             vp.fullsize_content_view,
             Some(cfg!(target_os = "macos")),
