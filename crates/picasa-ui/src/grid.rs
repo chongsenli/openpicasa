@@ -1382,7 +1382,15 @@ pub fn show(
                         // masonry 的格子比例就是图片比例：直接填满，消除 contain
                         // 舍入造成的 1px 白边；方格仍用 contain（格子是正方形）。
                         let fitted = if mode == ViewMode::Grid {
-                            fit_rect(img_rect, tex_size)
+                            let f = fit_rect(img_rect, tex_size);
+                            f.translate(vec2(
+                                0.0,
+                                grid_image_vertical_shift(
+                                    img_rect.height(),
+                                    f.height(),
+                                    layout.show_filename,
+                                ),
+                            ))
                         } else {
                             img_rect
                         };
@@ -2000,6 +2008,16 @@ fn fit_rect(outer: Rect, tex: Vec2) -> Rect {
     Rect::from_center_size(outer.center(), size)
 }
 
+/// 方格缩略图的竖直微调：横图 `contain` 进正方形格子后上下各留 `lower_blank`，
+/// 用户反馈「图片与文件名的距离太远」，把图片下移 `lower_blank/2` 令下方空白减半。
+/// 竖图/方图（无上下留白）与不显示文件名时保持居中（返回 0）。
+fn grid_image_vertical_shift(cell_h: f32, fitted_h: f32, show_filename: bool) -> f32 {
+    if !show_filename || cell_h <= fitted_h {
+        return 0.0;
+    }
+    (cell_h - fitted_h) / 4.0
+}
+
 pub fn ellipsize(s: &str, max_chars: usize) -> String {
     let count = s.chars().count();
     if count <= max_chars {
@@ -2070,6 +2088,23 @@ pub fn draw_icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32
 mod tests {
     use super::*;
     use picasa_db::PhotoRow;
+
+    /// 用户反馈「图片与文件名距离太远」：横图在正方形格子里上下各留白，
+    /// 下移半个下留白令间距减半；竖图/方图与不显示文件名时不动。
+    #[test]
+    fn grid_image_shift_halves_the_blank_below_a_landscape_thumb() {
+        let cell = 144.0_f32;
+        let fitted_h = 96.0; // 3:2 横图 contain 进 144 方格的画高
+        let blank = (cell - fitted_h) / 2.0; // 24，上下各一块
+        let shift = grid_image_vertical_shift(cell, fitted_h, true);
+        assert!((shift - blank / 2.0).abs() < 0.01, "下移半个下留白");
+        // 下留白从 blank 变成 blank - shift = blank/2。
+        assert!((blank - shift - blank / 2.0).abs() < 0.01, "下方空白减半");
+        // 竖图/方图（无留白）不移动。
+        assert_eq!(grid_image_vertical_shift(cell, cell, true), 0.0);
+        // 不显示文件名时保持居中。
+        assert_eq!(grid_image_vertical_shift(cell, fitted_h, false), 0.0);
+    }
 
     fn photo(id: i64, taken_at: i64) -> PhotoRow {
         PhotoRow {
