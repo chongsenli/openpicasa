@@ -1,8 +1,12 @@
-//! M5 v1.4 顶栏：**单行**——左段操作图标、中段路径 + 张数/拍摄时间、右簇排布/搜索/排序/筛选/…
+//! M5 v1.4 首页顶栏 = **标题带 36 + 工具条 48** 两段（原型 `css/app.css:59,64`）：
+//! 标题带只放红绿灯（中心 y=18），工具条放左段操作图标、中段路径 + 张数/拍摄时间、
+//! 右簇排布/搜索/排序/筛选/…（按钮中心 y=60，离红绿灯 42px，不再贴 macOS 标题栏）。
 //!
 //! ```text
 //! ┌──────────────────────────────────────────────────────────────────────────────┐
-//! │ ●●● [侧栏][导入][幻灯片][编辑][♥][ⓘ][⌗][▣] │ 图库 / 旅行 / 京都 · 22 张 · 拍摄时间：… │ [方格|纵瀑|横瀑][搜索框][⇅][≡][…] │
+//! │ ●●●                                                                          │  标题带 36
+//! ├──────────────────────────────────────────────────────────────────────────────┤
+//! │ [侧栏][导入][幻灯片][编辑][♥][ⓘ][⌗][▣] │ 图库 / 旅行 / 京都 · 22 张 · 拍摄时间：… │ [方格|纵瀑|横瀑][搜索框][⇅][≡][…] │  工具条 48
 //! └──────────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -25,6 +29,16 @@ use picasa_db::SortKey;
 
 use crate::icons::{self, Icon};
 use crate::theme::{Metrics, Theme};
+
+/// 首页工具条里按钮/文本的**垂直中心**（窗口相对 y，egui 点）。
+///
+/// M5 v1.4 原型 `css/app.css:59,64` 把首页顶栏拆成「标题带 36 + 工具条 48」两段，
+/// 红绿灯在标题带中心 y=18，按钮在工具条中心 y=36+24=60。两者相距 42px，
+/// 不再像旧版单行 64px（按钮 y=32、离红绿灯仅 18px）那样贴着 macOS 标题栏。
+/// 查看器是另一套布局（`viewer::layout`，`TOP_H=44`），不走这里。
+pub fn toolbar_center_y(rect: Rect) -> f32 {
+    rect.top() + Metrics::TOPBAR_TITLE_H + Metrics::TOPBAR_TOOL_H / 2.0
+}
 
 /// 顶栏产出的动作，由 App 执行（顶栏自己不碰状态）。
 #[derive(Clone, Debug, PartialEq)]
@@ -133,7 +147,7 @@ fn object_button_rects(edit_right: f32, center_y: f32, d: f32) -> [Rect; 4] {
 /// 胶囊紧贴搜索框左侧、整簇靠右（v1.4 定稿）；搜索框常驻可见（H2），
 /// 宽度随窗口收窄，但不会低于 170 px。
 fn topbar_right_rects(rect: Rect, d: f32) -> (Rect, Rect, Rect, Rect, Rect) {
-    let cy = rect.center().y;
+    let cy = toolbar_center_y(rect);
     let margin = 14.0;
     let circle_at =
         |right_x: f32| -> Rect { Rect::from_center_size(pos2(right_x - d / 2.0, cy), vec2(d, d)) };
@@ -213,7 +227,7 @@ pub fn show(
 
     let d = Metrics::TOPBAR_ICON_D;
     let margin = 14.0;
-    let cy = rect.center().y;
+    let cy = toolbar_center_y(rect);
 
     // ---- 右簇（从右往左）：… 筛选 排序 搜索 排布 ----
     let (layout_rect, search_rect, sort_r, filter_r, more_r) = topbar_right_rects(rect, d);
@@ -1477,5 +1491,33 @@ mod m41_tests {
         assert!(!s.has_selection);
         assert!(!s.all_favorite);
         assert!(!s.all_in_tray);
+    }
+
+    /// 原型 `.toolbar` 高 48、按钮中心距窗口顶部 60（红绿灯中心 18）。
+    /// 门禁：顶栏 rect 的任何按钮/搜索/排布都按 `toolbar_center_y` 排在下半区，
+    /// 不再用 `rect.center()`（那会得到 42，仍贴上标题带）。
+    #[test]
+    fn m5_v1_toolbar_content_sits_below_the_title_band() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, Metrics::TOPBAR_H));
+        let cy = toolbar_center_y(rect);
+        assert_eq!(cy, 60.0, "工具条中心应在 y=60");
+        assert_eq!(
+            rect.center().y,
+            42.0,
+            "rect 几何中心仍是 42——不能拿它画按钮"
+        );
+        assert!(cy - rect.center().y >= 18.0, "内容须整体下移 ≥18px");
+
+        // 右簇（排布胶囊 / 搜索 / 排序 / 筛选 / 更多）也都落在工具条中心
+        let (_layout, search, sort, filter, more) =
+            topbar_right_rects(rect, Metrics::TOPBAR_ICON_D);
+        for r in [search, sort, filter, more] {
+            assert!(
+                (r.center().y - cy).abs() < 0.01,
+                "右簇控件中心 {} 偏离工具条中线 {cy}",
+                r.center().y
+            );
+            assert!(r.top() >= Metrics::TOPBAR_TITLE_H, "控件侵入标题带：{r:?}");
+        }
     }
 }

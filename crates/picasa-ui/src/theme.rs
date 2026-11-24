@@ -482,10 +482,15 @@ impl Metrics {
     pub const CELL_SIZES: [f32; 3] = [85.0, 144.0, 200.0];
 
     // ---- M3.1 顶栏 ----
-    /// M5 v1.4：顶栏压成**单行**（图标 · 路径/张数 · 排布/搜索），高度 64。
-    /// `TOPBAR_LINE1_H` 保留给 macOS 红绿灯的垂直带（窗口标题带高度）。
-    pub const TOPBAR_H: f32 = 64.0;
-    pub const TOPBAR_LINE1_H: f32 = 28.0;
+    /// M5 v1.4 首页顶栏 = **标题带 + 工具条**两段（原型 `css/app.css:59,64`）：
+    /// 标题带 36px 只放红绿灯与窗口标题，工具条 48px 放按钮/排布/搜索。
+    /// 按钮垂直中心 = 36 + 48/2 = **60**，距红绿灯中心 18 有 42px，
+    /// 不再像单行 64px 那样贴着 macOS 标题栏。
+    pub const TOPBAR_TITLE_H: f32 = 36.0;
+    pub const TOPBAR_TOOL_H: f32 = 48.0;
+    pub const TOPBAR_H: f32 = Self::TOPBAR_TITLE_H + Self::TOPBAR_TOOL_H;
+    /// 红绿灯的垂直带 = 标题带（原型红绿灯 dy=12 高 12 → 中心 y=18）。
+    pub const TOPBAR_LINE1_H: f32 = Self::TOPBAR_TITLE_H;
     pub const TOPBAR_ICON_D: f32 = 38.0;
     /// 左栏默认宽度。M5-R3 视觉参考 228（亮）/ 216（暗）；**宽度偏好逻辑不变**，
     /// 这里保持既有默认 216，不借主题改用户拖出来的宽度。
@@ -744,6 +749,21 @@ mod tests {
     fn c(hex: &str) -> Color32 {
         let h = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap();
         rgb(h)
+    }
+
+    /// 首页顶栏是原型 v1.4 的「标题带 36 + 工具条 48」两段，不再单行 64。
+    /// 按钮中心 y=60，离红绿灯中心 y=18 有 42px，不会贴着 macOS 标题栏。
+    #[test]
+    fn m5_v1_topbar_is_two_bands_matching_prototype() {
+        assert_eq!(Metrics::TOPBAR_TITLE_H, 36.0, "原型 .titlebar 高 36");
+        assert_eq!(Metrics::TOPBAR_TOOL_H, 48.0, "原型 .toolbar 高 48");
+        assert_eq!(Metrics::TOPBAR_H, 84.0, "两段和 = 36 + 48");
+        assert_eq!(Metrics::TOPBAR_LINE1_H, 36.0, "红绿灯带 = 标题带");
+        let button_center = Metrics::TOPBAR_TITLE_H + Metrics::TOPBAR_TOOL_H / 2.0;
+        let traffic_center = Metrics::TOPBAR_LINE1_H / 2.0;
+        assert_eq!(button_center, 60.0);
+        assert_eq!(traffic_center, 18.0);
+        assert_eq!(button_center - traffic_center, 42.0, "按钮离红绿灯 42px");
     }
 
     /// §5.1：亮色关键 token 必须与说明书表格逐项一致。
