@@ -226,7 +226,7 @@ pub fn layout(rect: Rect, info_open: bool, compare: bool) -> StageLayout {
 //
 // V1.4：工具条是**一条从左往右的流**，不再左右各锚一枚「返回」。
 // 顺序：返回 → 收藏 → 显示位置 → 比较 → 背景 → 缩放簇 → 文件名 → 信息胶囊。
-// 文件名与胶囊跟在缩放控件之后，不再被推到远右端。
+// 文件名跟在缩放控件之后；信息胶囊右对齐到顶栏最右端（用户要求）。
 //
 // 左端留白给 macOS 红绿灯：原型（`js/app.js` / `css/app.css`，1280 逻辑宽）
 // `.traffic` 占 x=16..68，返回按钮从 x=94 起，水平上不与红绿灯重叠。
@@ -319,23 +319,27 @@ pub fn zoom_readout_rect(top: Rect) -> Rect {
 
 /// 文件名槽位 + 信息胶囊的横向布局：`(文件名左边, 文件名宽, 胶囊左边)`。
 ///
-/// 文件名槽位是固定宽度，但窗口窄到放不下时会先压文件名，保证胶囊不越出
-/// 顶栏右边界（控件常驻，不允许被裁掉）。
+/// 「照片信息」胶囊右对齐到顶栏最右侧（内缩 8px），文件名槽位留在缩放簇
+/// 之后、最多 `TB_NAME_W` 宽，两者之间是弹性空白。窗口窄到放不下时先压
+/// 文件名，保证胶囊仍完整贴在右端不被裁掉（控件常驻）。
 fn top_tail(top: Rect) -> (f32, f32, f32) {
     let track = zoom_track_rect(top);
     let name_left = track.right() + TB_NAME_GAP;
-    let avail = top.right() - 8.0 - name_left - TB_CHIP_GAP - TB_CHIP_W;
+    // 胶囊锚定顶栏右端；极窄窗下至少不倒退到缩放簇左边。
+    let chip_left = (top.right() - 8.0 - TB_CHIP_W).max(track.right() + TB_NAME_GAP);
+    let avail = chip_left - TB_CHIP_GAP - name_left;
     let name_w = TB_NAME_W.min(avail.max(0.0));
-    (name_left, name_w, name_left + name_w + TB_CHIP_GAP)
+    (name_left, name_w, chip_left)
 }
 
-/// 顶栏「照片信息」开关的矩形：紧跟文件名槽位之后，不锚定右端。
+/// 顶栏「照片信息」开关的矩形：右对齐到顶栏最右侧（内缩 8px）。
 pub fn info_toggle_rect(top: Rect) -> Rect {
     let (_, _, chip_left) = top_tail(top);
     Rect::from_min_size(pos2(chip_left, top.top() + 10.0), vec2(TB_CHIP_W, 24.0))
 }
 
-/// 顶栏文件名槽位（右对齐到信息胶囊左侧 8 px）。
+/// 顶栏文件名槽位（在缩放簇之后，最多 `TB_NAME_W` 宽；信息胶囊已右对齐到
+/// 顶栏最右端，两者之间是弹性空白，窄窗时才相邻）。
 pub fn filename_slot_rect(top: Rect) -> Rect {
     let (left, w, _) = top_tail(top);
     Rect::from_min_size(pos2(left, top.top()), vec2(w, top.height()))
@@ -1101,8 +1105,8 @@ fn draw_topbar(
         *action = Some(ViewerAction::ZoomIn);
     }
 
-    // 文件名：紧跟缩放簇之后的固定槽位，右对齐；再往右才是信息胶囊。
-    // 不再被推到远右端（V1.4 原型里两者都贴着缩放控件）。
+    // 文件名：紧跟缩放簇之后的固定槽位，右对齐；信息胶囊右对齐到顶栏最右端
+    // （用户要求，不再像原型那样贴着缩放控件）。两者之间是弹性空白。
     //
     // 窄窗时槽位会被 top_tail() 压窄；这里按原型 `.vfile` 的
     // `text-overflow:ellipsis` 逐字符截断补 `…`，不再靠 clip_rect 硬切掉
@@ -3242,6 +3246,24 @@ mod tests {
         }
     }
 
+    /// 用户要求：「照片信息」胶囊锚定在查看器 topbar 最右侧（内缩 8px），
+    /// 不随窗口变宽而回到缩放控件旁。多档宽度都钉住右对齐，且始终在顶栏内。
+    #[test]
+    fn info_chip_is_pinned_to_the_right_edge_of_the_topbar() {
+        for w in [1800.0_f32, 1280.0, 900.0, 760.0] {
+            let top = Rect::from_min_size(pos2(0.0, 0.0), vec2(w, TOP_H));
+            let chip = info_toggle_rect(top);
+            assert!(
+                (top.right() - chip.right() - 8.0).abs() < 0.01,
+                "w={w} 胶囊应贴顶栏右端（内缩 8px）：chip={chip:?}"
+            );
+            assert!((chip.width() - TB_CHIP_W).abs() < 0.01, "胶囊宽度固定");
+            assert!(top.contains_rect(chip), "w={w} 胶囊越界：{chip:?}");
+            let name = filename_slot_rect(top);
+            assert!(name.right() <= chip.left(), "w={w} 文件名与胶囊重叠");
+        }
+    }
+
     /// 窄窗长文件名：顶栏按原型 `.vfile` 的 `text-overflow:ellipsis` 截断补 `…`，
     /// 不再靠 clip_rect 把右端（含扩展名）硬切掉。
     #[test]
@@ -3978,13 +4000,13 @@ mod tests {
         assert!(TB_PAD >= 94.0, "左端留白不得小于原型的 94 px");
     }
 
-    /// V1.4：工具栏是一条左→右的流：返回 → 收藏 → 显示位置 → 比较 → 背景
-    /// → 缩放簇 → 文件名 → 照片信息胶囊。
+    /// 工具栏是一条左→右的流：返回 → 收藏 → 显示位置 → 比较 → 背景
+    /// → 缩放簇 → 文件名 → 照片信息胶囊；其中信息胶囊右对齐到顶栏最右端。
     ///
-    /// 原型里文件名与信息胶囊紧贴缩放控件，**不再**锚定远右端；本测试用几何
-    /// 位置钉住顺序，同时保证所有控件都还在顶栏内、互不重叠。
+    /// 用户要求把「照片信息」放到 topbar 最右侧（与原型紧贴缩放控件不同）。
+    /// 本测试用几何位置钉住顺序、右对齐，同时保证所有控件都还在顶栏内、互不重叠。
     #[test]
-    fn topbar_flows_left_to_right_and_ends_after_the_zoom_cluster() {
+    fn topbar_flows_left_to_right_and_info_chip_is_right_aligned() {
         let lay = layout(stage_rect(), true, false);
         let top = lay.top;
         let track = zoom_track_rect(top);
@@ -3992,14 +4014,14 @@ mod tests {
         let chip = info_toggle_rect(top);
         assert!(top.contains_rect(track), "{track:?} 应在顶栏内");
         assert!(top.contains_rect(chip), "{chip:?} 应在顶栏内");
-        // 顺序：缩放簇 → 文件名 → 信息胶囊（都在缩放之后，不是两端锚定）
+        // 顺序：缩放簇 → 文件名 → 信息胶囊
         assert!(track.right() < name.left(), "文件名应在缩放簇之后");
         assert!(name.right() <= chip.left(), "胶囊应在文件名之后");
         assert!(!track.intersects(name) && !name.intersects(chip));
-        // 不再锚定远右：胶囊右端离顶栏右边界还有一大段（不是 right-200 那种）
+        // 胶囊右对齐到顶栏右端（内缩 8px）。
         assert!(
-            top.right() - chip.right() > top.width() * 0.25,
-            "胶囊不应贴近/锚定右端：chip={chip:?} top={top:?}"
+            (top.right() - chip.right() - 8.0).abs() < 0.01,
+            "胶囊应对齐顶栏右端：chip={chip:?} top={top:?}"
         );
         // 缩放簇内部顺序：适合 → 100% → − → +
         let (minus, plus) = zoom_button_rects(top);
