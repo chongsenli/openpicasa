@@ -227,7 +227,11 @@ pub fn layout(rect: Rect, info_open: bool, compare: bool) -> StageLayout {
 // V1.4：工具条是**一条从左往右的流**，不再左右各锚一枚「返回」。
 // 顺序：返回 → 收藏 → 显示位置 → 比较 → 背景 → 缩放簇 → 文件名 → 信息胶囊。
 // 文件名与胶囊跟在缩放控件之后，不再被推到远右端。
-const TB_PAD: f32 = 10.0;
+//
+// 左端留白给 macOS 红绿灯：原型（`js/app.js` / `css/app.css`，1280 逻辑宽）
+// `.traffic` 占 x=16..68，返回按钮从 x=94 起，水平上不与红绿灯重叠。
+// 旧值 10 让返回胶囊从 x=10 起，正好压在红绿灯上（用户实测反馈）。
+const TB_PAD: f32 = 94.0;
 const TB_BACK_W: f32 = 72.0;
 const TB_BACK_GAP: f32 = 14.0;
 const TB_HEART_W: f32 = 28.0;
@@ -3253,8 +3257,14 @@ mod tests {
         );
         let mut v = Viewer::new(0);
         let (_, texts) = run_stage_in(&mut v, &[row], Appearance::Light, rect);
-        let shown = texts.iter().find(|t| t.contains("a-very-long"));
-        let shown = shown.expect("顶栏应画出文件名").as_str();
+        // 顶栏槽位被压到 ~42 px，画的是最短的那条省略文本；
+        // 信息栏里还会画几条更长的截断文本，取最短的才是顶栏那条。
+        let shown = texts
+            .iter()
+            .filter(|t| t.contains('…') && t.starts_with("a-ver"))
+            .min_by_key(|t| t.len())
+            .expect("顶栏应画出省略的文件名")
+            .as_str();
         assert!(shown.ends_with('…'), "截断应补省略号：{shown}");
         assert!(shown.len() < long.len(), "长名应被截短：{shown}");
         assert!(!shown.contains(".jpg"), "被吞掉的尾部不应残留半截：{shown}");
@@ -3927,6 +3937,45 @@ mod tests {
         assert!(!back.intersects(info));
         let (minus, plus) = zoom_button_rects(lay.top);
         assert!(!back.intersects(minus) && !back.intersects(plus));
+    }
+
+    /// 查看器顶栏左端必须给 macOS 红绿灯留出水平空间（用户实测反馈：
+    /// 返回胶囊压在系统关闭/最小化/最大化按钮上）。
+    ///
+    /// 原型 v1.4（Playwright 实测 1280 逻辑宽 `.traffic` 占 x=16..68，
+    /// `[data-act="back"]` 从 x=94 起）——红绿灯最右 68，返回最左 94，
+    /// 中间还留 26 px。这里钉住「返回左端 ≥ 红绿灯右端」这个不重叠关系，
+    /// 并且不把它跟首页的标题带常量混在一起。
+    #[test]
+    fn viewer_back_pill_clears_the_macos_traffic_lights() {
+        // 红绿灯：eframe 0.37 默认 left_margin=14，三颗按钮原生宽约 56，
+        // 连间距占 x≈14..70；原型首枚按钮 x=94。
+        const TRAFFIC_RIGHT: f32 = 70.0;
+        let lay = layout(stage_rect(), true, false);
+        let back = Rect::from_min_size(
+            pos2(lay.top.left() + TB_PAD, lay.top.top() + 10.0),
+            vec2(TB_BACK_W, 24.0),
+        );
+        assert!(
+            back.left() >= TRAFFIC_RIGHT,
+            "返回按钮应避开红绿灯（TB_PAD={TB_PAD}，原型 back.x=94）：back.left={}",
+            back.left()
+        );
+        // 下一枚控件（收藏）必须从返回右侧继续，不能倒退回红绿灯区。
+        let heart = Rect::from_center_size(
+            pos2(
+                back.right() + TB_BACK_GAP + TB_HEART_W / 2.0,
+                lay.top.center().y,
+            ),
+            vec2(TB_HEART_W, 24.0),
+        );
+        assert!(
+            heart.left() >= back.right() && heart.left() > TRAFFIC_RIGHT,
+            "收藏应从返回右侧继续：back.right={}, heart.left={}",
+            back.right(),
+            heart.left()
+        );
+        assert!(TB_PAD >= 94.0, "左端留白不得小于原型的 94 px");
     }
 
     /// V1.4：工具栏是一条左→右的流：返回 → 收藏 → 显示位置 → 比较 → 背景
