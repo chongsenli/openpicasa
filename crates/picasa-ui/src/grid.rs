@@ -1423,10 +1423,14 @@ pub fn show(
                         // masonry 的格子比例就是图片比例：直接填满，消除 contain
                         // 舍入造成的 1px 白边；方格仍用 contain（图片格收紧后在格里居中，
                         // 上留白已是 cell 的 3/32，不再需要此前那步下移微调）。
-                        let fitted = if mode == ViewMode::Grid {
-                            fit_rect(img_rect, tex_size)
+                        // 原型 `.cell img` 是 `object-fit: cover`：图片**裁切填满**
+                        // 方格（144×144），没有上下留白。应用原先用 contain 居中，
+                        // 横图上下各留一条白，正是用户反复抱怨的「上方留白」。
+                        let uv_full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                        let (fitted, uv) = if mode == ViewMode::Grid {
+                            (img_rect, crate::viewer::cover_uv(img_rect, tex_size))
                         } else {
-                            img_rect
+                            (img_rect, uv_full)
                         };
                         frame = fitted;
                         // 悬停放大：只放大贴图矩形与圆角，不动 `frame`，
@@ -1443,12 +1447,7 @@ pub fn show(
                         // M4.2 `M42-UI-02`：与微缩图集档共用 [`rounded_image_shape`]，
                         // 让「圆角」成为单一结构性不变量，任一路都回退不了直角。
                         painter.add(theme.thumb_shadow.as_shape(draw_rect, draw_radius));
-                        painter.add(rounded_image_shape_r(
-                            draw_rect,
-                            tex_id,
-                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                            draw_radius,
-                        ));
+                        painter.add(rounded_image_shape_r(draw_rect, tex_id, uv, draw_radius));
                     }
                     TexState::Pending => {
                         index_progress::draw_placeholder(&painter, rect, theme, false);
@@ -2246,15 +2245,6 @@ pub fn paint_corner_notches(painter: &egui::Painter, rect: Rect, radius: f32, co
     }
 }
 
-fn fit_rect(outer: Rect, tex: Vec2) -> Rect {
-    if tex.x <= 0.0 || tex.y <= 0.0 {
-        return outer;
-    }
-    let scale = (outer.width() / tex.x).min(outer.height() / tex.y);
-    let size = vec2(tex.x * scale, tex.y * scale);
-    Rect::from_center_size(outer.center(), size)
-}
-
 pub fn ellipsize(s: &str, max_chars: usize) -> String {
     let count = s.chars().count();
     if count <= max_chars {
@@ -2319,6 +2309,22 @@ pub fn separator_v(painter: &egui::Painter, x: f32, top: f32, bottom: f32, theme
 /// 小工具：画一个「禁用态」的图标（灰）。
 pub fn draw_icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32) {
     icons::draw(painter, icon, rect, color, 1.4);
+}
+
+#[cfg(test)]
+mod prototype_spec_tests {
+    use super::*;
+
+    /// 原型（`css/app.css`）：`.content{padding:10px 20px 16px}` + `.grid{padding:4px;gap:12px}`。
+    /// 卡片内文字左缘 = content 20 + grid 4 = **24**，也就是 `GRID_PAD`。
+    #[test]
+    fn grid_padding_and_gap_match_the_prototype() {
+        assert_eq!(Metrics::GRID_PAD, 24.0, "原型 content 20 + grid 4");
+        assert_eq!(Metrics::CELL_GAP, 12.0, "原型 .grid gap 12");
+        assert_eq!(Metrics::CELL_GAP_Y, 12.0, "原型 gap 双向同值");
+        // 原型 1280 宽下 cell 144，一屏 6 列
+        assert_eq!(Metrics::CELL_SIZES[1], 144.0, "原型 --thumb-size:144px");
+    }
 }
 
 #[cfg(test)]
@@ -2426,47 +2432,32 @@ mod tests {
     }
 
     #[test]
-    fn grid_slot_tightening_cuts_top_blank_by_two_thirds() {
-        let cell = 192.0_f32; // 用户库 grid_cell_px=192
-        let ratio = Metrics::THUMB_SLOT_RATIO;
-        assert!((ratio - 13.0 / 16.0).abs() < 1e-6, "图片格高比例应是 13/16");
-        let img_h = cell * ratio; // 156
+    fn grid_slot_is_the_full_cell_and_thumbs_are_cover_cropped() {
+        // 原型 `.cell img{width:100%;height:144px;object-fit:cover}`：图片格就是
+        // 整个 144×144 方格，图片裁切填满，**没有上下留白**。
+        // 应用曾用 contain（横图上下各留一条白）并多次收紧格高折中；
+        // 2026-11-26 按原型 1:1 还原改为 cover + 满格。
+        assert_eq!(Metrics::THUMB_SLOT_RATIO, 1.0, "图片格高 = 格宽");
 
-        // 主流 8:5 横图 contain 进 cell×cell 的画高 = 5/8·cell = 120。
-        let fitted_h = cell * 5.0 / 8.0;
-        // 旧布局：居中上下各 (cell-fitted)/2，再下移 1/4·(cell-fitted)，
-        // 上留白 = 3/4·(cell-fitted) = 54。
-        let old_top_blank = (cell - fitted_h) / 2.0 + (cell - fitted_h) / 4.0;
-        // 新布局：收紧格高后纯居中，上留白 = (img_h-fitted)/2 = 18。
-        let new_top_blank = (img_h - fitted_h) / 2.0;
+        let cell = 192.0_f32;
+        let img_h = cell * Metrics::THUMB_SLOT_RATIO;
+        assert_eq!(img_h, cell);
+
+        // cover：贴图矩形就是格子本身，裁切交给 UV，不再有留白。
+        let rect = Rect::from_min_size(pos2(10.0, 20.0), vec2(cell, img_h));
+        assert_eq!(rect.height(), cell);
+        // 8:5 横图进正方形格：UV 左右被裁、上下取满。
+        let uv = crate::viewer::cover_uv(rect, vec2(8.0, 5.0));
+        assert!((uv.height() - 1.0).abs() < 1e-6, "横图上下不裁：{uv:?}");
+        assert!(uv.width() < 1.0, "横图左右要裁：{uv:?}");
         assert!(
-            (old_top_blank - 54.0).abs() < 0.01,
-            "旧上留白应 54：{old_top_blank}"
-        );
-        assert!(
-            (new_top_blank - 18.0).abs() < 0.01,
-            "新上留白应 18：{new_top_blank}"
-        );
-        assert!(
-            (new_top_blank / old_top_blank - 1.0 / 3.0).abs() < 0.01,
-            "上留白应减至 1/3（减三分之二）"
+            (uv.center().x - 0.5).abs() < 1e-6,
+            "裁切必须居中，否则照片会偏：{uv:?}"
         );
 
-        // 图名间距（图底→文件名）：旧 = (cell-fitted)/4 = 18，新 = (img_h-fitted)/2 = 18，不变。
-        let old_name_gap = (cell - fitted_h) / 4.0;
-        let new_name_gap = (img_h - fitted_h) / 2.0;
-        assert!(
-            (new_name_gap - old_name_gap).abs() < 0.01,
-            "图名间距应保持不变：{new_name_gap} vs {old_name_gap}"
-        );
-
-        // 行距变小（格子收紧、图片与文件名一起上移）。
-        let old_pitch = cell + Metrics::FILENAME_H + Metrics::CELL_GAP_Y;
-        let new_pitch = img_h + Metrics::FILENAME_H + Metrics::CELL_GAP_Y;
-        assert!(
-            new_pitch < old_pitch,
-            "新行距 {new_pitch} 应小于旧 {old_pitch}"
-        );
+        // 行距 = 格高 + 文件名行 + 行间距（文件名行保留，原型图纸里它被裁掉了）。
+        let pitch = img_h + Metrics::FILENAME_H + Metrics::CELL_GAP_Y;
+        assert!((pitch - (192.0 + 9.0 + 12.0)).abs() < 0.01, "行距 {pitch}");
     }
 
     /// 门禁：GridLayout 的图片格高、行推进都走收紧后的 img_slot_h / cell_h，
@@ -3401,10 +3392,11 @@ mod tests {
     /// 用户 2026-11-24：方格视图「图片和图片之间的高度缩减一半」——
     /// 竖直行间距用 CELL_GAP_Y（= CELL_GAP/2），水平列间距仍是 CELL_GAP 不变。
     #[test]
-    fn vertical_gap_is_half_of_horizontal_gap() {
-        assert_eq!(Metrics::CELL_GAP_Y, Metrics::CELL_GAP / 2.0);
-        assert_eq!(Metrics::CELL_GAP, 16.0, "水平列间距保持 M3.2 定稿");
-        assert_eq!(Metrics::CELL_GAP_Y, 8.0, "竖直行间距减半");
+    fn grid_gap_matches_the_prototype_twelve_pixels_both_ways() {
+        // 原型 `css/app.css` 的 `.grid{gap:12px}` 是**双向** 12。
+        // 应用曾把竖直行间距减半（16/8），2026-11-26 按原型 1:1 还原改回 12/12。
+        assert_eq!(Metrics::CELL_GAP, 12.0, "原型 .grid gap 12px");
+        assert_eq!(Metrics::CELL_GAP_Y, Metrics::CELL_GAP, "竖直与水平同值");
 
         let photos = same_day(40);
         // 关掉文件名行，让 cell_h == img_slot_h，纯量格间留白（否则会掺进 FILENAME_H）
@@ -3423,15 +3415,8 @@ mod tests {
         let r2 = layout.thumb_rect(layout.cols).unwrap();
         let gap_x = r1.left() - r0.right();
         let gap_y = r2.top() - r0.bottom();
-        assert!(
-            (gap_x - Metrics::CELL_GAP).abs() < 0.01,
-            "水平间距不变：{gap_x}"
-        );
-        assert!(
-            (gap_y - Metrics::CELL_GAP_Y).abs() < 0.01,
-            "竖直间距减半：{gap_y}"
-        );
-        assert!(gap_y < gap_x, "竖直比水平更紧凑");
+        assert!((gap_x - 12.0).abs() < 0.01, "水平间距 12：{gap_x}");
+        assert!((gap_y - 12.0).abs() < 0.01, "竖直间距 12：{gap_y}");
     }
 
     /// `M41-UI-02`：三种布局的 cell_h / 文件名占位都用同一个 FILENAME_H，

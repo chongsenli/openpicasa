@@ -3154,11 +3154,13 @@ impl OpenPicasaApp {
                     // 用户 2026-11-25：白色内容井的四角「展示不全、被遮挡」——
                     // 顶部内边距原为 0，圆角上半段被顶栏压掉；改成与底部同值的 8，
                     // 四角圆角完整露出。
+                    // 1:1 对齐原型：`div.main` 左侧留 5（原型有 5px 的 side-resizer）
+                    // 再从 main 内缩 4 → 卡片 x = 228+5+4 = 237；右侧 12 → 右缘 1268。
                     .inner_margin(egui::Margin {
-                        left: 10,
+                        left: 9,
                         right: 12,
                         top: 8,
-                        bottom: 8,
+                        bottom: 12,
                     }),
             )
             .show(ui, |ui| {

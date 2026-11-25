@@ -376,18 +376,19 @@ fn group_header(
     let plus = Rect::from_center_size(pos2(rect.right() - 14.0, rect.center().y), vec2(11.0, 11.0));
     icons::draw(&painter, Icon::Plus, plus, color, 1.2);
     // IDX-22 ④⑥：标签组头在「＋」左侧再来一枚「⋯」，点开是排序 / 显示空标签。
-    let menu_btn = Rect::from_center_size(
-        pos2(rect.right() - 32.0, rect.center().y),
-        vec2(11.0, 11.0),
-    );
+    let menu_btn =
+        Rect::from_center_size(pos2(rect.right() - 32.0, rect.center().y), vec2(11.0, 11.0));
     if is_tag {
         icons::draw(&painter, Icon::Ellipsis, menu_btn, color, 1.2);
     }
     // IDX-22 ④⑥：「⋯」是独立的热区（`ui.interact`），否则点它会连带触发展开
     // 折叠——`resp` 覆盖整行，两个 Sense::click 会同时命中。
     if is_tag {
-        let menu_resp =
-            ui.interact(menu_btn, ui.scope_id().with("tag-group-menu"), Sense::click());
+        let menu_resp = ui.interact(
+            menu_btn,
+            ui.scope_id().with("tag-group-menu"),
+            Sense::click(),
+        );
         menu_resp.clone().on_hover_text("标签排序 / 显示空标签");
         egui::Popup::menu(&menu_resp).show(|ui| {
             ui.set_min_width(120.0);
@@ -398,10 +399,7 @@ fn group_header(
                 }
             }
             ui.separator();
-            if ui
-                .selectable_label(show_zero_tags, "显示空标签")
-                .clicked()
-            {
+            if ui.selectable_label(show_zero_tags, "显示空标签").clicked() {
                 actions.push(SidebarAction::ToggleShowZeroTags);
             }
         });
@@ -494,7 +492,7 @@ fn rows(
         let max_chars = ((avail / per_char).floor() as usize).max(1);
         let shown = picasa_core::truncate_label(&name, max_chars);
         p.text(
-            pos2(r.left() + 28.0, r.center().y),
+            pos2(r.left() + 33.0, r.center().y),
             Align2::LEFT_CENTER,
             &shown,
             FontId::new(12.5, egui::FontFamily::Proportional),
@@ -512,7 +510,7 @@ fn rows(
         let count_right = if in_view_count.is_some() {
             r.right() - 44.0
         } else {
-            r.right() - 14.0
+            r.right() - 10.0
         };
         p.text(
             pos2(count_right, r.center().y),
@@ -523,7 +521,7 @@ fn rows(
         );
         if let Some(n) = in_view_count {
             p.text(
-                pos2(r.right() - 14.0, r.center().y),
+                pos2(r.right() - 10.0, r.center().y),
                 Align2::RIGHT_CENTER,
                 format!("·{n}"),
                 FontId::new(10.5, egui::FontFamily::Proportional),
@@ -858,7 +856,10 @@ fn fav_row(
             pos2(rect.right() - 16.0, rect.center().y),
             Align2::RIGHT_CENTER,
             n.to_string(),
-            FontId::new(sidebar_count_font_size(theme), egui::FontFamily::Proportional),
+            FontId::new(
+                sidebar_count_font_size(theme),
+                egui::FontFamily::Proportional,
+            ),
             theme.sidebar_section_text,
         );
     }
@@ -889,14 +890,27 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
         View::Folder(id) => Some(id),
         _ => None,
     };
-    render_tree_rows(ui, rows, active, &MarkSet::default(), ctx, actions, "folder-tree");
+    render_tree_rows(
+        ui,
+        rows,
+        active,
+        &MarkSet::default(),
+        ctx,
+        actions,
+        "folder-tree",
+    );
 }
 
 /// 「导入的索引」分组：每个导入来源一个节点，节点下是其还原的文件夹树。
 ///
 /// 与「文件夹」组是两条独立入口：本机根不在此出现（IDX-21 ⑦），
 /// 导入根也不在「文件夹」里出现，同一棵树不会显示两次。
-fn imported_index(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut Vec<SidebarAction>) {
+fn imported_index(
+    ui: &mut Ui,
+    lib: &Library,
+    ctx: &SidebarCtx<'_>,
+    actions: &mut Vec<SidebarAction>,
+) {
     let t = *ctx.theme;
     let row_h = Metrics::SIDEBAR_ROW_H;
     let active = match lib.view {
@@ -1113,7 +1127,11 @@ fn render_tree_rows(
                     );
                     icons::draw(
                         &painter,
-                        if marks.offline { Icon::Close } else { Icon::Import },
+                        if marks.offline {
+                            Icon::Close
+                        } else {
+                            Icon::Import
+                        },
                         badge,
                         if marks.offline {
                             t.text_secondary.gamma_multiply(0.7)
@@ -1370,7 +1388,38 @@ mod m5_font_tests {
         assert_eq!(sidebar_count_font_size(&dark), 10.5);
         // 两套主题都要有差异，别又合成同一个值。
         assert_ne!(sidebar_row_font_size(&light), sidebar_row_font_size(&dark));
-        assert_ne!(sidebar_count_font_size(&light), sidebar_count_font_size(&dark));
+        assert_ne!(
+            sidebar_count_font_size(&light),
+            sidebar_count_font_size(&dark)
+        );
+    }
+}
+
+#[cfg(test)]
+mod prototype_spec_tests {
+    use super::*;
+
+    /// 原型（`docs/m5/prototype/v1.4`，1280×820 实测）：
+    /// `aside.side` 宽 **228**、`a.row` 高 **30**、`div.sec` 高 **27.19**。
+    #[test]
+    fn sidebar_metrics_match_the_prototype() {
+        assert_eq!(Metrics::SIDEBAR_DEFAULT_W, 228.0, "原型 aside.side 宽 228");
+        assert_eq!(Metrics::SIDEBAR_ROW_H, 30.0, "原型 a.row 高 30");
+        assert_eq!(Metrics::SIDEBAR_SECTION_H, 27.0, "原型 div.sec 高 27.19");
+        // 行高必须大于组头，否则行看起来比标题还扁
+        assert!(Metrics::SIDEBAR_ROW_H > Metrics::SIDEBAR_SECTION_H);
+    }
+
+    /// 原型行内几何：行 x12 w204，图标 x22（行左 +10），名字 x45（图标左 +23），
+    /// 计数右缘 x206（行右 216 −10）。名称与计数都不许贴边。
+    #[test]
+    fn sidebar_row_text_and_count_use_the_prototype_insets() {
+        const SRC: &str = include_str!("sidebar.rs");
+        assert!(
+            SRC.contains("pos2(r.left() + 33.0, r.center().y)"),
+            "行名左边距按原型 33（行左 +10 内边距 +23 图标位）"
+        );
+        assert!(SRC.contains("r.right() - 10.0"), "计数右缘按原型距行右 10");
     }
 }
 

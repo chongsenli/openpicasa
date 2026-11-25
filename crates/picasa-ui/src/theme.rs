@@ -494,26 +494,26 @@ impl Metrics {
     pub const TOPBAR_ICON_D: f32 = 38.0;
     /// 左栏默认宽度。M5-R3 视觉参考 228（亮）/ 216（暗）；**宽度偏好逻辑不变**，
     /// 这里保持既有默认 216，不借主题改用户拖出来的宽度。
-    pub const SIDEBAR_DEFAULT_W: f32 = 216.0;
-    pub const SIDEBAR_ROW_H: f32 = 28.0;
+    pub const SIDEBAR_DEFAULT_W: f32 = 228.0;
+    pub const SIDEBAR_ROW_H: f32 = 30.0;
     pub const SIDEBAR_INDENT: f32 = 14.0;
-    pub const SIDEBAR_SECTION_H: f32 = 26.0;
+    pub const SIDEBAR_SECTION_H: f32 = 27.0;
     pub const SIDEBAR_HEADER_H: f32 = 58.0;
     pub const SEG_H: f32 = 36.0;
     pub const ZOOM_PILL_H: f32 = 32.0;
-    pub const CELL_GAP: f32 = 16.0;
+    pub const CELL_GAP: f32 = 12.0;
     /// 方格缩略图「图片格」高度相对格宽的比例（用户 2026-11-24「每个图片上方的留白减三分之二」）。
     ///
     /// 派生：8:5 横图 contain 进 `cell×cell` 的画高 = 5/8·cell；旧布局再下移半个留白，
     /// 上留白 = 3/4·(cell−5/8·cell) = 9/32·cell。把图片格收紧到 13/16·cell 并回到居中，
     /// 上留白 = (13/16−5/8)/2·cell = 3/32·cell，正好是旧值的 1/3（减三分之二）；
     /// 图片底到文件名的间距仍是 3/32·cell，保持不变；行距同步变小。
-    pub const THUMB_SLOT_RATIO: f32 = 13.0 / 16.0;
+    pub const THUMB_SLOT_RATIO: f32 = 1.0;
     /// 方格视图的竖直行间距：水平列间距 CELL_GAP 的一半。
     /// 用户 2026-11-24 要求「图片和图片之间的高度缩减一半」，只压竖直方向，
     /// 水平列间距保持 M3.2 定稿的 16px 不变。
-    pub const CELL_GAP_Y: f32 = Self::CELL_GAP / 2.0;
-    pub const GRID_PAD: f32 = 32.0;
+    pub const CELL_GAP_Y: f32 = Self::CELL_GAP;
+    pub const GRID_PAD: f32 = 24.0;
     pub const GROUP_HEADER_H: f32 = 30.0;
     pub const FILENAME_H: f32 = 9.0;
     pub const FILENAME_GAP: f32 = 0.5;
