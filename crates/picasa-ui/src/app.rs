@@ -2835,6 +2835,10 @@ impl OpenPicasaApp {
         // ① 顶部工具栏（M3.1：macOS「照片」风格单行顶栏）
         egui::Panel::top("toolbar-panel")
             .exact_size(Metrics::TOPBAR_H)
+            // 用户 2026-11-25：取消顶栏与侧栏的灰色边框。egui 的 Panel 默认会画一条
+            // 分隔线（`show_separator_line`），那条线就是「顶栏/侧栏有个灰边」的来源；
+            // 明度差（窗底色 vs 白井）+ 卡片圆角已经足够分界。
+            .show_separator_line(false)
             .frame(egui::Frame::new().fill(theme.toolbar_bg))
             .show(ui, |ui| {
                 // `M5-SF-03`：面板里任一维度在收窄结果，按钮就要有激活描边。
@@ -3073,6 +3077,7 @@ impl OpenPicasaApp {
         //（`show_collapsible` 会留抓握条，这里直接不建面板更干净）。
         let sidebar_resp = self.sidebar_visible.then(|| {
             egui::Panel::left("sidebar-panel")
+                .show_separator_line(false)
                 .default_size(if self.lib.prefs.sidebar_width < Metrics::SIDEBAR_MIN {
                     Metrics::SIDEBAR_DEFAULT_W
                 } else {
@@ -3146,10 +3151,13 @@ impl OpenPicasaApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme.chrome_bg)
+                    // 用户 2026-11-25：白色内容井的四角「展示不全、被遮挡」——
+                    // 顶部内边距原为 0，圆角上半段被顶栏压掉；改成与底部同值的 8，
+                    // 四角圆角完整露出。
                     .inner_margin(egui::Margin {
                         left: 10,
                         right: 12,
-                        top: 0,
+                        top: 8,
                         bottom: 8,
                     }),
             )
@@ -5542,6 +5550,43 @@ mod m5_date_span_tests {
         assert_eq!(photo_date_span(&[bad]), None);
         let rows = [row(0), row(local(2020, 1, 2, 9))];
         assert_eq!(photo_date_span(&rows).as_deref(), Some("2020-01-02"));
+    }
+}
+
+#[cfg(test)]
+mod m5_chrome_tests {
+    /// 用户 2026-11-25：顶栏 / 侧栏不要灰色边框，白色内容井的四角要完整露出。
+    ///
+    /// 这四条都是「一次调用 / 一个数字」，行为测不出来（分隔线由 egui 的
+    /// `Panel` 内部绘制），只能锁源码。
+    #[test]
+    fn chrome_has_no_separator_lines_and_the_well_keeps_top_margin() {
+        let src = include_str!("app.rs");
+        // 目检串拆开拼，否则本测试自身的字面量也会被数进去。
+        // 拆成两段再拼：本测试自身的源码里就不会出现完整目检串，计数才准。
+        let needle = [".show_separator_line(", "false)"].concat();
+        assert_eq!(
+            src.matches(&needle).count(),
+            2,
+            "顶部与侧栏两个 Panel 都要关掉 egui 自带的分隔线"
+        );
+        // 内容井的外边距：左右 10/12，上下都是 8（顶部原为 0，圆角被顶栏压掉）。
+        assert!(
+            src.contains("top: 8,") && src.contains("bottom: 8,"),
+            "内容井上下都要留 8，四角圆角才完整"
+        );
+        // 顶栏底边的发丝线必须已经删除（那条线横穿卡片顶部两个圆角）。
+        let topbar = include_str!("topbar.rs");
+        assert!(
+            !topbar.contains("theme.toolbar_border"),
+            "顶栏不该再画底边灰线"
+        );
+        // 侧栏托盘外框不再描边。
+        let sidebar = include_str!("sidebar.rs");
+        assert!(
+            !sidebar.contains("theme.toolbar_border"),
+            "侧栏托盘不该再有灰色外框"
+        );
     }
 }
 

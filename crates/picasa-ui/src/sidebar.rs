@@ -212,11 +212,8 @@ pub fn show(
         } else {
             Metrics::TRAY_COLLAPSED_H
         })
-        .frame(
-            egui::Frame::new()
-                .fill(theme.sidebar_bg)
-                .stroke(Stroke::new(1.0, theme.toolbar_border)),
-        )
+        // 用户 2026-11-25：取消托盘外框的灰色描边（侧栏背景与窗底同色，不需要框）。
+        .frame(egui::Frame::new().fill(theme.sidebar_bg))
         .show(ui, |ui| {
             tray(ui, lib, &mut *ctx, &mut actions);
         });

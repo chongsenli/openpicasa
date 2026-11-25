@@ -1061,12 +1061,17 @@ pub fn show(
             theme.grid_bg,
         );
     }
-    ui.painter().rect_stroke(
-        full,
-        theme.radius_card,
-        Stroke::new(1.0, theme.hairline),
-        StrokeKind::Inside,
-    );
+    // 用户 2026-11-25：亮色取消内容井外圈的发丝描边——白井落在 245 灰窗体上，
+    // 再压一圈 190 灰的线反而让四个圆角看起来「脏、被切过」；暗色仍保留，
+    // 因为那里 `#1c1c1c` 卡片与 `#151515` 窗体只差一档，需要一条边定位。
+    if theme.dark {
+        ui.painter().rect_stroke(
+            full,
+            theme.radius_card,
+            Stroke::new(1.0, theme.hairline),
+            StrokeKind::Inside,
+        );
+    }
 
     // ---- M4.1 `M41-UI-09/10`：框选拖拽状态（egui IdTypeMap 跨帧）----
     // 起手在照片上或留白均可；移动 < DRAG_THRESHOLD 仍按普通单击处理。

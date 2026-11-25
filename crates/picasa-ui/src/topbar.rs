@@ -237,14 +237,10 @@ pub fn show(
     // 查看器不经过这里，按原型 .appname{display:none} 不画；其余平台保留原生标题。
     #[cfg(target_os = "macos")]
     draw_app_name(&painter, rect, theme);
-    // 底边发丝线（半透明，压在内容上不抢眼）
-    painter.line_segment(
-        [
-            pos2(rect.left(), rect.bottom() - 0.5),
-            pos2(rect.right(), rect.bottom() - 0.5),
-        ],
-        egui::Stroke::new(1.0, theme.toolbar_border),
-    );
+    // 用户 2026-11-25：取消顶栏底边的灰色发丝线。
+    // 顶栏与内容井之间已经由「窗底色 vs 白井」的明度差分开，再加一道线显得脏；
+    // 原型 `.toolbar` 虽然有 `border-bottom`，但产品里内容井是浮起的圆角卡片，
+    // 那道线会横穿卡片顶部两个圆角，是「圆角被遮挡」观感的主要来源。
 
     // 单行顶栏：左段图标 · 中段（路径 + 张数/拍摄时间）· 右簇（排布/搜索/排序/筛选/…）。
     // macOS 红绿灯嵌在这一行的左端，所以左段起点让出 `traffic_w`。
