@@ -1652,6 +1652,12 @@ pub fn show(
         }
     });
 
+    // 用户 2026-11-25：右侧两个圆角被滚动条压住。滚动条由 `ScrollArea` 画在内容之上、
+    // 并且横跨整个视口高度，所以它一定会盖住卡片右上/右下那两段圆弧。这里在滚动区
+    // 结束之后把四个「圆角缺口」（弧线之外、卡片矩形之内的一小块）用窗体底色补回去：
+    // 滚动条与照片都会被这道遮罩按弧线裁掉，圆角就完整露出来了。
+    paint_corner_notches(ui.painter(), full, theme.radius_card, theme.chrome_bg);
+
     // M4.2 `M42-PERF-00`：本帧贴图上传数 = 预算初值 − 剩余预算。图集档走
     // `tick_atlas` 单独上传（不消耗这里的每帧 3 张预算），故图集档记为 0，
     // 诊断页的「≤3」语义针对的是正常纹理档。纯统计，不改绘制/上传调度。
@@ -2083,6 +2089,52 @@ fn draw_empty_state(
 }
 
 /// 等比放进正方形（U-25：长边贴合，短边留白，不裁切不拉伸）。
+/// 圆角缺口的顶点：`center` 是圆角圆心，`sx`/`sy` 取 ±1 指向卡片外侧。
+///
+/// 缺口 = 「卡片矩形角点」+「四分之一圆弧」围成的那一小块。用来在内容（照片、
+/// 滚动条）画完之后把它盖回窗体底色，让圆角按弧线裁切。
+pub fn corner_notch_points(center: egui::Pos2, radius: f32, sx: f32, sy: f32) -> Vec<egui::Pos2> {
+    let r = radius.max(0.0);
+    let corner = pos2(center.x + sx * r, center.y + sy * r);
+    let mut pts = Vec::with_capacity(11);
+    pts.push(corner);
+    let steps = 8;
+    for i in 0..=steps {
+        let t = std::f32::consts::FRAC_PI_2 * (i as f32 / steps as f32);
+        pts.push(pos2(
+            center.x + sx * r * t.cos(),
+            center.y + sy * r * t.sin(),
+        ));
+    }
+    pts
+}
+
+/// 把四个圆角缺口补回窗体底色（见 [`corner_notch_points`]）。
+pub fn paint_corner_notches(painter: &egui::Painter, rect: Rect, radius: f32, color: Color32) {
+    let r = radius
+        .max(0.0)
+        .min(rect.width() / 2.0)
+        .min(rect.height() / 2.0);
+    if r <= 0.5 {
+        return;
+    }
+    let centers = [
+        (pos2(rect.left() + r, rect.top() + r), -1.0, -1.0),
+        (pos2(rect.right() - r, rect.top() + r), 1.0, -1.0),
+        (pos2(rect.left() + r, rect.bottom() - r), -1.0, 1.0),
+        (pos2(rect.right() - r, rect.bottom() - r), 1.0, 1.0),
+    ];
+    for (center, sx, sy) in centers {
+        let pts = corner_notch_points(center, r, sx, sy);
+        painter.add(egui::Shape::Path(egui::epaint::PathShape {
+            points: pts,
+            closed: true,
+            fill: color,
+            stroke: egui::epaint::PathStroke::NONE,
+        }));
+    }
+}
+
 fn fit_rect(outer: Rect, tex: Vec2) -> Rect {
     if tex.x <= 0.0 || tex.y <= 0.0 {
         return outer;
@@ -2166,6 +2218,34 @@ mod tests {
     /// 用户 2026-11-24「每个图片上方的留白减少三分之二」：收紧方格的图片格高度
     /// （不是挪动格内图片），图片与文件名一起上移。钉三件事：
     /// 上留白 = 旧的 1/3；图名间距不变；行距变小。
+    /// 用户 2026-11-25：右侧两个圆角被滚动条压住。
+    ///
+    /// 缺口遮罩的几何必须对得上：角点就是卡片矩形的角，圆弧上的点都在半径上，
+    /// 「弧外那一小块」在遮罩里、卡片内部不在。
+    #[test]
+    fn corner_notch_covers_the_area_outside_the_arc() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        let r = 26.0;
+        let center = pos2(r, r);
+        let pts = corner_notch_points(center, r, -1.0, -1.0);
+        assert_eq!(pts.len(), 10, "角点 + 8 段圆弧 + 收尾共 10 点");
+        assert!((pts[0].x - 0.0).abs() < 0.01 && (pts[0].y - 0.0).abs() < 0.01);
+        for p in &pts[1..] {
+            let d = (*p - center).length();
+            assert!((d - r).abs() < 0.5, "圆弧点必须落在半径 {r} 上，实测 {d}");
+        }
+        // 弧外的角：在缺口里（距圆心比半径远）；卡片内部：不在缺口里。
+        let notch_pt = pos2(2.0, 2.0);
+        let inner_pt = pos2(20.0, 20.0);
+        assert!((notch_pt - center).length() > r);
+        assert!((inner_pt - center).length() < r);
+        // 四个角都画，且半径退化（0）时什么都不画（不 panic）。
+        let ctx = egui::Context::default();
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        paint_corner_notches(&painter, rect, r, Color32::WHITE);
+        paint_corner_notches(&painter, rect, 0.0, Color32::WHITE);
+    }
+
     #[test]
     fn grid_slot_tightening_cuts_top_blank_by_two_thirds() {
         let cell = 192.0_f32; // 用户库 grid_cell_px=192

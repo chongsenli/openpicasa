@@ -1712,7 +1712,7 @@ fn draw_info_panel(
     );
     let bar = Rect::from_min_size(pos2(left, hist_top + 18.0), vec2(inner_w, 52.0));
     if let Some(hist) = &viewer.histogram {
-        draw_histogram(painter, bar, hist, theme);
+        draw_histogram(painter, bar, hist);
     } else {
         painter.text(
             pos2(left, hist_top + 20.0),
@@ -2649,14 +2649,10 @@ fn join_opt(a: &Option<String>, b: &Option<String>) -> Option<String> {
 }
 
 /// 画 RGB 直方图：三条半透明折线叠在半透明底上。
-fn draw_histogram(
-    painter: &egui::Painter,
-    bar: Rect,
-    hist: &picasa_imaging::Histogram,
-    theme: &Theme,
-) {
-    painter.rect_filled(bar, 2.0, theme.chip_bg);
-
+fn draw_histogram(painter: &egui::Painter, bar: Rect, hist: &picasa_imaging::Histogram) {
+    // 用户 2026-11-25：去掉直方图底下的灰框（原来的 chip 底色 + 1px 描边）。
+    // 原型 `.histo` 只有一排彩色柱，没有底板也没有边框（css/v13.css:157-161），
+    // 之前那圈灰框在卡片底部看着像多出来一个盒子。
     let channels: [(&[f32; 256], Color32); 3] = [
         (&hist.r, Color32::from_rgba_unmultiplied(255, 80, 80, 150)),
         (&hist.g, Color32::from_rgba_unmultiplied(80, 230, 110, 150)),
@@ -2684,12 +2680,6 @@ fn draw_histogram(
         }
         painter.add(egui::Shape::Mesh(std::sync::Arc::new(mesh)));
     }
-    painter.rect_stroke(
-        bar,
-        2.0,
-        Stroke::new(1.0, theme.separator),
-        egui::StrokeKind::Inside,
-    );
 }
 
 #[cfg(test)]
@@ -2829,6 +2819,27 @@ mod tests {
     // ---- AC-VW-STAGE --------------------------------------------------------
 
     /// 默认展厅可见：大图区（画布）、说明条、胶片条，三者纵向不重叠。
+    /// 用户 2026-11-25：照片信息栏底下那个灰框要拆掉。
+    ///
+    /// 直方图原来是「chip 底色 + 1px separator 描边」的一个盒子，原型 `.histo`
+    /// 只有一排彩色柱（css/v13.css:157-161），没有底板也没有边框。
+    #[test]
+    fn histogram_draws_bars_without_a_chip_box() {
+        let src = include_str!("viewer.rs");
+        let start = src.find("fn draw_histogram(").expect("直方图绘制函数");
+        let end = src[start..].find("#[cfg(test)]").expect("测试模块") + start;
+        let body = &src[start..end];
+        assert!(
+            !body.contains("theme.chip_bg"),
+            "直方图不该再铺 chip 底色（那就是灰框）"
+        );
+        assert!(
+            !body.contains("rect_stroke"),
+            "直方图不该再画 1px 描边（灰框的边）"
+        );
+        assert!(body.contains("Mesh"), "彩色柱还得画");
+    }
+
     #[test]
     fn default_stage_has_canvas_caption_and_filmstrip() {
         let lay = layout(stage_rect(), false, false);
