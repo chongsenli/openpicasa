@@ -94,6 +94,9 @@ fn masonry_h_rows(viewport_w: f32, viewport_h: f32, slot_h: f32, total_w: f32) -
 /// 栅格布局（每帧重建；重建代价 O(分组数)，10 万张约 3000 天分组 → 可忽略）。
 pub struct GridLayout {
     pub cell: f32,
+    /// 方格图片格高度（= cell × THUMB_SLOT_RATIO，收紧后上留白减三分之二）。
+    /// masonry 下等于 cell，不参与方格算式。
+    pub img_slot_h: f32,
     pub cell_h: f32,
     pub cols: usize,
     pub groups: Vec<Group>,
@@ -171,7 +174,14 @@ impl GridLayout {
         };
         // 方格文件名是 §7.4 的可选项；瀑布流仍显示（宽高比布局的既有占位）。
         let show_filename = show_filename && mode == ViewMode::Grid;
-        let cell_h = cell
+        // 用户 2026-11-24「每个图片上方的留白减少三分之二」：收紧方格的图片格高度，
+        // 图片与文件名一起上移（不在格里挪图片），上留白 54→18（见 THUMB_SLOT_RATIO）。
+        let img_h = if mode == ViewMode::Grid {
+            cell * Metrics::THUMB_SLOT_RATIO
+        } else {
+            cell
+        };
+        let cell_h = img_h
             + if show_filename {
                 Metrics::FILENAME_H
             } else {
@@ -179,7 +189,7 @@ impl GridLayout {
             };
 
         let mut layout = if mode == ViewMode::Grid {
-            Self::build_grid(photos, viewport_w, cell, cell_h, has_headers, show_filename)
+            Self::build_grid(photos, viewport_w, cell, img_h, cell_h, has_headers, show_filename)
         } else {
             Self::build_masonry(photos, viewport_w, viewport_h, cell, mode)
         };
@@ -192,6 +202,7 @@ impl GridLayout {
         photos: &[PhotoRow],
         width: f32,
         cell: f32,
+        img_h: f32,
         cell_h: f32,
         has_headers: bool,
         show_filename: bool,
@@ -236,6 +247,7 @@ impl GridLayout {
         let total_h = y + pad;
         Self {
             cell,
+            img_slot_h: img_h,
             cell_h,
             cols,
             groups,
@@ -353,6 +365,7 @@ impl GridLayout {
 
         Self {
             cell,
+            img_slot_h: cell,
             cell_h: cell,
             cols: 1,
             groups: vec![Group {
@@ -407,7 +420,11 @@ impl GridLayout {
         let col = local % self.cols;
         let x = Metrics::GRID_PAD + col as f32 * (self.cell + Metrics::CELL_GAP);
         let y = g.y + self.header() + row as f32 * (self.cell_h + Metrics::CELL_GAP_Y);
-        Some(Rect::from_min_size(pos2(x, y), vec2(self.cell, self.cell)))
+        // 图片格收紧到 img_slot_h（上留白减三分之二）；宽度仍是 cell。
+        Some(Rect::from_min_size(
+            pos2(x, y),
+            vec2(self.cell, self.img_slot_h),
+        ))
     }
 
     /// 索引 → 文件名行的内容坐标 rect（不显示文件名时返回 None）。
@@ -747,6 +764,7 @@ impl GridCache {
         Self {
             layout: GridLayout {
                 cell: 0.0,
+                img_slot_h: 0.0,
                 cell_h: 0.0,
                 cols: 1,
                 groups: Vec::new(),
@@ -1381,17 +1399,10 @@ pub fn show(
                 match cache.get(&ctx, db, service, row, &mut budget) {
                     TexState::Ready(tex_id, tex_size) => {
                         // masonry 的格子比例就是图片比例：直接填满，消除 contain
-                        // 舍入造成的 1px 白边；方格仍用 contain（格子是正方形）。
+                        // 舍入造成的 1px 白边；方格仍用 contain（图片格收紧后在格里居中，
+                        // 上留白已是 cell 的 3/32，不再需要此前那步下移微调）。
                         let fitted = if mode == ViewMode::Grid {
-                            let f = fit_rect(img_rect, tex_size);
-                            f.translate(vec2(
-                                0.0,
-                                grid_image_vertical_shift(
-                                    img_rect.height(),
-                                    f.height(),
-                                    layout.show_filename,
-                                ),
-                            ))
+                            fit_rect(img_rect, tex_size)
                         } else {
                             img_rect
                         };
@@ -2009,16 +2020,6 @@ fn fit_rect(outer: Rect, tex: Vec2) -> Rect {
     Rect::from_center_size(outer.center(), size)
 }
 
-/// 方格缩略图的竖直微调：横图 `contain` 进正方形格子后上下各留 `lower_blank`，
-/// 用户反馈「图片与文件名的距离太远」，把图片下移 `lower_blank/2` 令下方空白减半。
-/// 竖图/方图（无上下留白）与不显示文件名时保持居中（返回 0）。
-fn grid_image_vertical_shift(cell_h: f32, fitted_h: f32, show_filename: bool) -> f32 {
-    if !show_filename || cell_h <= fitted_h {
-        return 0.0;
-    }
-    (cell_h - fitted_h) / 4.0
-}
-
 pub fn ellipsize(s: &str, max_chars: usize) -> String {
     let count = s.chars().count();
     if count <= max_chars {
@@ -2090,21 +2091,81 @@ mod tests {
     use super::*;
     use picasa_db::PhotoRow;
 
-    /// 用户反馈「图片与文件名距离太远」：横图在正方形格子里上下各留白，
-    /// 下移半个下留白令间距减半；竖图/方图与不显示文件名时不动。
+    /// 用户 2026-11-24「每个图片上方的留白减少三分之二」：收紧方格的图片格高度
+    /// （不是挪动格内图片），图片与文件名一起上移。钉三件事：
+    /// 上留白 = 旧的 1/3；图名间距不变；行距变小。
     #[test]
-    fn grid_image_shift_halves_the_blank_below_a_landscape_thumb() {
-        let cell = 144.0_f32;
-        let fitted_h = 96.0; // 3:2 横图 contain 进 144 方格的画高
-        let blank = (cell - fitted_h) / 2.0; // 24，上下各一块
-        let shift = grid_image_vertical_shift(cell, fitted_h, true);
-        assert!((shift - blank / 2.0).abs() < 0.01, "下移半个下留白");
-        // 下留白从 blank 变成 blank - shift = blank/2。
-        assert!((blank - shift - blank / 2.0).abs() < 0.01, "下方空白减半");
-        // 竖图/方图（无留白）不移动。
-        assert_eq!(grid_image_vertical_shift(cell, cell, true), 0.0);
-        // 不显示文件名时保持居中。
-        assert_eq!(grid_image_vertical_shift(cell, fitted_h, false), 0.0);
+    fn grid_slot_tightening_cuts_top_blank_by_two_thirds() {
+        let cell = 192.0_f32; // 用户库 grid_cell_px=192
+        let ratio = Metrics::THUMB_SLOT_RATIO;
+        assert!((ratio - 13.0 / 16.0).abs() < 1e-6, "图片格高比例应是 13/16");
+        let img_h = cell * ratio; // 156
+
+        // 主流 8:5 横图 contain 进 cell×cell 的画高 = 5/8·cell = 120。
+        let fitted_h = cell * 5.0 / 8.0;
+        // 旧布局：居中上下各 (cell-fitted)/2，再下移 1/4·(cell-fitted)，
+        // 上留白 = 3/4·(cell-fitted) = 54。
+        let old_top_blank = (cell - fitted_h) / 2.0 + (cell - fitted_h) / 4.0;
+        // 新布局：收紧格高后纯居中，上留白 = (img_h-fitted)/2 = 18。
+        let new_top_blank = (img_h - fitted_h) / 2.0;
+        assert!(
+            (old_top_blank - 54.0).abs() < 0.01,
+            "旧上留白应 54：{old_top_blank}"
+        );
+        assert!(
+            (new_top_blank - 18.0).abs() < 0.01,
+            "新上留白应 18：{new_top_blank}"
+        );
+        assert!(
+            (new_top_blank / old_top_blank - 1.0 / 3.0).abs() < 0.01,
+            "上留白应减至 1/3（减三分之二）"
+        );
+
+        // 图名间距（图底→文件名）：旧 = (cell-fitted)/4 = 18，新 = (img_h-fitted)/2 = 18，不变。
+        let old_name_gap = (cell - fitted_h) / 4.0;
+        let new_name_gap = (img_h - fitted_h) / 2.0;
+        assert!(
+            (new_name_gap - old_name_gap).abs() < 0.01,
+            "图名间距应保持不变：{new_name_gap} vs {old_name_gap}"
+        );
+
+        // 行距变小（格子收紧、图片与文件名一起上移）。
+        let old_pitch = cell + Metrics::FILENAME_H + Metrics::CELL_GAP_Y;
+        let new_pitch = img_h + Metrics::FILENAME_H + Metrics::CELL_GAP_Y;
+        assert!(
+            new_pitch < old_pitch,
+            "新行距 {new_pitch} 应小于旧 {old_pitch}"
+        );
+    }
+
+    /// 门禁：GridLayout 的图片格高、行推进都走收紧后的 img_slot_h / cell_h，
+    /// 且与比例常量一致（防止只在绘制里改、布局仍在用 cell 导致重叠）。
+    #[test]
+    fn grid_layout_uses_tightened_slot_height() {
+        let photos = same_day(6);
+        let layout = GridLayout::build(&photos, 1000.0, 192.0, true, ViewMode::Grid);
+        let expect_img_h = 192.0 * Metrics::THUMB_SLOT_RATIO;
+        assert!(
+            (layout.img_slot_h - expect_img_h).abs() < 0.01,
+            "img_slot_h 没走收紧比例"
+        );
+        let r0 = layout.thumb_rect(0).unwrap();
+        assert!(
+            (r0.height() - expect_img_h).abs() < 0.01,
+            "thumb_rect 高度应是收紧后的图片格"
+        );
+        assert!((r0.width() - 192.0).abs() < 0.01, "宽度仍是 cell，不变");
+        // 文件名跟着图片格底部走，自动上移。
+        let fn0 = layout.filename_rect(0).unwrap();
+        assert!(
+            (fn0.top() - (r0.bottom() + Metrics::FILENAME_GAP)).abs() < 0.01,
+            "文件名应贴着收紧后的图片格底部"
+        );
+        // cell_h = 收紧格高 + 文件名行。
+        assert!(
+            (layout.cell_h - (expect_img_h + Metrics::FILENAME_H)).abs() < 0.01,
+            "cell_h 没跟上收紧后的格高"
+        );
     }
 
     fn photo(id: i64, taken_at: i64) -> PhotoRow {
@@ -2607,8 +2668,8 @@ mod tests {
             assert!(layout.show_filename, "{px}px 应显示文件名");
             assert_eq!(
                 layout.cell_h,
-                px + crate::theme::Metrics::FILENAME_H,
-                "{px}px 的单元格总高没算上文件名行"
+                px * crate::theme::Metrics::THUMB_SLOT_RATIO + crate::theme::Metrics::FILENAME_H,
+                "{px}px 的单元格总高没算上收紧后的图片格 + 文件名行"
             );
         }
     }
@@ -2818,7 +2879,8 @@ mod tests {
             false,
         );
         assert!(!hidden.show_filename);
-        assert_eq!(hidden.cell_h, 128.0, "关掉文件名后单元格不应再预留行高");
+        let tight = 128.0 * Metrics::THUMB_SLOT_RATIO;
+        assert_eq!(hidden.cell_h, tight, "关掉文件名后单元格不应再预留行高");
         assert_eq!(hidden.filename_rect(0), None);
 
         let mut cache = GridCache::new();
@@ -2828,8 +2890,8 @@ mod tests {
         let without = cache
             .get_with_filename(&photos, 1000.0, 800.0, 128.0, true, ViewMode::Grid, false)
             .cell_h;
-        assert_eq!(with_name, 128.0 + Metrics::FILENAME_H);
-        assert_eq!(without, 128.0);
+        assert_eq!(with_name, tight + Metrics::FILENAME_H);
+        assert_eq!(without, tight);
     }
 
     /// masonry：文件名带必须在**格子内部**的底部（图片带的正下方）。
@@ -2932,7 +2994,7 @@ mod tests {
         assert_eq!(Metrics::CELL_GAP_Y, 8.0, "竖直行间距减半");
 
         let photos = same_day(40);
-        // 关掉文件名行，让 cell_h == cell，纯量格间留白（否则会掺进 FILENAME_H）
+        // 关掉文件名行，让 cell_h == img_slot_h，纯量格间留白（否则会掺进 FILENAME_H）
         let layout = GridLayout::build_in_viewport_opts(
             &photos,
             1000.0,
@@ -2969,7 +3031,10 @@ mod tests {
             let layout = GridLayout::build(&photos, 1000.0, 96.0, false, mode);
             // 每个模式的格子/文件名矩形都应可求，且不含「直角」特殊常量
             for i in 0..6 {
-                assert!(layout.thumb_rect(i).is_some(), "{mode:?} 缺 thumb_rect({i})");
+                assert!(
+                    layout.thumb_rect(i).is_some(),
+                    "{mode:?} 缺 thumb_rect({i})"
+                );
             }
         }
     }
