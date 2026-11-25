@@ -1178,7 +1178,7 @@ fn draw_info_chip(
         pos2(rect.left() + 25.0, rect.center().y),
         Align2::LEFT_CENTER,
         "照片信息",
-        FontId::new(11.5, egui::FontFamily::Proportional),
+        FontId::new(INFO_CHIP_FONT_SIZE, egui::FontFamily::Proportional),
         color,
     );
     resp.on_hover_text("照片信息 · I")
@@ -1522,7 +1522,7 @@ fn draw_statusbar(
     } else {
         format!("{}%", (viewer.zoom * 100.0).round() as i32)
     };
-    let left_font = FontId::new(11.5, egui::FontFamily::Proportional);
+    let left_font = FontId::new(STATUS_FONT_SIZE, egui::FontFamily::Proportional);
 
     // 右侧快捷键提示先量宽：窄窗时必须先给它留出位置，再做文件名截断，
     // 否则左段会一直铺过去、和提示文字叠在一起（原型 .vstat 是 flex + gap，
@@ -2484,6 +2484,12 @@ pub fn fit_zoom(pane: Rect, iw: f32, ih: f32, theme: &Theme) -> f32 {
     fit_scale(pane.shrink(shadow_room(theme)).size(), iw, ih)
 }
 
+/// 信息胶囊「照片信息」的字号：原型 `.info-toggle` 12.5px（此前 11.5 偏小一圈）。
+pub const INFO_CHIP_FONT_SIZE: f32 = 12.5;
+
+/// 底栏左段（文件名 / 尺寸 / 第 i-n 张 / 缩放）的字号：原型 `.vstat` 12px。
+pub const STATUS_FONT_SIZE: f32 = 12.0;
+
 pub fn photo_radius(theme: &Theme) -> f32 {
     if theme.dark { 6.0 } else { 22.0 }
 }
@@ -3048,6 +3054,15 @@ mod tests {
                 "适合没有为落影收一圈：{with_room} 应小于 {without_room}"
             );
         }
+    }
+
+    /// 查看器里两处字号按原型取：信息胶囊 12.5（`.info-toggle`）、底栏 12（`.vstat`）。
+    ///
+    /// 此前两者都是 11.5，逐像素比对时看出来的——字号偏小会让整条顶栏「显得松」。
+    #[test]
+    fn viewer_text_sizes_follow_the_prototype() {
+        assert_eq!(INFO_CHIP_FONT_SIZE, 12.5);
+        assert_eq!(STATUS_FONT_SIZE, 12.0);
     }
 
     /// 信息栏开关是纯切换：打开一次变关、再开一次变开（I 键同路径）。

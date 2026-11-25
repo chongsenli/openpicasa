@@ -304,7 +304,7 @@ fn section_title(
         Align2::LEFT_CENTER,
         title,
         // M5 §5.2：暗色分组标题 11px、字距加宽、弱化色。
-        FontId::new(if theme.dark { 11.0 } else { 12.5 }, egui::FontFamily::Proportional),
+        FontId::new(sidebar_row_font_size(theme), egui::FontFamily::Proportional),
         color,
     );
     // 折叠指示：右端小箭头（截图分组默认展开、悬停才现箭头；这里常显更可用）
@@ -334,6 +334,16 @@ fn section_title(
 ///
 /// 标签组与相册组共用这一份——相册组在暗色下换的是**行**的画法（缩略图卡），
 /// 组头不该跟着分叉（`M5` §3 要求两套主题的信息架构一致）。
+/// 侧栏文字行的字号：原型 `.row .name` 亮色 13px / 暗色 12.5px。
+pub fn sidebar_row_font_size(theme: &Theme) -> f32 {
+    if theme.dark { 12.5 } else { 13.0 }
+}
+
+/// 侧栏计数（行尾灰色小数字）：原型 `.row .cnt` 亮色 11.5px / 暗色 10.5px。
+pub fn sidebar_count_font_size(theme: &Theme) -> f32 {
+    if theme.dark { 10.5 } else { 11.5 }
+}
+
 fn group_header(
     ui: &mut Ui,
     theme: &Theme,
@@ -359,7 +369,7 @@ fn group_header(
         pos2(rect.left() + 14.0, rect.center().y),
         Align2::LEFT_CENTER,
         title,
-        FontId::new(if theme.dark { 11.0 } else { 12.5 }, egui::FontFamily::Proportional),
+        FontId::new(sidebar_row_font_size(theme), egui::FontFamily::Proportional),
         color,
     );
     // 右端「＋」新建
@@ -848,7 +858,7 @@ fn fav_row(
             pos2(rect.right() - 16.0, rect.center().y),
             Align2::RIGHT_CENTER,
             n.to_string(),
-            FontId::new(11.5, egui::FontFamily::Proportional),
+            FontId::new(sidebar_count_font_size(theme), egui::FontFamily::Proportional),
             theme.sidebar_section_text,
         );
     }
@@ -936,7 +946,10 @@ fn imported_index(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mu
                 pos2(rect.right() - 14.0, rect.center().y),
                 Align2::RIGHT_CENTER,
                 g.photos.to_string(),
-                FontId::new(11.5, egui::FontFamily::Proportional),
+                FontId::new(
+                    if t.dark { 10.5 } else { 11.5 },
+                    egui::FontFamily::Proportional,
+                ),
                 t.sidebar_section_text,
             );
         }
@@ -1124,7 +1137,7 @@ fn render_tree_rows(
                     pos2(text_x, rect.center().y),
                     Align2::LEFT_CENTER,
                     &row.name,
-                    FontId::new(12.5, egui::FontFamily::Proportional),
+                    FontId::new(sidebar_row_font_size(&t), egui::FontFamily::Proportional),
                     text_color,
                 );
                 if imported && let Some(tip) = marks.tip(row) {
@@ -1333,6 +1346,31 @@ fn tray(ui: &mut Ui, lib: &Library, ctx: &mut SidebarCtx<'_>, actions: &mut Vec<
     );
     if cresp.clicked() {
         actions.push(SidebarAction::TrayClear);
+    }
+}
+
+#[cfg(test)]
+#[cfg(test)]
+mod m5_font_tests {
+    use super::*;
+    use crate::theme::Theme;
+    use picasa_core::Appearance;
+
+    /// 侧栏字号按原型 `.row .name` / `.row .cnt` 取（亮 13/11.5，暗 12.5/10.5）。
+    ///
+    /// 逐像素比对时发现应用两套主题都偏小：行名亮色 12.5（应 13）、暗色 11（应 12.5），
+    /// 计数暗色也用了亮色的 11.5（应 10.5）。
+    #[test]
+    fn sidebar_fonts_follow_the_prototype_scale() {
+        let light = Theme::for_appearance(Appearance::Light);
+        let dark = Theme::for_appearance(Appearance::Dark);
+        assert_eq!(sidebar_row_font_size(&light), 13.0);
+        assert_eq!(sidebar_row_font_size(&dark), 12.5);
+        assert_eq!(sidebar_count_font_size(&light), 11.5);
+        assert_eq!(sidebar_count_font_size(&dark), 10.5);
+        // 两套主题都要有差异，别又合成同一个值。
+        assert_ne!(sidebar_row_font_size(&light), sidebar_row_font_size(&dark));
+        assert_ne!(sidebar_count_font_size(&light), sidebar_count_font_size(&dark));
     }
 }
 

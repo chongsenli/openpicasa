@@ -54,12 +54,17 @@ pub fn app_name_center(rect: Rect) -> Pos2 {
 }
 
 /// 在标题带自绘应用名（仅 macOS——其余平台 AppKit 原生标题仍在）。
+/// 顶栏应用名的字号：原型 `.titlebar .appname` 亮色 12px / 暗色 11px。
+pub fn app_name_font_size(theme: &Theme) -> f32 {
+    if theme.dark { 11.0 } else { 12.0 }
+}
+
 fn draw_app_name(painter: &egui::Painter, rect: Rect, theme: &Theme) {
     painter.text(
         app_name_center(rect),
         Align2::CENTER_CENTER,
         "OpenPicasa",
-        FontId::new(12.0, egui::FontFamily::Proportional),
+        FontId::new(app_name_font_size(theme), egui::FontFamily::Proportional),
         theme.text_secondary,
     );
 }
@@ -1072,6 +1077,28 @@ pub fn sort_menu(
                 });
         });
     action
+}
+
+#[cfg(test)]
+mod m5_font_tests {
+    use super::*;
+    use crate::theme::Theme;
+    use picasa_core::Appearance;
+
+    /// 顶栏应用名字号按原型 `.titlebar .appname` 取（亮 12 / 暗 11）。
+    ///
+    /// 这条是「逐像素量字体」时发现的：应用原来两套都用 12，暗色比原型大一号。
+    #[test]
+    fn app_name_font_follows_the_prototype_scale() {
+        assert_eq!(
+            app_name_font_size(&Theme::for_appearance(Appearance::Light)),
+            12.0
+        );
+        assert_eq!(
+            app_name_font_size(&Theme::for_appearance(Appearance::Dark)),
+            11.0
+        );
+    }
 }
 
 #[cfg(test)]
