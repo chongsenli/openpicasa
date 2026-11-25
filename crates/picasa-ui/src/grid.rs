@@ -1205,6 +1205,11 @@ pub fn show(
     });
     let scroll_off = restore_scroll.or(anchor_off);
 
+    // 自绘滚动条：拖拽产生的目标偏移存在内存里，下一帧喂回 ScrollArea
+    // （`vertical_scroll_offset` 只能在构建时设置）。
+    let bar_off_id = ui.id().with("grid-bar-offset");
+    let bar_drag_off: Option<f32> = ui.ctx().memory(|m| m.data.get_temp(bar_off_id));
+
     let mut area = if horizontal {
         ScrollArea::horizontal()
             .id_salt("grid-scroll")
@@ -1214,8 +1219,10 @@ pub fn show(
         ScrollArea::vertical()
             .id_salt("grid-scroll")
             .auto_shrink([false, false])
+            // 自带滚动条换成自绘的（见 `scroll_bar_track_rect`）
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
     };
-    if let Some(off) = scroll_off {
+    if let Some(off) = bar_drag_off.or(scroll_off) {
         area = if horizontal {
             area.horizontal_scroll_offset(off)
         } else {
@@ -1651,6 +1658,65 @@ pub fn show(
             out.context = None;
         }
     });
+
+    // 自绘竖直滚动条：落在卡片右内侧、上下让开圆角。拖动时把目标偏移写回内存，
+    // 下一帧由 `vertical_scroll_offset` 生效。
+    if !horizontal {
+        let track = scroll_bar_track_rect(full, theme.radius_card);
+        let view_h = area_out.inner_rect.height();
+        let content_h = area_out.content_size.y;
+        if let Some(thumb) = scroll_thumb_rect(track, out.scroll_y, content_h, view_h) {
+            let bar_id = ui.id().with("grid-scrollbar");
+            let grab_id = ui.id().with("grid-bar-grab");
+            let resp = ui.interact(
+                track.expand(SCROLL_BAR_HIT_PAD),
+                bar_id,
+                egui::Sense::click_and_drag(),
+            );
+            let active = resp.dragged() || resp.hovered();
+            let color = if active {
+                theme.text_secondary
+            } else {
+                theme.text_disabled
+            };
+            ui.painter()
+                .rect_filled(thumb, thumb.width() / 2.0, color.gamma_multiply(0.8));
+
+            let max_off = (content_h - view_h).max(0.0);
+            if resp.drag_started()
+                && let Some(p) = ui.ctx().pointer_interact_pos()
+            {
+                let grab = (p.y - thumb.top()).clamp(0.0, thumb.height());
+                ui.ctx().memory_mut(|m| m.data.insert_temp(grab_id, grab));
+            }
+            if resp.dragged()
+                && let Some(p) = ui.ctx().pointer_interact_pos()
+            {
+                let grab: f32 = ui
+                    .ctx()
+                    .memory(|m| m.data.get_temp(grab_id))
+                    .unwrap_or(thumb.height() / 2.0);
+                let span = (track.height() - thumb.height()).max(1.0);
+                let top = (p.y - grab - track.top()).clamp(0.0, span);
+                let off = top / span * max_off;
+                ui.ctx().memory_mut(|m| m.data.insert_temp(bar_off_id, off));
+            }
+            if resp.drag_stopped() {
+                ui.ctx().memory_mut(|m| {
+                    m.data.remove_temp::<f32>(bar_off_id);
+                    m.data.remove_temp::<f32>(grab_id);
+                });
+            }
+            // 点轨道：往上/往下翻将近一屏（和系统滚动条的习惯一致）。
+            if resp.clicked()
+                && let Some(p) = ui.ctx().pointer_interact_pos()
+            {
+                let dir = if p.y < thumb.top() { -1.0 } else { 1.0 };
+                let off = (out.scroll_y + dir * view_h * 0.9).clamp(0.0, max_off);
+                ui.ctx().memory_mut(|m| m.data.insert_temp(bar_off_id, off));
+            }
+        }
+    }
 
     // 用户 2026-11-25：右侧两个圆角被滚动条压住。滚动条由 `ScrollArea` 画在内容之上、
     // 并且横跨整个视口高度，所以它一定会盖住卡片右上/右下那两段圆弧。这里在滚动区
@@ -2089,6 +2155,51 @@ fn draw_empty_state(
 }
 
 /// 等比放进正方形（U-25：长边贴合，短边留白，不裁切不拉伸）。
+/// 自绘滚动条：条宽、贴边距、滑块最短高度、热区外扩。
+const SCROLL_BAR_W: f32 = 6.0;
+const SCROLL_BAR_GAP: f32 = 4.0;
+const SCROLL_BAR_MIN_H: f32 = 36.0;
+const SCROLL_BAR_HIT_PAD: f32 = 5.0;
+
+/// 自绘竖直滚动条的轨道：贴卡片右内侧，上下各让开一个卡片圆角。
+///
+/// egui 自带的滚动条会被它放到「可用裁剪矩形」的边界上（实测落到卡片右边缘之外
+/// 几个像素），而且沿轴跨度是整个视口高度，必然横穿右上/右下两段圆弧。
+/// 用户 2026-11-25 要求滚动条落在卡片内侧、不压圆角，所以改成自绘。
+pub fn scroll_bar_track_rect(full: Rect, radius: f32) -> Rect {
+    let r = radius.max(0.0).min(full.height() / 2.0);
+    let x1 = full.right() - SCROLL_BAR_GAP;
+    let x0 = (x1 - SCROLL_BAR_W).max(full.left());
+    let top = full.top() + r;
+    let bottom = (full.bottom() - r).max(top);
+    Rect::from_min_max(pos2(x0, top), pos2(x1.max(x0), bottom))
+}
+
+/// 滑块的矩形；内容不超过视口（不需要滚动）时返回 `None`。
+///
+/// 高度按「视口 / 内容」比例算，并有 [`SCROLL_BAR_MIN_H`] 的下限；
+/// 位置按 `offset / (content_h - view_h)` 线性映射——与 ScrollArea 的偏移语义一致。
+pub fn scroll_thumb_rect(track: Rect, offset: f32, content_h: f32, view_h: f32) -> Option<Rect> {
+    if !(content_h > view_h + 0.5) || track.height() <= 0.0 || track.width() <= 0.0 {
+        return None;
+    }
+    let ratio = (view_h / content_h).clamp(0.0, 1.0);
+    let h = (track.height() * ratio)
+        .max(SCROLL_BAR_MIN_H)
+        .min(track.height());
+    let max_off = (content_h - view_h).max(0.0);
+    let t = if max_off > 0.0 {
+        (offset / max_off).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let y0 = track.top() + (track.height() - h) * t;
+    Some(Rect::from_min_size(
+        pos2(track.left(), y0),
+        vec2(track.width(), h),
+    ))
+}
+
 /// 圆角缺口的顶点：`center` 是圆角圆心，`sx`/`sy` 取 ±1 指向卡片外侧。
 ///
 /// 缺口 = 「卡片矩形角点」+「四分之一圆弧」围成的那一小块。用来在内容（照片、
@@ -2218,6 +2329,74 @@ mod tests {
     /// 用户 2026-11-24「每个图片上方的留白减少三分之二」：收紧方格的图片格高度
     /// （不是挪动格内图片），图片与文件名一起上移。钉三件事：
     /// 上留白 = 旧的 1/3；图名间距不变；行距变小。
+    /// 用户 2026-11-25：滚动条改为自绘，落在卡片内侧、上下让开圆角。
+    #[test]
+    fn scroll_bar_track_sits_inside_the_card_and_clear_of_the_corners() {
+        let full = Rect::from_min_size(pos2(0.0, 84.0), vec2(1000.0, 800.0));
+        let r = 26.0;
+        let track = scroll_bar_track_rect(full, r);
+        assert_eq!(track.width(), SCROLL_BAR_W);
+        assert_eq!(track.right(), full.right() - SCROLL_BAR_GAP);
+        assert_eq!(track.top(), full.top() + r, "上端让开圆角");
+        assert_eq!(track.bottom(), full.bottom() - r, "下端让开圆角");
+        assert!(full.contains_rect(track), "整条必须留在卡片里");
+        // 半径过大时轨道不能翻负。
+        let tiny = Rect::from_min_size(pos2(0.0, 0.0), vec2(40.0, 30.0));
+        let t2 = scroll_bar_track_rect(tiny, 100.0);
+        assert!(t2.height() >= 0.0 && t2.width() > 0.0);
+    }
+
+    /// 滑块长度按比例、位置随偏移，且有最短高度；不需要滚动时没有滑块。
+    #[test]
+    fn scroll_thumb_follows_the_offset_and_keeps_a_minimum_size() {
+        let track = Rect::from_min_size(pos2(900.0, 110.0), vec2(SCROLL_BAR_W, 600.0));
+        let view_h = 800.0;
+        let content_h = 4000.0; // ratio 0.2 → 120 高
+        let top = scroll_thumb_rect(track, 0.0, content_h, view_h).expect("需要滚动");
+        assert_eq!(top.top(), track.top());
+        assert!((top.height() - 120.0).abs() < 0.01);
+        let bottom = scroll_thumb_rect(track, content_h - view_h, content_h, view_h).unwrap();
+        assert!(
+            (bottom.bottom() - track.bottom()).abs() < 0.01,
+            "到底时贴着轨道底"
+        );
+        let mid = scroll_thumb_rect(track, (content_h - view_h) / 2.0, content_h, view_h).unwrap();
+        assert!(top.top() < mid.top() && mid.top() < bottom.top());
+        // 内容远超视口 → 滑块不短于下限。
+        let huge = scroll_thumb_rect(track, 0.0, 400_000.0, view_h).unwrap();
+        assert!((huge.height() - SCROLL_BAR_MIN_H).abs() < 0.01);
+        // 内容放得下 → 不画滑块。
+        assert!(scroll_thumb_rect(track, 0.0, 500.0, view_h).is_none());
+        // 退化的轨道 → 不画。
+        let flat = Rect::from_min_size(pos2(0.0, 0.0), vec2(SCROLL_BAR_W, 0.0));
+        assert!(scroll_thumb_rect(flat, 0.0, 4000.0, 800.0).is_none());
+    }
+
+    /// 源码锁：竖直滚动区必须关掉 egui 自带滚动条，并真的画出自绘滑块。
+    #[test]
+    fn vertical_scroll_area_uses_the_hand_drawn_bar() {
+        let src = include_str!("grid.rs");
+        let start = src.find("pub fn show(").expect("show");
+        let end = src[start..].find("#[cfg(test)]").expect("测试模块") + start;
+        let body = &src[start..end];
+        assert!(
+            body.contains("ScrollBarVisibility::AlwaysHidden"),
+            "自带滚动条必须隐藏，否则会和自绘的叠在一起"
+        );
+        assert!(
+            body.contains("scroll_bar_track_rect(full, theme.radius_card)"),
+            "自绘条必须贴卡片内侧"
+        );
+        assert!(
+            body.contains("scroll_thumb_rect(track, out.scroll_y"),
+            "滑块位置要跟随真实滚动偏移"
+        );
+        assert!(
+            body.contains("rect_filled(thumb, thumb.width() / 2.0"),
+            "滑块要画出来（圆头）"
+        );
+    }
+
     /// 用户 2026-11-25：右侧两个圆角被滚动条压住。
     ///
     /// 缺口遮罩的几何必须对得上：角点就是卡片矩形的角，圆弧上的点都在半径上，
