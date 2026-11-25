@@ -1311,6 +1311,16 @@ pub fn show(
             }
             let is_sel = selection.contains(&row.id);
             let is_current = current_index == Some(index);
+            // ---- 悬停放大（用户 2026-11-25：悬停不再画蓝框，改成图片轻微放大）----
+            // 必须在画图**之前**拿到，才能把放大施加到贴图矩形上。
+            // 选中态不放大：这样「变大」只表示悬停，「有环 + 徽标 + 投影」只表示选中，
+            // 两种反馈各走一条通道，不会误读。
+            let hover_t = {
+                let hover_id = ui.scope_id().with(("cell-hover", row.id));
+                let want = !is_sel && ui.rect_contains_pointer(rect);
+                ui.ctx()
+                    .animate_bool_with_time(hover_id, want, HOVER_ANIM_SECS)
+            };
             // masonry 的 rect 含文件名行，图片画在去掉文件名行的内矩形里
             let img_rect = if mode == ViewMode::Grid {
                 rect
@@ -1407,17 +1417,25 @@ pub fn show(
                             img_rect
                         };
                         frame = fitted;
+                        // 悬停放大：只放大贴图矩形与圆角，不动 `frame`，
+                        // 免得选中环 / 文件名行跟着动。
+                        let draw_rect = hover_zoom_rect(fitted, hover_t);
+                        let draw_radius = hover_zoom_radius(frame_radius, hover_t);
+                        // 选中格的抬升投影必须在贴图**之前**画，否则会盖在照片上。
+                        if is_sel {
+                            painter.add(sel_lift_shadow().as_shape(fitted, frame_radius));
+                        }
                         // M4.1 `M41-UI-02`：三种布局统一走**圆角贴图**通路
                         // （RectShape::with_texture + 软阴影），不再对 masonry 用
                         // 无圆角的 painter.image。用的是同一张已上传纹理，不新增预算。
                         // M4.2 `M42-UI-02`：与微缩图集档共用 [`rounded_image_shape`]，
                         // 让「圆角」成为单一结构性不变量，任一路都回退不了直角。
-                        painter.add(theme.thumb_shadow.as_shape(fitted, frame_radius));
+                        painter.add(theme.thumb_shadow.as_shape(draw_rect, draw_radius));
                         painter.add(rounded_image_shape_r(
-                            fitted,
+                            draw_rect,
                             tex_id,
                             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                            frame_radius,
+                            draw_radius,
                         ));
                     }
                     TexState::Pending => {
@@ -1456,7 +1474,7 @@ pub fn show(
             } else {
                 // ---- 描边：选中 > 当前 > 悬停 > 常态 ----
                 // 像素校准：方格常态**无描边**（阴影已表达边界）；masonry 保留 1px 灰框。
-                let response = interact_cell(ui, rect, row.id, &painter, theme);
+                let response = interact_cell(ui, rect, row.id);
                 let hovered = response.hovered();
                 let stroke = if is_sel {
                     // M5 §5.1：选中环 = 2px 内环（白 / #151515）+ 4px 外环（强调色）。
@@ -1464,9 +1482,10 @@ pub fn show(
                     Stroke::new(2.0, theme.ring_inner)
                 } else if is_current {
                     Stroke::new(1.0, theme.selected)
-                } else if hovered {
-                    Stroke::new(1.0, theme.selected.gamma_multiply(0.6))
                 } else {
+                    // 悬停不画描边（用户 2026-11-25）：旧实现是 1px 半透明强调环，
+                    // 整屏扫过像一路点亮选择框；悬停反馈改由贴图轻微放大承担
+                    // （见 `HOVER_SCALE` / `hover_zoom_rect`）。
                     // M4.1 `M41-UI-02`：三布局常态一律无描边
                     // （圆角 + 软阴影已表达边界，删掉 masonry 的 1px 灰框）。
                     Stroke::NONE
@@ -1489,13 +1508,28 @@ pub fn show(
                 // 选中 = 左上角实心圆 + 白勾。托盘成员态、星标角标另在各自域实现，
                 // 三者形状/位置在 `docs/10` M32-UI-10 登记为互不相同。
                 if is_sel {
-                    let c = pos2(rect.left() + 8.0, rect.top() + 8.0);
-                    let r = 7.0;
-                    painter.circle_filled(c, r, theme.selected);
-                    let w = Stroke::new(1.8, Color32::WHITE);
-                    let a = pos2(c.x - 3.2, c.y + 0.2);
-                    let b = pos2(c.x - 1.0, c.y + 2.6);
-                    let d = pos2(c.x + 3.4, c.y - 2.4);
+                    // 原型 `.badge-chk`：亮色 22 px 圆 + 白 2 px 外圈（top/left 8），
+                    // 暗色 18 px 圆角 6 px 方块、无外圈（top/left 6）。
+                    let r = sel_badge_radius(theme);
+                    let pad = if theme.dark { 6.0 } else { 8.0 };
+                    let c = pos2(rect.left() + pad + r, rect.top() + pad + r);
+                    if theme.dark {
+                        painter.rect_filled(
+                            Rect::from_center_size(c, vec2(r * 2.0, r * 2.0)),
+                            6.0,
+                            theme.selected,
+                        );
+                    } else {
+                        // 白圈画在徽标之外一层，等价于 CSS `box-shadow:0 0 0 2px #fff`。
+                        painter.circle_stroke(c, r + 1.0, Stroke::new(2.0, Color32::WHITE));
+                        painter.circle_filled(c, r, theme.selected);
+                    }
+                    // 勾随徽标一起缩放（原型 22 px 徽标里的勾比 14 px 的大一档）。
+                    let k = r / 7.0;
+                    let w = Stroke::new(1.8 * k, Color32::WHITE);
+                    let a = pos2(c.x - 3.2 * k, c.y + 0.2 * k);
+                    let b = pos2(c.x - 1.0 * k, c.y + 2.6 * k);
+                    let d = pos2(c.x + 3.4 * k, c.y - 2.4 * k);
                     painter.line_segment([a, b], w);
                     painter.line_segment([b, d], w);
                 }
@@ -1682,24 +1716,57 @@ fn draw_group_header(painter: &egui::Painter, bar: Rect, title: &str, count: usi
 }
 
 /// 单元格交互：**用固定 id（照片 id）保证跨帧稳定**，否则 hover 会闪烁。
-fn interact_cell(
-    ui: &mut Ui,
-    rect: Rect,
-    photo_id: i64,
-    painter: &egui::Painter,
-    theme: &Theme,
-) -> Response {
+///
+/// 悬停**不画任何描边**（用户 2026-11-25）：可视反馈由贴图轻微放大承担，
+/// 这里只负责交互命中与光标。
+fn interact_cell(ui: &mut Ui, rect: Rect, photo_id: i64) -> Response {
     let id = ui.scope_id().with(("cell", photo_id));
-    let resp = ui.interact(rect, id, Sense::click());
-    if resp.hovered() {
-        painter.rect_stroke(
-            rect,
-            1.0,
-            Stroke::new(1.0, theme.selected.gamma_multiply(0.5)),
-            StrokeKind::Inside,
-        );
+    ui.interact(rect, id, Sense::click())
+}
+
+/// 悬停放大倍率（用户 2026-11-25 定）。
+///
+/// 悬停不再用描边（旧实现是两圈 1px 蓝框，整屏扫过时太吵），改成本身轻微放大：
+/// 描边会跟「已选中」的 4px 双环抢语义，尺寸变化则各走各的通道。
+const HOVER_SCALE: f32 = 1.03;
+
+/// 悬停放大 / 回落的缓动时长（秒）。140 ms 足够跟手，又不至于像被弹了一下。
+const HOVER_ANIM_SECS: f32 = 0.14;
+
+/// 悬停放大的图片矩形：以中心为原点，按 `t`（0..=1 的缓动进度）插值到
+/// [`HOVER_SCALE`] 倍。`t=0` 原样返回，退化输入也原样返回。
+pub fn hover_zoom_rect(img_rect: Rect, t: f32) -> Rect {
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return img_rect;
     }
-    resp
+    let (w, h) = (img_rect.width(), img_rect.height());
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+        return img_rect;
+    }
+    let grow = (HOVER_SCALE - 1.0) * t;
+    let half = vec2(w * grow * 0.5, h * grow * 0.5);
+    Rect::from_min_max(img_rect.min - half, img_rect.max + half)
+}
+
+/// 悬停放大的圆角：与放大同步加 `0.8 × t`，避免「框变大了但角没跟着大」。
+pub fn hover_zoom_radius(radius: f32, t: f32) -> f32 {
+    radius + 0.8 * t.clamp(0.0, 1.0)
+}
+
+/// 选中徽标半径：原型 `.badge-chk` 亮色 22 px 直径（圆），暗色 18 px（圆角方块）。
+pub fn sel_badge_radius(theme: &Theme) -> f32 {
+    if theme.dark { 9.0 } else { 11.0 }
+}
+
+/// 选中格的抬升投影：`0 6px 16px rgba(0,0,0,.16)`（原型 `--sel-ring` 之外的一层）。
+fn sel_lift_shadow() -> egui::Shadow {
+    egui::Shadow {
+        offset: [0, 6],
+        blur: 16,
+        spread: 0,
+        color: Color32::from_black_alpha(41),
+    }
 }
 
 /// 缩略图圆角（`M5-TB-10`）：极小尺寸收窄，避免 22–64 px 的格子看起来像胶囊。
@@ -2983,6 +3050,88 @@ mod tests {
         // 整体视觉距离（行高+间距）= 9.5，正好是旧值 19 的一半
         let visual = Metrics::FILENAME_H + gap;
         assert!((visual - 9.5).abs() < 0.01, "视觉距离没减半：{visual}");
+    }
+
+    /// 用户 2026-11-25：悬停不再画蓝框，改成图片轻微放大。
+    ///
+    /// 钉三件事：放大是**以中心为原点**的等比扩张、倍率 1.03、圆角同步 +0.8；
+    /// 并且 `t=0`（未悬停）必须原样返回，不能有亚像素抖动。
+    #[test]
+    fn hover_zoom_scales_the_thumb_around_its_center() {
+        let r = Rect::from_min_size(pos2(100.0, 200.0), vec2(192.0, 156.0));
+        assert_eq!(hover_zoom_rect(r, 0.0), r, "t=0 必须原样返回");
+        assert_eq!(hover_zoom_rect(r, -1.0), r, "负进度按 0 处理");
+
+        let full = hover_zoom_rect(r, 1.0);
+        assert!(
+            (full.center() - r.center()).length() < 0.01,
+            "必须绕中心放大"
+        );
+        assert!(
+            (full.width() / r.width() - HOVER_SCALE).abs() < 1e-5,
+            "宽度倍率应是 {HOVER_SCALE}"
+        );
+        assert!(
+            (full.height() / r.height() - HOVER_SCALE).abs() < 1e-5,
+            "高度倍率应是 {HOVER_SCALE}"
+        );
+        // 192 px 格在 1.03 下每边多出约 2.9 px，不应吃掉 8 px 的行间距。
+        assert!((full.right() - r.right()).abs() < 4.0, "放大溢出过多");
+
+        // 中间进度线性插值，且单调。
+        let mid = hover_zoom_rect(r, 0.5);
+        assert!(
+            mid.width() > r.width() && mid.width() < full.width(),
+            "应单调"
+        );
+
+        // 圆角同步变大，t=0 不变。
+        assert_eq!(hover_zoom_radius(16.0, 0.0), 16.0);
+        assert!((hover_zoom_radius(16.0, 1.0) - 16.8).abs() < 1e-5);
+    }
+
+    /// 选中徽标按原型 `.badge-chk` 的尺寸：亮色 22 px 直径（r=11），暗色 18 px（r=9）。
+    #[test]
+    fn selection_badge_follows_the_prototype_size() {
+        let light = Theme::for_appearance(picasa_core::Appearance::Light);
+        let dark = Theme::for_appearance(picasa_core::Appearance::Dark);
+        assert_eq!(sel_badge_radius(&light), 11.0, "亮色徽标 22 px 直径");
+        assert_eq!(sel_badge_radius(&dark), 9.0, "暗色徽标 18 px 直径");
+        assert!(sel_badge_radius(&light) > 7.0, "不能退回旧的 14 px");
+    }
+
+    /// 源码锁：悬停不能再出现描边（这正是用户要删掉的那两圈蓝框）。
+    ///
+    /// 只测函数测不出这个回归——旧实现是「`interact_cell` 里一圈 + 主循环里一圈」，
+    /// 两处都不在任何可调用函数的返回值上，只能锁源码。
+    #[test]
+    fn hover_draws_no_stroke_only_zoom() {
+        let src = include_str!("grid.rs");
+        let body_start = src.find("fn interact_cell(").expect("interact_cell 应存在");
+        let tail = &src[body_start..];
+        let body_end = tail.find("\n}\n").expect("interact_cell 应有函数体");
+        let body = &tail[..body_end];
+        assert!(
+            !body.contains("rect_stroke"),
+            "interact_cell 不应再画悬停描边：{body}"
+        );
+        // 目检串拆开写，否则本测试自身就会命中。
+        let hover_ring = format!("theme.selected.gamma_multiply(0.{}", "6)");
+        let hover_ring2 = format!("theme.selected.gamma_multiply(0.{}", "5)");
+        assert!(
+            !src.contains(&hover_ring) && !src.contains(&hover_ring2),
+            "悬停的半透明强调环应已全部删除"
+        );
+        // 悬停放大这条通路必须还在。
+        assert!(
+            src.contains("hover_zoom_rect(fitted, hover_t)"),
+            "悬停放大被删了"
+        );
+        // 选中态不放大：两态用不同通道表达（悬停=尺寸，选中=环+徽标+投影）。
+        assert!(
+            src.contains("!is_sel && ui.rect_contains_pointer(rect)"),
+            "悬停放大的门槛必须排除选中态"
+        );
     }
 
     /// 用户 2026-11-24：方格视图「图片和图片之间的高度缩减一半」——
