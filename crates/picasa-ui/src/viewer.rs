@@ -680,7 +680,7 @@ pub fn show(
             row.height.unwrap_or(700).max(1) as f32,
         )
     };
-    let fit = fit_scale(lay.main_pane.size(), iw, ih);
+    let fit = fit_zoom(lay.main_pane, iw, ih, theme);
     // 「适合」不只是按下 PageDown 的那一帧：只要用户还没手动缩放过，窗格因
     // 信息栏推窄 / 并排分栏而变窄后，缩放必须跟着**当前**窗格重算。
     // 否则 zoom 停留在旧窗格的比例上，图会溢出主图区被裁掉
@@ -717,21 +717,7 @@ pub fn show(
     let photo_r = photo_radius(theme);
     // 原型是照片直接落在展厅底色上 + 一层柔和落影，不是一圈白色画框；
     // 落影跟着照片自己的圆角走，所以圆角形状在亮/暗两边都成立。
-    let photo_shadow = if theme.dark {
-        egui::Shadow {
-            offset: [0, 6],
-            blur: 18,
-            spread: 0,
-            color: Color32::from_black_alpha(120),
-        }
-    } else {
-        egui::Shadow {
-            offset: [0, 6],
-            blur: 20,
-            spread: 0,
-            color: Color32::from_black_alpha(48),
-        }
-    };
+    let photo_shadow = photo_shadow(theme);
     if viewer.tex.is_some() || viewer.preview.is_some() {
         main_painter.add(photo_shadow.as_shape(img_rect, photo_r));
     }
@@ -2482,8 +2468,48 @@ fn fit_rect(outer: Rect, tex: Vec2) -> Rect {
 /// 原型 v1.4（1280 逻辑宽）实测：亮色照片本身是大圆角 ≈21，暗色是小圆角
 /// ≈5（暗房里的照片收得更紧）。r7 产品把圆角做在白色外框上、图片本身是
 /// 直角，看起来就是「方图套圆白框」；这里按原型加在图片本身上。
+/// 「适合」时照片四周留给落影的空间（逻辑像素）。
+///
+/// 不留下的后果不是「落影淡」而是**一点也看不见**：横图按高度贴合窗格时照片底边正好
+/// 压在 `main_pane` 底边上，落影整条落在裁剪区外（实测照片下缘之外 0 灰阶，而原型
+/// `.stage img` 下方有约 5 逻辑像素、40 灰阶的暗带）。
+pub fn shadow_room(theme: &Theme) -> f32 {
+    if theme.dark { 12.0 } else { 16.0 }
+}
+
+/// 「适合」的实际缩放：先把窗格按 [`shadow_room`] 收一圈，再等比放入照片。
+///
+/// 代码与测试都走这一个入口，避免「提前留了落影空间」这件事在两边漂移。
+pub fn fit_zoom(pane: Rect, iw: f32, ih: f32, theme: &Theme) -> f32 {
+    fit_scale(pane.shrink(shadow_room(theme)).size(), iw, ih)
+}
+
 pub fn photo_radius(theme: &Theme) -> f32 {
     if theme.dark { 6.0 } else { 22.0 }
+}
+
+/// 主图落影。原型 `.stage img` 是 `box-shadow: 0 18px 40px -16px rgba(0,0,0,.18)`。
+///
+/// egui 的 `blur` 做的是**边缘向内羽化**，不会向形状外发光：`spread: 0` 时阴影矩形与
+/// 照片完全等大，而照片随后整块盖住它，外侧一点也露不出来——实测照片下缘之外没有任何
+/// 暗带（0 灰阶），所以「整体略淡」的真实原因是落影根本没画出来。这里给正的 `spread`
+/// 把阴影撑出照片边界，`offset` 让暗带主要落在下方，才是原型那圈柔和的落影。
+pub fn photo_shadow(theme: &Theme) -> egui::Shadow {
+    if theme.dark {
+        egui::Shadow {
+            offset: [0, 4],
+            blur: 6,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(110),
+        }
+    } else {
+        egui::Shadow {
+            offset: [0, 4],
+            blur: 6,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(52),
+        }
+    }
 }
 
 /// 把纹理画成**圆角矩形**（图片本身有圆角，而不是靠外层白框裁）。
@@ -2977,6 +3003,51 @@ mod tests {
             photo_radius(&Theme::for_appearance(Appearance::Light)),
             photo_radius(&Theme::for_appearance(Appearance::Dark))
         );
+    }
+
+    /// 落影必须在照片外侧看得见：`offset` 向下、`spread` 不吞掉、颜色不是全透明。
+    ///
+    /// 不能只测「Shadow 结构存在」——`blur` 在 egui 里是**向内羽化**，`spread: 0` 时阴影
+    /// 与照片等大、被照片整块盖住，外侧一点也露不出来（这正是此前「落影整体略淡」的
+    /// 真相：实测照片下缘之外 0 灰阶）。
+    #[test]
+    fn photo_shadow_is_pushed_outward_and_downward() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let theme = Theme::for_appearance(appearance);
+            let sh = photo_shadow(&theme);
+            assert!(sh.offset[1] > 0, "落影要向下偏移，否则照片下方没有暗带");
+            assert!(
+                sh.blur >= 4,
+                "模糊至少要够软（{}），否则边缘像一条硬线",
+                sh.blur
+            );
+            assert!(
+                sh.color.a() > 32,
+                "落影太淡看不见（alpha {}）",
+                sh.color.a()
+            );
+            // 阴影的形状与照片自己的圆角一致。
+            assert!(photo_radius(&theme) > 0.0, "照片圆角不能为 0");
+        }
+    }
+
+    /// 「适合」要给落影留出空间：没有留白时照片底边压在窗格底边上，落影整条被裁掉。
+    #[test]
+    fn fit_reserves_room_for_the_drop_shadow() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let theme = Theme::for_appearance(appearance);
+            let room = shadow_room(&theme);
+            assert!(room >= 8.0, "落影预留空间太小：{room}");
+            let pane = stage_rect();
+            let iw = 4000.0;
+            let ih = 3000.0;
+            let with_room = fit_zoom(pane, iw, ih, &theme);
+            let without_room = fit_scale(pane.size(), iw, ih);
+            assert!(
+                with_room < without_room,
+                "适合没有为落影收一圈：{with_room} 应小于 {without_room}"
+            );
+        }
     }
 
     /// 信息栏开关是纯切换：打开一次变关、再开一次变开（I 键同路径）。
@@ -3524,7 +3595,12 @@ mod tests {
         v.request_fit();
         run_stage(&mut v, &rows, Appearance::Light, &[]);
         let lay = layout(stage_rect(), false, false);
-        let fit = fit_scale(lay.main_pane.size(), 4000.0, 3000.0);
+        let fit = fit_zoom(
+            lay.main_pane,
+            4000.0,
+            3000.0,
+            &Theme::for_appearance(Appearance::Light),
+        );
         assert!(
             (v.zoom - fit).abs() < 1e-4,
             "PageDown 应回到适合：{} vs {}",
@@ -3548,8 +3624,18 @@ mod tests {
         let closed = layout(stage_rect(), false, false);
         let open = layout(stage_rect(), true, false);
         // 用长条图（宽度受限），这样「适合」直接由推窄后的可用宽度决定
-        let fit_closed = fit_scale(closed.main_pane.size(), 4000.0, 400.0);
-        let fit_open = fit_scale(open.main_pane.size(), 4000.0, 400.0);
+        let fit_closed = fit_zoom(
+            closed.main_pane,
+            4000.0,
+            400.0,
+            &Theme::for_appearance(Appearance::Light),
+        );
+        let fit_open = fit_zoom(
+            open.main_pane,
+            4000.0,
+            400.0,
+            &Theme::for_appearance(Appearance::Light),
+        );
         assert!(
             fit_open < fit_closed,
             "推窄后适合比例应更小：{fit_open} vs {fit_closed}"
@@ -3569,7 +3655,12 @@ mod tests {
         // 帧 1：默认信息栏打开 → 按推窄后的窗格适合
         run_stage(&mut v, &rows, Appearance::Light, &[]);
         let open = layout(stage_rect(), true, false);
-        let fit_open = fit_scale(open.main_pane.size(), 4000.0, 3000.0);
+        let fit_open = fit_zoom(
+            open.main_pane,
+            4000.0,
+            3000.0,
+            &Theme::for_appearance(Appearance::Light),
+        );
         assert!(
             (v.zoom - fit_open).abs() < 1e-4,
             "首帧适合：{} vs {}",
@@ -3581,7 +3672,12 @@ mod tests {
         v.toggle_info();
         run_stage(&mut v, &rows, Appearance::Light, &[]);
         let closed = layout(stage_rect(), false, false);
-        let fit_closed = fit_scale(closed.main_pane.size(), 4000.0, 3000.0);
+        let fit_closed = fit_zoom(
+            closed.main_pane,
+            4000.0,
+            3000.0,
+            &Theme::for_appearance(Appearance::Light),
+        );
         assert!(
             (v.zoom - fit_closed).abs() < 1e-4,
             "关掉信息栏后仍应「适合」：zoom={} fit={}",
@@ -3593,7 +3689,12 @@ mod tests {
         v.compare = true;
         run_stage(&mut v, &rows, Appearance::Light, &[]);
         let cmp = layout(stage_rect(), false, true);
-        let fit_cmp = fit_scale(cmp.main_pane.size(), 4000.0, 3000.0);
+        let fit_cmp = fit_zoom(
+            cmp.main_pane,
+            4000.0,
+            3000.0,
+            &Theme::for_appearance(Appearance::Light),
+        );
         assert!(
             (v.zoom - fit_cmp).abs() < 1e-4,
             "并排后主窗格减半仍应「适合」：zoom={} fit_cmp={}",
@@ -3620,14 +3721,24 @@ mod tests {
         v.info_open = false;
         run_stage(&mut v, &rows, Appearance::Light, &[]);
         let closed = layout(stage_rect(), false, false);
-        let fit_closed = fit_scale(closed.main_pane.size(), 4000.0, 400.0);
+        let fit_closed = fit_zoom(
+            closed.main_pane,
+            4000.0,
+            400.0,
+            &Theme::for_appearance(Appearance::Light),
+        );
         assert!((v.zoom - fit_closed).abs() < 1e-4);
 
         // 打开信息栏：窗格推窄，用户未手动缩放 → 应重新适合
         v.toggle_info();
         run_stage(&mut v, &rows, Appearance::Light, &[]);
         let open = layout(stage_rect(), true, false);
-        let fit_open = fit_scale(open.main_pane.size(), 4000.0, 400.0);
+        let fit_open = fit_zoom(
+            open.main_pane,
+            4000.0,
+            400.0,
+            &Theme::for_appearance(Appearance::Light),
+        );
         assert!(
             (v.zoom - fit_open).abs() < 1e-4,
             "打开信息栏推窄后仍应「适合」：zoom={} fit={}",

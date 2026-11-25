@@ -1207,7 +1207,7 @@ pub fn show(
 
     // 自绘滚动条：拖拽产生的目标偏移存在内存里，下一帧喂回 ScrollArea
     // （`vertical_scroll_offset` 只能在构建时设置）。
-    let bar_off_id = ui.id().with("grid-bar-offset");
+    let bar_off_id = ui.scope_id().with("grid-bar-offset");
     let bar_drag_off: Option<f32> = ui.ctx().memory(|m| m.data.get_temp(bar_off_id));
 
     let mut area = if horizontal {
@@ -1666,8 +1666,8 @@ pub fn show(
         let view_h = area_out.inner_rect.height();
         let content_h = area_out.content_size.y;
         if let Some(thumb) = scroll_thumb_rect(track, out.scroll_y, content_h, view_h) {
-            let bar_id = ui.id().with("grid-scrollbar");
-            let grab_id = ui.id().with("grid-bar-grab");
+            let bar_id = ui.scope_id().with("grid-scrollbar");
+            let grab_id = ui.scope_id().with("grid-bar-grab");
             let resp = ui.interact(
                 track.expand(SCROLL_BAR_HIT_PAD),
                 bar_id,
@@ -2180,7 +2180,7 @@ pub fn scroll_bar_track_rect(full: Rect, radius: f32) -> Rect {
 /// 高度按「视口 / 内容」比例算，并有 [`SCROLL_BAR_MIN_H`] 的下限；
 /// 位置按 `offset / (content_h - view_h)` 线性映射——与 ScrollArea 的偏移语义一致。
 pub fn scroll_thumb_rect(track: Rect, offset: f32, content_h: f32, view_h: f32) -> Option<Rect> {
-    if !(content_h > view_h + 0.5) || track.height() <= 0.0 || track.width() <= 0.0 {
+    if content_h <= view_h + 0.5 || track.height() <= 0.0 || track.width() <= 0.0 {
         return None;
     }
     let ratio = (view_h / content_h).clamp(0.0, 1.0);
