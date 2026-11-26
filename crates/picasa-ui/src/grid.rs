@@ -1337,14 +1337,20 @@ pub fn show(
                 if bar.top() >= clip.bottom() {
                     break;
                 }
-                draw_group_header(
-                    &painter,
-                    bar,
-                    &g.title,
-                    g.count,
-                    theme,
-                    egui::CornerRadius::ZERO,
-                );
+                // 首组就在卡片顶部：直角会把卡片的左上/右上圆弧切掉一截，
+                // 这一组必须跟着卡片圆角上圆下平。
+                let radius = if bar.top() <= card.top() + 1.0 {
+                    let r = theme.radius_card.round() as u8;
+                    egui::CornerRadius {
+                        nw: r,
+                        ne: r,
+                        sw: 0,
+                        se: 0,
+                    }
+                } else {
+                    egui::CornerRadius::ZERO
+                };
+                draw_group_header(&painter, bar, &g.title, g.count, theme, radius);
             }
         }
 
@@ -1846,10 +1852,10 @@ fn draw_group_header(
     theme: &Theme,
     radius: egui::CornerRadius,
 ) {
-    // M5：日期分组头 = 一层极浅的底色 + 一行文字。
-    // 底色存在的唯一理由是**吸顶时遮住下面的照片**；纯白会让它和卡片分不出层次，
-    // 故取比卡片略灰一档（见 `Theme::header_bg`）。圆角由调用方给：贴卡片顶的
-    // 吸顶头必须与卡片圆角重合，否则直角会切掉左上/右上圆弧。
+    // M5：日期分组头 = 一层与卡片同色的底 + 一行文字。
+    // 底色存在的唯一理由是**吸顶时遮住下面的照片**，所以只用卡片色、不加灰调
+    // （用户 2026-11-27：不要背景的灰色）。圆角由调用方给：贴卡片顶的那一组
+    // 必须与卡片圆角重合，否则直角会切掉左上/右上圆弧。
     painter.rect_filled(bar, radius, theme.header_bg);
     let font = FontId::new(
         if theme.dark { 11.0 } else { 13.0 },
@@ -1863,12 +1869,13 @@ fn draw_group_header(
         font.clone(),
         theme.header_text,
     );
-    // 张数跟在日期右侧的固定小间距处，颜色弱于日期，避免抢主信息。
+    // 张数跟在日期右侧的固定小间距处，颜色弱于日期；字号是原型写死的 12px
+    // （`.ghead .cnt{font-size:12px}`），与日期的 13/11 分开取。
     painter.text(
         pos2(date.right() + 8.0, bar.center().y),
         Align2::LEFT_CENTER,
         format!("{count} 张"),
-        font,
+        FontId::new(12.0, egui::FontFamily::Proportional),
         theme.text_secondary,
     );
 }
@@ -2416,22 +2423,18 @@ mod prototype_spec_tests {
         assert!(src.contains("card.top().max(clip.top().min(card.top()))"));
         assert!(src.contains("nw: r,") && src.contains("ne: r,") && src.contains("sw: 0,"));
         assert!(src.contains("let r = theme.radius_card.round() as u8;"));
-        // 普通分组头不带圆角（在卡内水平位置，不需要）
-        assert!(src.contains("theme, egui::CornerRadius::ZERO);"));
+        // 普通分组头：贴卡片顶的那一组跟着卡片上圆角，其余仍是直角
+        assert!(src.contains("bar.top() <= card.top() + 1.0"));
     }
 
-    /// 日期栏底色要比卡片低一档（不是纯白），否则吸顶时看不出是浮层。
+    /// 日期栏底色 = 卡片色（用户 2026-11-27：不要背景的灰色）。
     ///
-    /// 只约束亮色：暗色卡片内井本身就是 `#151515`，日期栏与之同色是原型的做法。
+    /// 这一层底只为吸顶时遮住照片，不承担视觉层次：亮色与卡片同为纯白，
+    /// 暗色与内井同为 `#151515`。两套都不许出现可辨的灰调。
     #[test]
-    fn header_band_has_a_faint_tint_instead_of_pure_white() {
+    fn header_band_uses_the_card_colour_without_a_grey_tint() {
         let light = crate::theme::Theme::for_appearance(picasa_core::Appearance::Light);
-        let bg = light.header_bg.r();
-        assert!(bg < 255, "亮色日期栏不能是纯白（否则与卡片同色）");
-        assert!(
-            (245..=252).contains(&bg),
-            "亮色日期栏应是极浅灰（实测 #{bg:02x}），太深会抢照片"
-        );
+        assert_eq!(light.header_bg.r(), 255, "亮色日期栏与卡片同为纯白");
         let dark = crate::theme::Theme::for_appearance(picasa_core::Appearance::Dark);
         assert_eq!(dark.header_bg.r(), 21, "暗色日期栏与内井同色 #151515");
     }

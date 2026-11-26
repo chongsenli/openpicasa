@@ -1620,7 +1620,10 @@ fn draw_info_panel(
         Stroke::new(1.0, theme.separator),
     );
 
-    let card = panel.shrink2(vec2(8.0, 8.0));
+    // 卡片与面板边缘的距离：亮色原型 `aside.info-panel` 328 宽、`.pc` 从 +8 起；
+    // 暗色面板 316 宽、`.pc` 从 +6 起。
+    let inset = if theme.dark { 6.0 } else { 8.0 };
+    let card = panel.shrink2(vec2(inset, inset));
     let radius = info_card_radius(theme);
     painter.rect_filled(card, radius, theme.viewer_card);
     painter.rect_stroke(
@@ -1630,9 +1633,9 @@ fn draw_info_panel(
         egui::StrokeKind::Inside,
     );
 
-    // 内边距 18、标题字号 14、关闭钮直径 26：与原型卡片的内衬一致
-    // （原型 pad 18、标题 ink 顶距卡顶 24、关闭钮 26）。
-    let pad = 18.0;
+    // 卡片内衬：亮色原型 `.pc{padding:18px 18px 14px}`；暗色原型整块重排，
+    // `.pc{padding:6px}` + `.pc-head` 内再缩 7，内容比亮色更贴边。
+    let pad = if theme.dark { 7.0 } else { 18.0 };
     let left = card.left() + pad;
     let right = card.right() - pad;
     let inner_w = (right - left).max(0.0);

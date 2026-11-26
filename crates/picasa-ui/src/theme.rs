@@ -365,14 +365,10 @@ impl Theme {
             grid_bg: rgb(s.well),
             menu_bg: rgb(s.card),
             sidebar_bg: rgb(s.win),
-            // 日期分组头底色：亮色不能直接用 `well`（= 纯白），那样吸顶头和
-            // 卡片完全同色，滚动时照片从下面滑过看不出是「浮层」；取比卡片
-            // 低 5 灰阶的一档（原型 `.ghead` 本无底色，这是为吸顶遮挡补的）。
-            header_bg: if dark {
-                rgb(s.well)
-            } else {
-                Color32::from_rgb(0xFA, 0xFA, 0xFA)
-            },
+            // 日期分组头底色 = 卡片色。这一层底**只为吸顶时遮住下面的照片**，
+            // 不承担视觉层次（原型 `.ghead` 本就没有底色）；2026-11-27 用户
+            // 明确「不要背景的灰色」，所以亮色也用纯白，不再低 5 灰阶。
+            header_bg: rgb(s.well),
             separator,
             hairline,
             cell_border: if dark {
@@ -899,7 +895,7 @@ pub fn font_definitions(appearance: Appearance) -> egui::FontDefinitions {
         // 实测：该系数每 +0.25 让汉字下移约 3.5px（13px 字号），0.30 时汉字
         // 仍偏上 3.25px，取 0.55 才落到行内视觉中心。
         let tweak = egui::epaint::text::FontTweak {
-            y_offset_factor: 0.55,
+            y_offset_factor: 0.00,
             ..Default::default()
         };
         // 同一份字节用 Arc 共享给多个 face，避免为了字重复制几十 MB。

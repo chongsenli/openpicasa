@@ -826,14 +826,7 @@ fn draw_search(
         egui::TextEdit::singleline(&mut buf)
             .id(id)
             .frame(egui::Frame::NONE)
-            // 上下边距不对称 1px：CJK 字形在行内仍略偏上，靠这里补平
-            // （实测占位符中心比输入框中心高 1.5px）。
-            .margin(egui::Margin {
-                left: 2,
-                right: 2,
-                top: 5,
-                bottom: 3,
-            })
+            .margin(egui::Margin::symmetric(2, 4))
             .hint_text("搜索")
             .text_color(theme.text_primary),
     );
