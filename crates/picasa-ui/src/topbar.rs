@@ -35,9 +35,10 @@ use crate::theme::{Metrics, Theme};
 /// M5 v1.4 原型 `css/app.css:59,64` 把首页顶栏拆成「标题带 36 + 工具条 48」两段，
 /// 红绿灯在标题带中心 y=18，按钮在工具条中心 y=36+24=60。两者相距 42px，
 /// 不再像旧版单行 64px（按钮 y=32、离红绿灯仅 18px）那样贴着 macOS 标题栏。
+/// 暗色是另一套尺寸表（标题带 34 + 工具条 42），所以按主题取，见 [`Metrics::topbar_title_h`]。
 /// 查看器是另一套布局（`viewer::layout`，`TOP_H=44`），不走这里。
-pub fn toolbar_center_y(rect: Rect) -> f32 {
-    rect.top() + Metrics::TOPBAR_TITLE_H + Metrics::TOPBAR_TOOL_H / 2.0
+pub fn toolbar_center_y(rect: Rect, dark: bool) -> f32 {
+    rect.top() + Metrics::topbar_title_h(dark) + Metrics::topbar_tool_h(dark) / 2.0
 }
 
 /// 首页标题带里 egui 自绘应用名 `OpenPicasa` 的中心点（窗口相对坐标）。
@@ -46,10 +47,10 @@ pub fn toolbar_center_y(rect: Rect) -> f32 {
 /// 应用名改由这里自绘——对齐原型 `css/app.css` 的 `.appname`（标题带居中、12px）。
 /// 红绿灯在标题带左端（x≈0..78），故文字水平居中于整窗时不会与它重叠。
 /// 查看器走 `viewer::layout`，不调用本函数，按原型不画应用名。
-pub fn app_name_center(rect: Rect) -> Pos2 {
+pub fn app_name_center(rect: Rect, dark: bool) -> Pos2 {
     pos2(
         rect.left() + rect.width() / 2.0,
-        rect.top() + Metrics::TOPBAR_TITLE_H / 2.0,
+        rect.top() + Metrics::topbar_title_h(dark) / 2.0,
     )
 }
 
@@ -61,10 +62,11 @@ pub fn app_name_font_size(theme: &Theme) -> f32 {
 
 fn draw_app_name(painter: &egui::Painter, rect: Rect, theme: &Theme) {
     painter.text(
-        app_name_center(rect),
+        app_name_center(rect, theme.dark),
         Align2::CENTER_CENTER,
         "OpenPicasa",
-        FontId::new(app_name_font_size(theme), egui::FontFamily::Proportional),
+        // 原型 `div.appname{font-weight:560}`，取更近的 600。
+        crate::theme::semibold(app_name_font_size(theme)),
         theme.text_secondary,
     );
 }
@@ -175,8 +177,8 @@ fn object_button_rects(edit_right: f32, center_y: f32, d: f32) -> [Rect; 4] {
 ///
 /// 胶囊紧贴搜索框左侧、整簇靠右（v1.4 定稿）；搜索框常驻可见（H2），
 /// 宽度随窗口收窄，但不会低于 170 px。
-fn topbar_right_rects(rect: Rect, d: f32) -> (Rect, Rect, Rect, Rect, Rect) {
-    let cy = toolbar_center_y(rect);
+fn topbar_right_rects(rect: Rect, d: f32, dark: bool) -> (Rect, Rect, Rect, Rect, Rect) {
+    let cy = toolbar_center_y(rect, dark);
     let margin = 14.0;
     let circle_at =
         |right_x: f32| -> Rect { Rect::from_center_size(pos2(right_x - d / 2.0, cy), vec2(d, d)) };
@@ -231,7 +233,7 @@ pub fn show(
     };
     let rect = Rect::from_min_size(
         ui.max_rect().left_top(),
-        vec2(ui.max_rect().width(), Metrics::TOPBAR_H),
+        vec2(ui.max_rect().width(), Metrics::topbar_h(theme.dark)),
     );
     let _ = ui.allocate_space(rect.size());
     let painter = ui.painter_at(rect);
@@ -256,10 +258,11 @@ pub fn show(
 
     let d = Metrics::TOPBAR_ICON_D;
     let margin = 14.0;
-    let cy = toolbar_center_y(rect);
+    let cy = toolbar_center_y(rect, theme.dark);
 
     // ---- 右簇（从右往左）：… 筛选 排序 搜索 排布 ----
-    let (layout_rect, search_rect, sort_r, filter_r, more_r) = topbar_right_rects(rect, d);
+    let (layout_rect, search_rect, sort_r, filter_r, more_r) =
+        topbar_right_rects(rect, d, theme.dark);
     out.more_button = Some(more_r);
     out.filter_button = Some(filter_r);
     out.sort_button = Some(sort_r);
@@ -1549,8 +1552,8 @@ mod m41_tests {
     /// 不再用 `rect.center()`（那会得到 42，仍贴上标题带）。
     #[test]
     fn m5_v1_toolbar_content_sits_below_the_title_band() {
-        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, Metrics::TOPBAR_H));
-        let cy = toolbar_center_y(rect);
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, Metrics::topbar_h(false)));
+        let cy = toolbar_center_y(rect, false);
         assert_eq!(cy, 60.0, "工具条中心应在 y=60");
         assert_eq!(
             rect.center().y,
@@ -1561,14 +1564,17 @@ mod m41_tests {
 
         // 右簇（排布胶囊 / 搜索 / 排序 / 筛选 / 更多）也都落在工具条中心
         let (_layout, search, sort, filter, more) =
-            topbar_right_rects(rect, Metrics::TOPBAR_ICON_D);
+            topbar_right_rects(rect, Metrics::TOPBAR_ICON_D, false);
         for r in [search, sort, filter, more] {
             assert!(
                 (r.center().y - cy).abs() < 0.01,
                 "右簇控件中心 {} 偏离工具条中线 {cy}",
                 r.center().y
             );
-            assert!(r.top() >= Metrics::TOPBAR_TITLE_H, "控件侵入标题带：{r:?}");
+            assert!(
+                r.top() >= Metrics::topbar_title_h(false),
+                "控件侵入标题带：{r:?}"
+            );
         }
     }
 
@@ -1576,9 +1582,13 @@ mod m41_tests {
     /// 且水平上远离左端红绿灯（x≈0..78）——不能像原生标题那样盖住红绿灯。
     #[test]
     fn m5_v1_app_name_is_centered_and_clears_traffic_lights() {
-        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, Metrics::TOPBAR_H));
-        let c = app_name_center(rect);
-        assert_eq!(c.y, Metrics::TOPBAR_TITLE_H / 2.0, "应用名在标题带竖直中线");
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, Metrics::topbar_h(false)));
+        let c = app_name_center(rect, false);
+        assert_eq!(
+            c.y,
+            Metrics::topbar_title_h(false) / 2.0,
+            "应用名在标题带竖直中线"
+        );
         assert_eq!(c.x, 640.0, "应用名水平居中");
         assert!(c.x - 60.0 > 78.0, "应用名左缘须远离红绿灯区（x≈0..78）");
     }

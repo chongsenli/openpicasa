@@ -302,7 +302,7 @@ fn section_title(
     actions: &mut Vec<SidebarAction>,
 ) {
     let (rect, resp) = ui.allocate_exact_size(
-        vec2(ui.available_width(), Metrics::SIDEBAR_SECTION_H),
+        vec2(ui.available_width(), Metrics::sidebar_section_h(theme.dark)),
         Sense::click(),
     );
     let painter = ui.painter_at(rect);
@@ -311,8 +311,8 @@ fn section_title(
         pos2(rect.left() + 14.0, rect.center().y),
         Align2::LEFT_CENTER,
         title,
-        // M5 §5.2：暗色分组标题 11px、字距加宽、弱化色。
-        FontId::new(sidebar_row_font_size(theme), egui::FontFamily::Proportional),
+        // M5 §5.2 + 原型 `div.sec`：分组标题 600 字重，暗色再弱化颜色。
+        crate::theme::semibold(sidebar_row_font_size(theme)),
         color,
     );
     // 折叠指示：右端小箭头（截图分组默认展开、悬停才现箭头；这里常显更可用）
@@ -362,7 +362,10 @@ fn group_header(
     actions: &mut Vec<SidebarAction>,
 ) {
     let (rect, resp) = ui.allocate_exact_size(
-        vec2(ui.available_width().max(1.0), Metrics::SIDEBAR_SECTION_H),
+        vec2(
+            ui.available_width().max(1.0),
+            Metrics::sidebar_section_h(theme.dark),
+        ),
         Sense::click(),
     );
     // 防御：窗口极窄 / 侧栏收起过渡帧时 rect 可能退化（宽度 0 或负）。
@@ -377,7 +380,8 @@ fn group_header(
         pos2(rect.left() + 14.0, rect.center().y),
         Align2::LEFT_CENTER,
         title,
-        FontId::new(sidebar_row_font_size(theme), egui::FontFamily::Proportional),
+        // 原型 `div.sec{font-weight:600}`。
+        crate::theme::semibold(sidebar_row_font_size(theme)),
         color,
     );
     // 右端「＋」新建
@@ -469,7 +473,10 @@ fn rows(
 ) {
     for (name, count) in items {
         let (r, row_resp) = ui.allocate_exact_size(
-            vec2(ui.available_width().max(1.0), Metrics::SIDEBAR_ROW_H),
+            vec2(
+                ui.available_width().max(1.0),
+                Metrics::sidebar_row_h(theme.dark),
+            ),
             Sense::click(),
         );
         if r.width() < 2.0 || !r.is_finite() {
@@ -503,7 +510,8 @@ fn rows(
             pos2(r.left() + 33.0, r.center().y),
             Align2::LEFT_CENTER,
             &shown,
-            FontId::new(12.5, egui::FontFamily::Proportional),
+            // 原型 `span.name`：13px（暗 12.5）/ font-weight 500。
+            crate::theme::medium(sidebar_row_font_size(theme)),
             if selected {
                 theme.row_selected_text
             } else {
@@ -524,7 +532,8 @@ fn rows(
             pos2(count_right, r.center().y),
             Align2::RIGHT_CENTER,
             count.to_string(),
-            FontId::new(11.0, egui::FontFamily::Proportional),
+            // 原型 `span.cnt`：11.5px（暗 10.5）/ font-weight 500。
+            crate::theme::medium(sidebar_count_font_size(theme)),
             theme.text_secondary,
         );
         if let Some(n) = in_view_count {
@@ -830,7 +839,7 @@ fn fav_row(
     enabled: bool,
     _has_focus: bool,
 ) -> egui::Response {
-    let row_h = Metrics::SIDEBAR_ROW_H;
+    let row_h = Metrics::sidebar_row_h(theme.dark);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
     let painter = ui.painter_at(rect);
     // 内容区留 6px 左右边距，让选中胶囊不顶满整行（截图样式）
@@ -855,19 +864,17 @@ fn fav_row(
         pos2(rect.left() + 40.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        FontId::new(12.5, egui::FontFamily::Proportional),
+        // 原型 `span.name`：13px（暗 12.5）/ font-weight 500。
+        crate::theme::medium(sidebar_row_font_size(theme)),
         text_color,
     );
     if let Some(n) = count {
-        // 计数右对齐、灰色小字（截图的「9」）
+        // 计数右对齐、灰色小字（截图的「9」），原型 `span.cnt` 500。
         painter.text(
             pos2(rect.right() - 16.0, rect.center().y),
             Align2::RIGHT_CENTER,
             n.to_string(),
-            FontId::new(
-                sidebar_count_font_size(theme),
-                egui::FontFamily::Proportional,
-            ),
+            crate::theme::medium(sidebar_count_font_size(theme)),
             theme.sidebar_section_text,
         );
     }
@@ -920,7 +927,7 @@ fn imported_index(
     actions: &mut Vec<SidebarAction>,
 ) {
     let t = *ctx.theme;
-    let row_h = Metrics::SIDEBAR_ROW_H;
+    let row_h = Metrics::sidebar_row_h(t.dark);
     let active = match lib.view {
         View::Folder(id) => Some(id),
         _ => None,
@@ -1031,7 +1038,7 @@ fn render_tree_rows(
     salt: &str,
 ) {
     let t = *ctx.theme;
-    let row_h = Metrics::SIDEBAR_ROW_H;
+    let row_h = Metrics::sidebar_row_h(t.dark);
     let total = rows.len();
 
     // 目录多时虚拟化（1 万目录也不卡）。
@@ -1375,7 +1382,6 @@ fn tray(ui: &mut Ui, lib: &Library, ctx: &mut SidebarCtx<'_>, actions: &mut Vec<
     }
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod m5_font_tests {
     use super::*;

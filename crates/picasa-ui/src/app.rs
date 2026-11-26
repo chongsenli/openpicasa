@@ -2834,7 +2834,7 @@ impl OpenPicasaApp {
 
         // ① 顶部工具栏（M3.1：macOS「照片」风格单行顶栏）
         egui::Panel::top("toolbar-panel")
-            .exact_size(Metrics::TOPBAR_H)
+            .exact_size(Metrics::topbar_h(self.theme.dark))
             // 用户 2026-11-25：取消顶栏与侧栏的灰色边框。egui 的 Panel 默认会画一条
             // 分隔线（`show_separator_line`），那条线就是「顶栏/侧栏有个灰边」的来源；
             // 明度差（窗底色 vs 白井）+ 卡片圆角已经足够分界。
@@ -3142,8 +3142,9 @@ impl OpenPicasaApp {
                     card_rect.max,
                 );
                 // 栅格的可滚视口仍到卡片底，照片会画到状态栏底下；原型里
-                // `div.content` 止于 776、`div.status` 独占 776..808。这里先用卡片色
-                // 把状态栏那一条盖住（底部两角跟卡片同半径），再画状态栏内容。
+                // `div.content` 止于 776、`div.status` 独占 776..808。这里先用
+                // **卡片内层色**把状态栏那一条盖住（底部两角跟卡片同半径），再画状态栏内容。
+                // 暗色的内层是 `.inner` 的 #151515，不是外卡的 #1c1c1c（实测差 7 灰阶）。
                 let r = theme.radius_card.round() as u8;
                 ui.painter().rect_filled(
                     status_rect,
@@ -3153,7 +3154,7 @@ impl OpenPicasaApp {
                         sw: r,
                         se: r,
                     },
-                    theme.well_bg,
+                    theme.card_inner_bg(),
                 );
                 ui.scope_builder(egui::UiBuilder::new().max_rect(status_rect), |ui| {
                     // M5-IA-02：「已用 mm:ss」以**连续运行**计时，而不是批次时刻。
@@ -4096,7 +4097,10 @@ impl OpenPicasaApp {
                         .show(ui, |ui| {
                             ui.set_min_width(200.0);
                             if ui
-                                .add(egui::Button::new(crate::index_mgr::reveal_label()).frame(false))
+                                .add(
+                                    egui::Button::new(crate::index_mgr::reveal_label())
+                                        .frame(false),
+                                )
                                 .clicked()
                             {
                                 let _ = crate::macos::open_folder(std::path::Path::new(&path));
@@ -5320,7 +5324,7 @@ impl eframe::App for OpenPicasaApp {
         // 双行顶栏：红绿灯与面包屑同在上行（§7 像素校准）。
         frame.set_traffic_lights_position(
             &ctx,
-            egui::Rangef::new(0.0, Metrics::TOPBAR_LINE1_H),
+            egui::Rangef::new(0.0, Metrics::topbar_title_h(self.theme.dark)),
             14.0,
         );
 
@@ -5607,7 +5611,10 @@ mod m5_chrome_tests {
             sb.contains("if bottom_radius <= 0.0"),
             "内嵌在卡片里时不画顶缘发丝线（原型 border-top: none）"
         );
-        assert!(app.contains("theme.well_bg"), "盖住溢出照片用的是卡片色");
+        assert!(
+            app.contains("theme.card_inner_bg()"),
+            "盖住溢出照片用的是卡片内层色（暗色 .inner #151515，不是外卡 #1c1c1c）"
+        );
     }
 
     /// 用户 2026-11-25：顶栏 / 侧栏不要灰色边框，白色内容井的四角要完整露出。
@@ -5685,7 +5692,10 @@ mod m5r5_tests {
         );
 
         let child = folder_ctx_items(false);
-        assert!(child.contains(&crate::index_mgr::reveal_label()), "{child:?}");
+        assert!(
+            child.contains(&crate::index_mgr::reveal_label()),
+            "{child:?}"
+        );
         assert!(child.contains(&"刷新此文件夹"), "{child:?}");
         assert!(
             child.contains(&"关闭此文件夹（不再显示）"),

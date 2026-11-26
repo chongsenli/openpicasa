@@ -23,6 +23,35 @@ use std::sync::Arc;
 use eframe::egui::{self, Color32, FontData, FontFamily, FontId, TextStyle};
 use picasa_core::Appearance;
 
+// ---- 内嵌 Inter 字重（原型用 Inter 400 / 500 / 560 / 600）----
+//
+// 原型 `css/app.css` 用的是 Inter（`font-family: Inter, ...`），并在多处用
+// `font-weight: 500 / 560 / 600`（侧栏行名 500、组头 600、顶栏应用名 560）。
+// egui 的 `FontId` 只有 (size, family)，**没有 weight**，所以字重只能拆成
+// 独立 `FontFamily`：`op-medium`(500) 与 `op-semibold`(600)。
+//
+// 字体随二进制一起发布（SIL OFL 1.1，见 `assets/fonts/OFL.txt`），
+// 不依赖系统是否装了 Inter —— macOS 没有 `/System/Library/Fonts/Inter.ttf`，
+// 旧实现会静默回退到 egui 内置的 Ubuntu-Light，字形与原型差很多。
+const INTER_REGULAR_TTF: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+const INTER_MEDIUM_TTF: &[u8] = include_bytes!("../assets/fonts/Inter-Medium.ttf");
+const INTER_SEMIBOLD_TTF: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
+
+/// 中等字重族名（原型 `font-weight: 500`／应用名 560）。
+pub const FAMILY_MEDIUM: &str = "op-medium";
+/// 半粗字重族名（原型 `font-weight: 600`，如侧栏组头）。
+pub const FAMILY_SEMIBOLD: &str = "op-semibold";
+
+/// Inter 500：侧栏行名、计数、需要「略重一点」的标签。
+pub fn medium(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(FAMILY_MEDIUM.into()))
+}
+
+/// Inter 600：侧栏组头、顶栏应用名（原型 560，取更近的 600）。
+pub fn semibold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(FAMILY_SEMIBOLD.into()))
+}
+
 /// 两套主题共用的设计 token（按主题取值不同）。
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
@@ -252,6 +281,17 @@ fn rgb(hex: u32) -> Color32 {
 }
 
 impl Theme {
+    /// 卡片内层底色：暗色 `css/app.css:159 .inner{background:#151515}`（比外卡 #1c1c1c 暗一档），
+    /// 亮色没有这层，卡片本身就是白色。底栏内嵌在卡片里，也要用这个色，
+    /// 否则暗色底栏会露出外卡的 #1c1c1c，跟原型差一档（实测差 7 个灰阶）。
+    pub fn card_inner_bg(&self) -> Color32 {
+        if self.dark {
+            self.grid_bg
+        } else {
+            self.well_bg
+        }
+    }
+
     /// 亮色。产品默认。
     pub fn light() -> Self {
         Self::from_spec(&LIGHT)
@@ -491,6 +531,39 @@ impl Metrics {
     pub const TOPBAR_H: f32 = Self::TOPBAR_TITLE_H + Self::TOPBAR_TOOL_H;
     /// 红绿灯的垂直带 = 标题带（原型红绿灯 dy=12 高 12 → 中心 y=18）。
     pub const TOPBAR_LINE1_H: f32 = Self::TOPBAR_TITLE_H;
+
+    // ---- 暗色是另一套尺寸表（2026-11-26 逐像素比对验证）----
+    // 原型 `css/app.css` 的 `html[data-theme="dark"]` 段不仅换色，还整表改尺寸：
+    //   `:60` .titlebar{height:34px;border-bottom:1px solid #000}（亮 36）
+    //   `:65` .toolbar{height:42px}（亮 48）
+    //   `:101` .sec{padding:14px 10px 6px}（高 ≈35，亮 27.19）
+    //   `:108` .row{height:28px}（亮 30）
+    // 所以这些量必须按主题取，不能再用单一 const。
+
+    /// 标题带高度：亮 36 / 暗 34。
+    pub fn topbar_title_h(dark: bool) -> f32 {
+        if dark { 34.0 } else { Self::TOPBAR_TITLE_H }
+    }
+
+    /// 工具条高度：亮 48 / 暗 42。
+    pub fn topbar_tool_h(dark: bool) -> f32 {
+        if dark { 42.0 } else { Self::TOPBAR_TOOL_H }
+    }
+
+    /// 顶栏总高：亮 84 / 暗 76 + 1px 底边线 = 77（原型暗色 `.body` 从 y=77 起）。
+    pub fn topbar_h(dark: bool) -> f32 {
+        Self::topbar_title_h(dark) + Self::topbar_tool_h(dark) + if dark { 1.0 } else { 0.0 }
+    }
+
+    /// 侧栏行高：亮 30 / 暗 28。
+    pub fn sidebar_row_h(dark: bool) -> f32 {
+        if dark { 28.0 } else { Self::SIDEBAR_ROW_H }
+    }
+
+    /// 侧栏组头行高：亮 27 / 暗 35（暗色 padding 14/10/6 上下留白更大）。
+    pub fn sidebar_section_h(dark: bool) -> f32 {
+        if dark { 35.0 } else { Self::SIDEBAR_SECTION_H }
+    }
     pub const TOPBAR_ICON_D: f32 = 38.0;
     /// 左栏默认宽度。M5-R3 视觉参考 228（亮）/ 216（暗）；**宽度偏好逻辑不变**，
     /// 这里保持既有默认 216，不借主题改用户拖出来的宽度。
@@ -705,8 +778,46 @@ fn read_first(candidates: &'static [&'static str]) -> Option<(&'static str, Vec<
 /// 系统没有主字体时**静默回退**到 egui 内置字体（中文仍由 CJK 回退保证），
 /// 不因为缺一个拉丁字体把整套主题做废。字体加载失败只降低观感，不影响功能。
 fn install_fonts(ctx: &egui::Context, appearance: Appearance) {
+    ctx.set_fonts(font_definitions(appearance));
+}
+
+/// 组装字体表：内嵌 Inter 三档字重 + 系统主字体（若有）+ 中文回退。
+///
+/// 独立成函数是为了让测试能直接检查 `families` —— 「族没注册」这类错误
+/// 在界面上只表现为「字重没变」，靠肉眼很容易漏。
+pub fn font_definitions(appearance: Appearance) -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     let (primary_candidates, cjk_candidates) = font_file_candidates(appearance);
+
+    // 内嵌 Inter 三个字重：Regular 进 Proportional，另外两档各建一个族。
+    // 这是 1:1 还原里唯一无法用常量表达式解决的一层 —— 字形粗细。
+    fonts.font_data.insert(
+        "op_ui_regular".to_owned(),
+        Arc::new(FontData::from_static(INTER_REGULAR_TTF)),
+    );
+    fonts.font_data.insert(
+        "op_ui_medium".to_owned(),
+        Arc::new(FontData::from_static(INTER_MEDIUM_TTF)),
+    );
+    fonts.font_data.insert(
+        "op_ui_semibold".to_owned(),
+        Arc::new(FontData::from_static(INTER_SEMIBOLD_TTF)),
+    );
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, "op_ui_regular".to_owned());
+    fonts
+        .families
+        .entry(FontFamily::Name(FAMILY_MEDIUM.into()))
+        .or_default()
+        .extend(["op_ui_medium".to_owned(), "op_ui_regular".to_owned()]);
+    fonts
+        .families
+        .entry(FontFamily::Name(FAMILY_SEMIBOLD.into()))
+        .or_default()
+        .extend(["op_ui_semibold".to_owned(), "op_ui_medium".to_owned()]);
 
     if let Some((path, bytes)) = read_first(primary_candidates) {
         tracing::info!(path, "已加载主题主字体");
@@ -717,11 +828,11 @@ fn install_fonts(ctx: &egui::Context, appearance: Appearance) {
             .families
             .entry(FontFamily::Proportional)
             .or_default()
-            .insert(0, "op_ui".to_owned());
+            .insert(1, "op_ui".to_owned());
     } else {
-        tracing::warn!(
+        tracing::info!(
             appearance = appearance.as_str(),
-            "未找到主题主字体，拉丁字形回退到 egui 内置字体"
+            "系统无主题主字体，使用内嵌 Inter"
         );
     }
 
@@ -732,10 +843,33 @@ fn install_fonts(ctx: &egui::Context, appearance: Appearance) {
             y_offset_factor: 0.30,
             ..Default::default()
         };
+        // 同一份字节用 Arc 共享给多个 face，避免为了字重复制几十 MB。
+        let shared = Arc::new(bytes);
         fonts.font_data.insert(
             "cjk_fallback".to_owned(),
-            Arc::new(FontData::from_owned(bytes).tweak(tweak)),
+            Arc::new(FontData {
+                font: shared.clone(),
+                index: 0,
+                tweak: tweak.clone(),
+            }),
         );
+
+        // `Hiragino Sans GB.ttc` 里 W3(400)=index 0、W6(600)=index 2。中文的
+        // semibold（侧栏组头等）只有靠 W6 才真的变粗；medium(500) 中文保留 W3
+        // —— 500 与 400 的中文观感差极小，不值得再背一份字体。
+        let has_w6 = path.ends_with("Hiragino Sans GB.ttc");
+        if has_w6 {
+            fonts.font_data.insert(
+                "cjk_w6".to_owned(),
+                Arc::new(FontData {
+                    font: shared.clone(),
+                    index: 2,
+                    tweak: tweak.clone(),
+                }),
+            );
+        }
+
+        // 三个族都要挂中文回退：中文在 medium/semibold 里同样要能显示。
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             fonts
                 .families
@@ -743,11 +877,21 @@ fn install_fonts(ctx: &egui::Context, appearance: Appearance) {
                 .or_default()
                 .push("cjk_fallback".to_owned());
         }
+        fonts
+            .families
+            .entry(FontFamily::Name(FAMILY_MEDIUM.into()))
+            .or_default()
+            .push("cjk_fallback".to_owned());
+        fonts
+            .families
+            .entry(FontFamily::Name(FAMILY_SEMIBOLD.into()))
+            .or_default()
+            .push(if has_w6 { "cjk_w6" } else { "cjk_fallback" }.to_owned());
     } else {
         tracing::warn!("未找到可用的 CJK 回退字体，中文可能显示为方框");
     }
 
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 #[cfg(test)]
@@ -964,6 +1108,154 @@ mod tests {
         assert_eq!(
             ctx.options(|o| o.theme_preference),
             egui::ThemePreference::System
+        );
+    }
+}
+
+#[cfg(test)]
+mod m5_type_tests {
+    use super::*;
+
+    /// 三个字重的 Inter 必须真的嵌进二进制。
+    ///
+    /// 旧实现只去系统路径找 Inter，macOS 没有 `/System/Library/Fonts/Inter.ttf`，
+    /// 于是静默回退到 egui 内置的 Ubuntu-Light —— 字形与原型差很多却没有任何报错。
+    #[test]
+    fn inter_weights_are_embedded_in_the_binary() {
+        for (name, bytes, min_len) in [
+            ("Regular", INTER_REGULAR_TTF, 350_000),
+            ("Medium", INTER_MEDIUM_TTF, 350_000),
+            ("SemiBold", INTER_SEMIBOLD_TTF, 350_000),
+        ] {
+            assert!(
+                bytes.len() > min_len,
+                "{name} 字体太小（{} 字节），可能没真正嵌入",
+                bytes.len()
+            );
+            // TrueType 头：0x00010000 或 'true'；OpenType/CFF 是 'OTTO'。
+            let magic = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            assert!(
+                magic == 0x0001_0000
+                    || magic == u32::from_be_bytes(*b"true")
+                    || magic == u32::from_be_bytes(*b"OTTO"),
+                "{name} 不是有效的字体文件（magic={magic:#x}）"
+            );
+        }
+        assert_ne!(INTER_REGULAR_TTF.len(), INTER_MEDIUM_TTF.len());
+        assert_ne!(INTER_MEDIUM_TTF.len(), INTER_SEMIBOLD_TTF.len());
+    }
+
+    /// 字重族必须注册成功 —— egui 的 `FontId` 没有 weight，只能靠族区分。
+    #[test]
+    fn medium_and_semibold_families_are_registered() {
+        let fonts = font_definitions(Appearance::Light);
+        for key in ["op_ui_regular", "op_ui_medium", "op_ui_semibold"] {
+            assert!(fonts.font_data.contains_key(key), "缺字体数据 {key}");
+        }
+        let prop = fonts
+            .families
+            .get(&FontFamily::Proportional)
+            .expect("Proportional 族必须存在");
+        assert_eq!(prop[0], "op_ui_regular", "拉丁主字体应是内嵌 Inter Regular");
+
+        let med = fonts
+            .families
+            .get(&FontFamily::Name(FAMILY_MEDIUM.into()))
+            .expect("medium 族必须注册");
+        assert_eq!(med[0], "op_ui_medium");
+
+        let semi = fonts
+            .families
+            .get(&FontFamily::Name(FAMILY_SEMIBOLD.into()))
+            .expect("semibold 族必须注册");
+        assert_eq!(semi[0], "op_ui_semibold");
+
+        // 两族都必须带 Regular 兜底，否则缺字时会直接空白。
+        assert!(med.contains(&"op_ui_regular".to_owned()));
+        assert!(semi.contains(&"op_ui_medium".to_owned()));
+    }
+
+    /// 原型 `div.sec` 600、`span.name`/`span.cnt` 500、`div.appname` 560 ——
+    /// 这些位置必须用字重族，且不能被悄悄改回 Proportional。
+    #[test]
+    fn prototype_weights_use_the_dedicated_families() {
+        let sidebar = include_str!("sidebar.rs");
+        assert!(
+            sidebar.contains("crate::theme::semibold(sidebar_row_font_size(theme))"),
+            "侧栏组头应按原型 600 用 semibold"
+        );
+        assert!(
+            sidebar.contains("crate::theme::medium(sidebar_row_font_size(theme))"),
+            "侧栏行名应按原型 500 用 medium"
+        );
+        assert!(
+            sidebar.contains("crate::theme::medium(sidebar_count_font_size(theme))"),
+            "侧栏计数应按原型 500 用 medium"
+        );
+        let topbar = include_str!("topbar.rs");
+        assert!(
+            topbar.contains("crate::theme::semibold(app_name_font_size(theme))"),
+            "应用名应按原型 560 用 semibold"
+        );
+    }
+}
+
+/// 原型暗色主题是**另一套尺寸表**，不是只换色。
+///
+/// 逐像素比对（2026-11-26）发现：`css/app.css` 的 `html[data-theme="dark"]` 段
+/// 把 `.titlebar` 34px（亮 36）、`.toolbar` 42px（亮 48）、`.row` 28px（亮 30）、
+/// `.sec` padding 14/10/6（高 35，亮 27.19）全部改掉。此前应用两套主题共用
+/// 一套几何，暗色首页的分区差异率因此高达 sidebar 17.5% / toolbar 10.9%。
+#[cfg(test)]
+mod m5_theme_metrics_tests {
+    use super::*;
+
+    #[test]
+    fn dark_theme_uses_its_own_size_table() {
+        // 顶栏：亮 36+48=84；暗 34+42+1px 底边=77（原型暗色 .body 从 y=77 起）
+        assert_eq!(Metrics::topbar_title_h(false), 36.0);
+        assert_eq!(Metrics::topbar_title_h(true), 34.0);
+        assert_eq!(Metrics::topbar_tool_h(false), 48.0);
+        assert_eq!(Metrics::topbar_tool_h(true), 42.0);
+        assert_eq!(Metrics::topbar_h(false), 84.0);
+        assert_eq!(Metrics::topbar_h(true), 77.0);
+
+        // 侧栏：行高 30→28；组头 27→35（暗色上下留白更大，组头比行还高）
+        assert_eq!(Metrics::sidebar_row_h(false), 30.0);
+        assert_eq!(Metrics::sidebar_row_h(true), 28.0);
+        assert_eq!(Metrics::sidebar_section_h(false), 27.0);
+        assert_eq!(Metrics::sidebar_section_h(true), 35.0);
+        assert!(
+            Metrics::sidebar_section_h(true) > Metrics::sidebar_row_h(true),
+            "暗色组头应比行高更高（原型 35 > 28）"
+        );
+        assert!(
+            Metrics::sidebar_section_h(false) < Metrics::sidebar_row_h(false),
+            "亮色组头应比行矮（原型 27 < 30）"
+        );
+    }
+
+    /// 源码锁：渲染路径必须走主题函数，不能退回单一 const
+    /// （否则暗色又会跟亮色共用一套几何，差异率悄悄涨回去）。
+    #[test]
+    fn chrome_renders_with_theme_aware_heights() {
+        let side = include_str!("sidebar.rs");
+        let body = side.split("#[cfg(test)]").next().unwrap_or(side);
+        assert!(body.contains("sidebar_row_h("), "侧栏行高要走主题函数");
+        assert!(body.contains("sidebar_section_h("), "侧栏组头要走主题函数");
+        let dead = ["SIDEBAR_ROW_H)", "x"].concat();
+        assert!(!body.contains(&dead), "渲染路径不应再直接用 SIDEBAR_ROW_H");
+
+        let bar = include_str!("topbar.rs");
+        let bar_body = bar.split("#[cfg(test)]").next().unwrap_or(bar);
+        assert!(
+            bar_body.contains("topbar_h(theme.dark)"),
+            "顶栏高度按主题取"
+        );
+        assert!(
+            bar_body.contains("topbar_title_h(dark)")
+                || bar_body.contains("topbar_title_h(theme.dark)"),
+            "标题带高度按主题取"
         );
     }
 }
