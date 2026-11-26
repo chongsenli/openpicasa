@@ -875,9 +875,13 @@ pub fn font_definitions(appearance: Appearance) -> egui::FontDefinitions {
 
     if let Some((path, bytes)) = read_first(cjk_candidates) {
         tracing::info!(path, bytes = bytes.len(), "已加载 CJK 回退字体");
-        // 汉字与拉丁混排时顶端对齐（M32-UI-13 的既有校准）。
+        // 汉字与拉丁混排的垂直校准。M32-UI-13 当时取 0.30（按那时的系统字体
+        // 顶端对齐）；M5 换成内嵌 Inter 后 metrics 变了，0.30 会把汉字整体抬
+        // 高约 0.25em（实测 13px 下偏上 3.25px，侧栏行、搜索框占位符都看得到）。
+        // 实测：该系数每 +0.25 让汉字下移约 3.5px（13px 字号），0.30 时汉字
+        // 仍偏上 3.25px，取 0.55 才落到行内视觉中心。
         let tweak = egui::epaint::text::FontTweak {
-            y_offset_factor: 0.30,
+            y_offset_factor: 0.55,
             ..Default::default()
         };
         // 同一份字节用 Arc 共享给多个 face，避免为了字重复制几十 MB。
