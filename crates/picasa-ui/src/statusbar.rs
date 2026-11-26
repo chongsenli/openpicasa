@@ -157,7 +157,10 @@ pub fn show(
             galley = painter.layout_no_wrap(format!("{short}…"), font.clone(), theme.status_text);
         }
         painter.galley(
-            pos2(x, rect.center().y - galley.size().y / 2.0),
+            pos2(
+                x,
+                rect.center().y - galley.size().y / 2.0 - crate::theme::optical_shift(font.size),
+            ),
             galley,
             theme.status_text,
         );

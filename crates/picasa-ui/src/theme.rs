@@ -835,6 +835,29 @@ fn install_fonts(ctx: &egui::Context, appearance: Appearance) {
 /// 组装字体表：内嵌 Inter 三档字重 + 系统主字体（若有）+ 中文回退。
 ///
 /// 独立成函数是为了让测试能直接检查 `families` —— 「族没注册」这类错误
+/// 字形在行框里的视觉校准系数（单位：em）。
+///
+/// 这是「所有文字看起来都偏上」的共性问题：egui 的行高取字体 metrics 的
+/// ascent+descent，而 Inter / 系统 CJK 的 ascent 偏大、字面（cap height、
+/// 汉字方块）在行框里靠上，于是 `Align2::CENTER` 一类居中对齐实际把字形
+/// 放在了视觉中心之上。实测 13px 字号偏上约 6px ≈ 0.46em。
+///
+/// 关键点：这个系数必须**同时**作用在拉丁字体与 CJK 回退字体上。只挪 CJK
+/// 会让同一行的汉字与数字错开基线（M32 的 0.30 与后来的 0.55 都栽在这里）。
+pub const TEXT_VISUAL_TWEAK: f32 = 0.55;
+
+/// 手绘 galley 时的光学补偿量：字形在行框内已被 `TEXT_VISUAL_TWEAK` 下移，
+/// 凡是按「galley 顶部」定位的调用点都要把这个量减回去，否则整行会压到容器下沿。
+pub fn optical_shift(font_size: f32) -> f32 {
+    TEXT_VISUAL_TWEAK * font_size
+}
+
+/// 给字体套上统一的视觉校准，保证所有字形一起上下平移、相对基线不变。
+fn tweaked(mut data: FontData) -> FontData {
+    data.tweak.y_offset_factor = TEXT_VISUAL_TWEAK;
+    data
+}
+
 /// 在界面上只表现为「字重没变」，靠肉眼很容易漏。
 pub fn font_definitions(appearance: Appearance) -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
@@ -844,15 +867,15 @@ pub fn font_definitions(appearance: Appearance) -> egui::FontDefinitions {
     // 这是 1:1 还原里唯一无法用常量表达式解决的一层 —— 字形粗细。
     fonts.font_data.insert(
         "op_ui_regular".to_owned(),
-        Arc::new(FontData::from_static(INTER_REGULAR_TTF)),
+        Arc::new(tweaked(FontData::from_static(INTER_REGULAR_TTF))),
     );
     fonts.font_data.insert(
         "op_ui_medium".to_owned(),
-        Arc::new(FontData::from_static(INTER_MEDIUM_TTF)),
+        Arc::new(tweaked(FontData::from_static(INTER_MEDIUM_TTF))),
     );
     fonts.font_data.insert(
         "op_ui_semibold".to_owned(),
-        Arc::new(FontData::from_static(INTER_SEMIBOLD_TTF)),
+        Arc::new(tweaked(FontData::from_static(INTER_SEMIBOLD_TTF))),
     );
     fonts
         .families
@@ -895,7 +918,7 @@ pub fn font_definitions(appearance: Appearance) -> egui::FontDefinitions {
         // 实测：该系数每 +0.25 让汉字下移约 3.5px（13px 字号），0.30 时汉字
         // 仍偏上 3.25px，取 0.55 才落到行内视觉中心。
         let tweak = egui::epaint::text::FontTweak {
-            y_offset_factor: 0.00,
+            y_offset_factor: TEXT_VISUAL_TWEAK,
             ..Default::default()
         };
         // 同一份字节用 Arc 共享给多个 face，避免为了字重复制几十 MB。
@@ -1232,6 +1255,31 @@ mod m5_type_tests {
 
     /// 原型 `div.sec` 600、`span.name`/`span.cnt` 500、`div.appname` 560 ——
     /// 这些位置必须用字重族，且不能被悄悄改回 Proportional。
+    /// 光学校准必须**同时**落在拉丁与 CJK 字体上。
+    ///
+    /// 只挪 CJK 会让同一行的汉字与数字错开基线（M32 的 0.30、后来的 0.55 都是
+    /// 这样翻车的）；只挪拉丁则汉字继续偏上。这条门禁把这个约束钉死。
+    #[test]
+    fn optical_tweak_applies_to_latin_and_cjk_alike() {
+        assert!(
+            (0.3..0.7).contains(&TEXT_VISUAL_TWEAK),
+            "视觉校准系数应是 0.3~0.7 之间的量级，实测 13px 下每 0.1 约移动 1.3px"
+        );
+        let src = include_str!("theme.rs");
+        assert!(
+            src.contains("data.tweak.y_offset_factor = TEXT_VISUAL_TWEAK;"),
+            "拉丁字体必须走 tweaked() 统一校准"
+        );
+        assert!(
+            src.contains("y_offset_factor: TEXT_VISUAL_TWEAK,"),
+            "CJK 回退字体必须用同一个系数，否则汉字与数字会错基线"
+        );
+        assert!(
+            (optical_shift(13.0) - TEXT_VISUAL_TWEAK * 13.0).abs() < f32::EPSILON,
+            "optical_shift 是手绘 galley 的补偿入口，必须等于系数×字号"
+        );
+    }
+
     #[test]
     fn prototype_weights_use_the_dedicated_families() {
         let sidebar = include_str!("sidebar.rs");

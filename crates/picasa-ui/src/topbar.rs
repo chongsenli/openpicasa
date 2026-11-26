@@ -839,6 +839,9 @@ fn draw_search(
         egui::TextEdit::singleline(&mut buf)
             .id(id)
             .frame(egui::Frame::NONE)
+            // CJK 回退字体撑高行框，字形在框内偏下；交给 egui 按行高居中
+            // （vertical_align）比手工调 margin 稳，margin 只留水平内缩。
+            .vertical_align(egui::Align::Center)
             .margin(egui::Margin::symmetric(2, 4))
             .hint_text("搜索")
             .text_color(theme.text_primary),
