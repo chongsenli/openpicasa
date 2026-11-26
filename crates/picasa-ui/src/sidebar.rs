@@ -348,6 +348,12 @@ pub fn sidebar_row_font_size(theme: &Theme) -> f32 {
 }
 
 /// 侧栏计数（行尾灰色小数字）：原型 `.row .cnt` 亮色 11.5px / 暗色 10.5px。
+/// 同一行里计数比行名小一号，各自按「中心」对齐会让两个字号的中文**底边**
+/// 错开（小字浮起）。这里把计数下移半个字号差，让两者落在同一基线上。
+pub fn count_center_nudge(theme: &Theme) -> f32 {
+    (sidebar_row_font_size(theme) - sidebar_count_font_size(theme)) * 0.6
+}
+
 pub fn sidebar_count_font_size(theme: &Theme) -> f32 {
     if theme.dark { 10.5 } else { 11.5 }
 }
@@ -538,7 +544,7 @@ fn rows(
         );
         if let Some(n) = in_view_count {
             p.text(
-                pos2(r.right() - 10.0, r.center().y),
+                pos2(r.right() - 10.0, r.center().y + count_center_nudge(theme)),
                 Align2::RIGHT_CENTER,
                 format!("·{n}"),
                 FontId::new(10.5, egui::FontFamily::Proportional),
@@ -871,7 +877,10 @@ fn fav_row(
     if let Some(n) = count {
         // 计数右对齐、灰色小字（截图的「9」），原型 `span.cnt` 500。
         painter.text(
-            pos2(rect.right() - 16.0, rect.center().y),
+            pos2(
+                rect.right() - 16.0,
+                rect.center().y + count_center_nudge(theme),
+            ),
             Align2::RIGHT_CENTER,
             n.to_string(),
             crate::theme::medium(sidebar_count_font_size(theme)),
@@ -1392,6 +1401,26 @@ mod m5_font_tests {
     ///
     /// 逐像素比对时发现应用两套主题都偏小：行名亮色 12.5（应 13）、暗色 11（应 12.5），
     /// 计数暗色也用了亮色的 11.5（应 10.5）。
+    /// 同一行里计数比行名小一号；各自按中心对齐会让两个字号的中文底边错开
+    /// （小字浮起）。三处计数都必须走 `count_center_nudge` 落到同一基线。
+    #[test]
+    fn sidebar_count_shares_the_row_baseline() {
+        let light = Theme::for_appearance(Appearance::Light);
+        let dark = Theme::for_appearance(Appearance::Dark);
+        assert!(count_center_nudge(&light) > 0.0);
+        assert!(
+            count_center_nudge(&dark) >= count_center_nudge(&light),
+            "暗色字号差更大，修正量不应更小（实测 {} vs {}）",
+            count_center_nudge(&dark),
+            count_center_nudge(&light)
+        );
+        let src = include_str!("sidebar.rs");
+        assert!(
+            src.matches("count_center_nudge(theme)").count() >= 2,
+            "计数绘制点都必须走同一基线修正"
+        );
+    }
+
     #[test]
     fn sidebar_fonts_follow_the_prototype_scale() {
         let light = Theme::for_appearance(Appearance::Light);
