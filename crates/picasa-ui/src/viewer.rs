@@ -56,15 +56,12 @@ pub const CAPTION_H: f32 = 78.0;
 pub const FILM_H: f32 = 82.0;
 /// 右侧「照片信息」栏占窗口宽度的比例。
 ///
-/// 原型 v1.4（`v14-light-viewer-info` / `v14-dark-viewer-info`，1280 逻辑宽）
-/// 的信息栏是 **320 逻辑像素 = 25%**，主图占 75%；r7 产品实窗在 1920 逻辑宽下
-/// 只有 336（17.5%），所以看起来「过窄」。这里按同一比例取宽，窄窗再用上下限
-/// 兜底（下限保证缩略图 + 四小卡还能排开，上限避免超宽屏把主图压得太小）。
-pub const INFO_RATIO: f32 = 0.25;
-/// 信息栏宽度下限（1280 逻辑宽时正好取下限之外的原型宽度 320）。
-pub const INFO_MIN_W: f32 = 300.0;
-/// 信息栏宽度上限。
-pub const INFO_MAX_W: f32 = 480.0;
+/// 信息栏宽度（亮色）：原型 v1.4 `css/app.css` 的 `.info-panel` 写死
+/// `width:328px;flex:0 0 328px`，**不随窗口变宽**。
+pub const INFO_W: f32 = 328.0;
+/// 信息栏宽度（暗色）：原型 `html[data-theme="dark"] .info-panel`
+/// `width:316px;flex-basis:316px`。
+pub const INFO_DARK_W: f32 = 316.0;
 /// 缩放上下限（说明书 §4.5：约 5%–800%）。
 pub const ZOOM_MIN: f32 = 0.05;
 pub const ZOOM_MAX: f32 = 8.0;
@@ -144,19 +141,20 @@ pub struct StageLayout {
 ///
 /// `compare` 必须是「已经有下一张」的最终判定——调用方不应把
 /// `viewer.compare` 直接传进来，否则序列末尾会得到一个假窗格。
-/// 信息栏宽度按 [`INFO_RATIO`] 取窗口宽度的比例（原型 25%），再夹在
-/// [`INFO_MIN_W`]..[`INFO_MAX_W`] 之间：1280 逻辑宽 → 320（与原型一致），
-/// 1920 → 480，窄窗不小于下限、超宽屏不再继续变胖。
-pub fn info_panel_width(body_w: f32) -> f32 {
+/// 信息栏宽度：原型是**固定像素宽**（亮 [`INFO_W`] / 暗 [`INFO_DARK_W`]），
+/// 换窗口也不变，只有可用宽度本身不够时才退让（`body_w` 比它窄的极端情况）。
+///
+/// 早先按「窗口宽 25%」实现（1280→320、1920→480），与原型差 8px 且越宽的屏
+/// 越不像；2026-11-27 按原型改为固定值。
+pub fn info_panel_width(body_w: f32, dark: bool) -> f32 {
     if body_w <= 0.0 {
         return 0.0;
     }
-    (body_w * INFO_RATIO)
-        .clamp(INFO_MIN_W.min(body_w), INFO_MAX_W)
-        .max(0.0)
+    let want = if dark { INFO_DARK_W } else { INFO_W };
+    want.min(body_w).max(0.0)
 }
 
-pub fn layout(rect: Rect, info_open: bool, compare: bool) -> StageLayout {
+pub fn layout(rect: Rect, info_open: bool, compare: bool, dark: bool) -> StageLayout {
     let top = Rect::from_min_size(rect.min, vec2(rect.width(), TOP_H));
     let status = Rect::from_min_size(
         pos2(rect.left(), (rect.bottom() - STATUS_H).max(rect.top())),
@@ -166,8 +164,8 @@ pub fn layout(rect: Rect, info_open: bool, compare: bool) -> StageLayout {
         pos2(rect.left(), top.bottom()),
         pos2(rect.right(), status.top()),
     );
-    // 按原型比例取宽（见 [`INFO_RATIO`]），上下限兜底；仍是推窄而不是遮挡。
-    let info_w = info_panel_width(body.width());
+    // 按原型固定宽取（见 [`INFO_W`] / [`INFO_DARK_W`]）；仍是推窄而不是遮挡。
+    let info_w = info_panel_width(body.width(), dark);
     let info_panel = info_open.then(|| {
         Rect::from_min_size(
             pos2(body.right() - info_w, body.top()),
@@ -659,7 +657,7 @@ pub fn show(
     let chrome_visible = true;
 
     let compare_active = viewer.compare_active(photos.len());
-    let lay = layout(rect, viewer.info_open, compare_active);
+    let lay = layout(rect, viewer.info_open, compare_active, theme.dark);
 
     // ---- V1：照片自身的圆角（亮色大圆角 / 暗色小圆角） ----
     //
@@ -2874,7 +2872,7 @@ mod tests {
 
     #[test]
     fn default_stage_has_canvas_caption_and_filmstrip() {
-        let lay = layout(stage_rect(), false, false);
+        let lay = layout(stage_rect(), false, false, false);
         assert!(
             lay.canvas.height() > 200.0,
             "主图区应有足够高度：{:?}",
@@ -2922,10 +2920,10 @@ mod tests {
     /// 信息栏打开 → 主图与胶片条被**推窄**（几何不重叠），关闭后恢复。
     #[test]
     fn info_panel_pushes_stage_instead_of_overlaying() {
-        let closed = layout(stage_rect(), false, false);
-        let open = layout(stage_rect(), true, false);
+        let closed = layout(stage_rect(), false, false, false);
+        let open = layout(stage_rect(), true, false, false);
         let panel = open.info_panel.expect("打开时应有信息栏");
-        let info_w = info_panel_width(stage_rect().width());
+        let info_w = info_panel_width(stage_rect().width(), false);
         assert!((panel.width() - info_w).abs() < 0.5);
         // 推窄：舞台列宽减少的信息栏宽度
         assert!(open.stage.width() < closed.stage.width());
@@ -2942,49 +2940,44 @@ mod tests {
         assert!(!overlaps(panel, open.caption));
         assert!(open.stage.right() <= panel.left() + 0.5);
         // 关闭后主图恢复宽度
-        let reopened = layout(stage_rect(), false, false);
+        let reopened = layout(stage_rect(), false, false, false);
         assert!((reopened.canvas.width() - closed.canvas.width()).abs() < 0.5);
     }
 
     /// `M5-V1` 未验收项①：信息栏按窗口宽度的 25% 取宽，并夹在 300–480。
     ///
     /// 钉住的是**原型锚点**，不是实现细节：原型 v1.4 在 1280 逻辑宽下
-    /// `.info-panel` 是 328（含 8px 左内边距，净 320 = 25%），r7 产品固定
-    /// 336 在 1920 下只有 17.5%，所以看起来过窄。这几个数字一旦漂了，
-    /// 「按原型比例」这句话就不成立了。
+    /// 原型 `.info-panel` 是**固定像素宽**：亮色 `width:328px;flex:0 0 328px`、
+    /// 暗色 `width:316px;flex-basis:316px`（`css/app.css`）。换窗口不变，只有
+    /// 可用宽度本身不够时才退让。
     #[test]
-    fn info_panel_width_follows_prototype_ratio_with_clamps() {
-        // 原型锚点：1280 → 320（25%），1920 → 480（25%，正好撞上限）。
-        assert!(
-            (info_panel_width(1280.0) - 320.0).abs() < 0.5,
-            "1280 逻辑宽应得原型宽 320，实际 {}",
-            info_panel_width(1280.0)
-        );
-        assert!(
-            (info_panel_width(1920.0) - 480.0).abs() < 0.5,
-            "1920 应得 480（上限），实际 {}",
-            info_panel_width(1920.0)
-        );
-        // 上限：再宽也不继续变胖，否则超宽屏把主图压没。
-        assert!((info_panel_width(3840.0) - INFO_MAX_W).abs() < 0.5);
-        // 下限：窄窗仍保底 300（缩略图 + 四小卡还排得开）。
-        assert!((info_panel_width(1100.0) - INFO_MIN_W).abs() < 0.5);
-        // 比例段内单调：1280..1920 之间严格跟着 25% 走。
-        for w in [1280.0_f32, 1400.0, 1600.0, 1800.0] {
+    fn info_panel_width_is_fixed_per_theme_like_the_prototype() {
+        for w in [1280.0_f32, 1440.0, 1800.0, 1920.0, 3840.0] {
             assert!(
-                (info_panel_width(w) - w * INFO_RATIO).abs() < 0.5,
-                "{w} 应按 {INFO_RATIO} 比例取宽"
+                (info_panel_width(w, false) - INFO_W).abs() < 0.25,
+                "亮色 {w} 逻辑宽都应是固定 {INFO_W}，实际 {}",
+                info_panel_width(w, false)
+            );
+            assert!(
+                (info_panel_width(w, true) - INFO_DARK_W).abs() < 0.25,
+                "暗色 {w} 逻辑宽都应是固定 {INFO_DARK_W}，实际 {}",
+                info_panel_width(w, true)
             );
         }
-        // 窗口比下限还窄时不能反超窗口本身（面板不许吃掉整个舞台）。
-        for w in [400.0_f32, 320.0, 300.0] {
-            let panel = info_panel_width(w);
-            assert!(panel <= w, "{w} 时面板 {panel} 反超了窗口宽度");
-            assert!((panel - INFO_MIN_W.min(w)).abs() < 0.5, "{w} 应收敛到上限");
+        // 两套主题的宽度必须不同（原型 328 / 316）。
+        assert!(INFO_W > INFO_DARK_W);
+        // 窗口比固定宽还窄时退让到窗口宽度，但不许为负、不许反超。
+        for w in [320.0_f32, 300.0, 200.0] {
+            let light = info_panel_width(w, false);
+            assert!((light - w).abs() < 0.25, "{w} 时应退让到 {w}，实际 {light}");
+            assert!(light <= w);
+            // 400 比固定宽还宽，应保持固定值不退让。
+            assert!((info_panel_width(400.0, false) - INFO_W).abs() < 0.25);
+            assert!((info_panel_width(400.0, true) - INFO_DARK_W).abs() < 0.25);
         }
         // 退化输入不产出负宽。
-        assert_eq!(info_panel_width(0.0), 0.0);
-        assert_eq!(info_panel_width(-10.0), 0.0);
+        assert_eq!(info_panel_width(0.0, false), 0.0);
+        assert_eq!(info_panel_width(-10.0, true), 0.0);
     }
 
     /// `M5-V1` 未验收项②：圆角加在**照片本身**上，亮色大圆角、暗色小圆角。
@@ -3088,7 +3081,7 @@ mod tests {
             let mut v = Viewer::new(0);
             // 关掉信息栏来检查「未激活」外观（浅底 + 发丝描边）。
             v.info_open = false;
-            let lay = layout(stage_rect(), true, false);
+            let lay = layout(stage_rect(), true, false, false);
             let chip = info_toggle_rect(lay.top);
             assert!(
                 lay.top.contains_rect(chip),
@@ -3203,7 +3196,7 @@ mod tests {
     /// 三者在轨道内互不重叠，读数能表达「适合」与百分比两种状态。
     #[test]
     fn zoom_cluster_has_a_readout_between_minus_and_plus() {
-        let lay = layout(stage_rect(), true, false);
+        let lay = layout(stage_rect(), true, false, false);
         let top = lay.top;
         let track = zoom_track_rect(top);
         let (minus, plus) = zoom_button_rects(top);
@@ -3229,7 +3222,7 @@ mod tests {
     /// 顶栏「显示位置」按原型是**纯图标**（locate 图钉），不再是一条带文字的宽按钮。
     #[test]
     fn reveal_button_is_icon_only_and_compact() {
-        let lay = layout(stage_rect(), true, false);
+        let lay = layout(stage_rect(), true, false, false);
         let heart = Rect::from_min_size(
             pos2(lay.top.left() + TB_PAD + TB_BACK_W + TB_BACK_GAP, lay.top.top() + 10.0),
             vec2(TB_HEART_W, 24.0),
@@ -3309,7 +3302,7 @@ mod tests {
     /// 工具条仍有缩放 −/+，且两者都在顶栏内、不互相重叠。
     #[test]
     fn toolbar_keeps_zoom_minus_and_plus() {
-        let lay = layout(stage_rect(), true, false);
+        let lay = layout(stage_rect(), true, false, false);
         let (minus, plus) = zoom_button_rects(lay.top);
         assert!(minus.width() > 10.0 && plus.width() > 10.0);
         assert!(!minus.intersects(plus));
@@ -3448,7 +3441,7 @@ mod tests {
         let rows = photos(3);
         for appearance in [Appearance::Light, Appearance::Dark] {
             let mut v = Viewer::new(0);
-            let lay = layout(stage_rect(), true, false);
+            let lay = layout(stage_rect(), true, false, false);
             assert!(lay.info_panel.is_some(), "{appearance:?} 也必须有信息栏");
             let (_a, texts) = run_stage(&mut v, &rows, appearance, &[]);
             let all = texts.join("\n");
@@ -3463,7 +3456,7 @@ mod tests {
     /// 当前项必然落在可见槽位里，且槽位下标从当前项附近开窗。
     #[test]
     fn filmstrip_keeps_current_item_visible() {
-        let rect = layout(stage_rect(), true, false).filmstrip;
+        let rect = layout(stage_rect(), true, false, false).filmstrip;
         for current in [0usize, 1, 7, 40, 41] {
             let slots = filmstrip_slots(rect, 42, current);
             assert!(!slots.is_empty());
@@ -3484,7 +3477,7 @@ mod tests {
     /// 点击跳转程序接口：点在槽位里返回该下标，点空白返回 None。
     #[test]
     fn filmstrip_hit_maps_click_to_photo_index() {
-        let rect = layout(stage_rect(), true, false).filmstrip;
+        let rect = layout(stage_rect(), true, false, false).filmstrip;
         let slots = filmstrip_slots(rect, 5, 2);
         let target = slots[0];
         assert_eq!(
@@ -3515,7 +3508,7 @@ mod tests {
         crate::theme::apply(&ctx, Appearance::Light);
         let theme = Theme::for_appearance(Appearance::Light);
         let rect = stage_rect();
-        let lay = layout(rect, false, false);
+        let lay = layout(rect, false, false, false);
         let slots = filmstrip_slots(lay.filmstrip, rows.len(), v.index);
         let target = slots[2];
         let pos = target.rect.center();
@@ -3576,7 +3569,7 @@ mod tests {
     /// 胶片条跳转后的当前项高亮由 `is_current` 判定（同一份下标事实）。
     #[test]
     fn filmstrip_current_slot_is_highlighted_by_index() {
-        let rect = layout(stage_rect(), false, false).filmstrip;
+        let rect = layout(stage_rect(), false, false, false).filmstrip;
         let slots = filmstrip_slots(rect, 9, 4);
         let current: Vec<usize> = slots
             .iter()
@@ -3609,7 +3602,7 @@ mod tests {
         // PageDown = 适合：下一帧按可用宽度重算，且不超过 100%
         v.request_fit();
         run_stage(&mut v, &rows, Appearance::Light, &[]);
-        let lay = layout(stage_rect(), false, false);
+        let lay = layout(stage_rect(), false, false, false);
         let fit = fit_zoom(
             lay.main_pane,
             4000.0,
@@ -3636,8 +3629,8 @@ mod tests {
     /// 信息栏开合改变「适合」基准：关闭后主图恢复宽度，适合比例也随之变化。
     #[test]
     fn fit_scale_uses_pushed_pane_width() {
-        let closed = layout(stage_rect(), false, false);
-        let open = layout(stage_rect(), true, false);
+        let closed = layout(stage_rect(), false, false, false);
+        let open = layout(stage_rect(), true, false, false);
         // 用长条图（宽度受限），这样「适合」直接由推窄后的可用宽度决定
         let fit_closed = fit_zoom(
             closed.main_pane,
@@ -3669,7 +3662,7 @@ mod tests {
 
         // 帧 1：默认信息栏打开 → 按推窄后的窗格适合
         run_stage(&mut v, &rows, Appearance::Light, &[]);
-        let open = layout(stage_rect(), true, false);
+        let open = layout(stage_rect(), true, false, false);
         let fit_open = fit_zoom(
             open.main_pane,
             4000.0,
@@ -3686,7 +3679,7 @@ mod tests {
         // 帧 2：关掉信息栏，窗格变宽 → 仍应「适合」新的更宽窗格
         v.toggle_info();
         run_stage(&mut v, &rows, Appearance::Light, &[]);
-        let closed = layout(stage_rect(), false, false);
+        let closed = layout(stage_rect(), false, false, false);
         let fit_closed = fit_zoom(
             closed.main_pane,
             4000.0,
@@ -3703,7 +3696,7 @@ mod tests {
         // 帧 3：并排比较 → 主窗格减半，仍应适合
         v.compare = true;
         run_stage(&mut v, &rows, Appearance::Light, &[]);
-        let cmp = layout(stage_rect(), false, true);
+        let cmp = layout(stage_rect(), false, true, false);
         let fit_cmp = fit_zoom(
             cmp.main_pane,
             4000.0,
@@ -3735,7 +3728,7 @@ mod tests {
         let mut v = Viewer::new(0);
         v.info_open = false;
         run_stage(&mut v, &rows, Appearance::Light, &[]);
-        let closed = layout(stage_rect(), false, false);
+        let closed = layout(stage_rect(), false, false, false);
         let fit_closed = fit_zoom(
             closed.main_pane,
             4000.0,
@@ -3747,7 +3740,7 @@ mod tests {
         // 打开信息栏：窗格推窄，用户未手动缩放 → 应重新适合
         v.toggle_info();
         run_stage(&mut v, &rows, Appearance::Light, &[]);
-        let open = layout(stage_rect(), true, false);
+        let open = layout(stage_rect(), true, false, false);
         let fit_open = fit_zoom(
             open.main_pane,
             4000.0,
@@ -3781,7 +3774,7 @@ mod tests {
         let mut v = Viewer::new(0);
         v.compare = true;
         assert!(v.compare_active(rows.len()));
-        let lay = layout(stage_rect(), true, true);
+        let lay = layout(stage_rect(), true, true, false);
         let right = lay.compare_pane.expect("有下一张就应有右窗格");
         assert!(!lay.main_pane.intersects(right));
         assert!(lay.canvas.contains_rect(lay.main_pane));
@@ -3804,7 +3797,7 @@ mod tests {
         // 即使开关被强行置 true，也不应画右窗格
         v.compare = true;
         assert!(!v.compare_active(rows.len()));
-        let lay = layout(stage_rect(), false, v.compare_active(rows.len()));
+        let lay = layout(stage_rect(), false, v.compare_active(rows.len()), false);
         assert!(lay.compare_pane.is_none());
         let (_a, texts) = run_stage(&mut v, &rows, Appearance::Light, &[]);
         assert!(!has_text(&texts, "正在载入比较图…"), "单张不得画假比较图");
@@ -3816,7 +3809,7 @@ mod tests {
         let rows = photos(2);
         let v = Viewer::new(1);
         assert!(!v.compare_available(rows.len()));
-        let lay = layout(stage_rect(), true, v.compare_active(rows.len()));
+        let lay = layout(stage_rect(), true, v.compare_active(rows.len()), false);
         assert!(lay.compare_pane.is_none());
     }
 
@@ -4079,7 +4072,7 @@ mod tests {
     /// light/dark viewer 顶栏都只有左侧一枚返回，右侧是文件名 + 信息胶囊。
     #[test]
     fn topbar_has_a_single_back_pill_on_the_left() {
-        let lay = layout(stage_rect(), true, false);
+        let lay = layout(stage_rect(), true, false, false);
         let rows = photos(3);
         let mut v = Viewer::new(0);
         let (_a, texts) = run_stage(&mut v, &rows, Appearance::Light, &[]);
@@ -4110,7 +4103,7 @@ mod tests {
         // 红绿灯：eframe 0.37 默认 left_margin=14，三颗按钮原生宽约 56，
         // 连间距占 x≈14..70；原型首枚按钮 x=94。
         const TRAFFIC_RIGHT: f32 = 70.0;
-        let lay = layout(stage_rect(), true, false);
+        let lay = layout(stage_rect(), true, false, false);
         let back = Rect::from_min_size(
             pos2(lay.top.left() + TB_PAD, lay.top.top() + 10.0),
             vec2(TB_BACK_W, 24.0),
@@ -4144,7 +4137,7 @@ mod tests {
     /// 本测试用几何位置钉住顺序、右对齐，同时保证所有控件都还在顶栏内、互不重叠。
     #[test]
     fn topbar_flows_left_to_right_and_info_chip_is_right_aligned() {
-        let lay = layout(stage_rect(), true, false);
+        let lay = layout(stage_rect(), true, false, false);
         let top = lay.top;
         let track = zoom_track_rect(top);
         let name = filename_slot_rect(top);

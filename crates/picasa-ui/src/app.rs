@@ -3604,7 +3604,7 @@ impl OpenPicasaApp {
             let slots = {
                 let (info_open, compare_active, index) =
                     (v.info_open, v.compare_active(photo_count), v.index);
-                let lay = viewer::layout(ui.max_rect(), info_open, compare_active);
+                let lay = viewer::layout(ui.max_rect(), info_open, compare_active, self.theme.dark);
                 viewer::filmstrip_slots(lay.filmstrip, photo_count, index)
             };
             let mut film_thumbs = Vec::with_capacity(slots.len());
