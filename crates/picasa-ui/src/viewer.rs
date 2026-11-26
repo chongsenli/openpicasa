@@ -1211,7 +1211,11 @@ fn draw_back_pill(
         Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(12.0, 12.0));
     icons::draw(painter, Icon::Back, icon_rect, fg, 1.5);
     painter.text(
-        pos2(rect.left() + 24.0, rect.center().y),
+        // 字形在行框内偏下，补偿后与胶囊中心齐平（实测 22.2 → 20）。
+        pos2(
+            rect.left() + 24.0,
+            rect.center().y - crate::theme::optical_shift(11.5),
+        ),
         Align2::LEFT_CENTER,
         "返回",
         FontId::new(11.5, egui::FontFamily::Proportional),
@@ -1561,8 +1565,10 @@ fn draw_statusbar(
         .layout_no_wrap(left_text.clone(), left_font.clone(), ink)
         .size()
         .x;
+    // 字形在行框内偏下，补偿后与底栏中心齐平（实测 808 → 804.9）。
+    let bar_cy = bar.center().y - crate::theme::optical_shift(STATUS_FONT_SIZE);
     painter.text(
-        pos2(left_start, bar.center().y),
+        pos2(left_start, bar_cy),
         Align2::LEFT_CENTER,
         left_text,
         left_font,
@@ -1570,7 +1576,7 @@ fn draw_statusbar(
     );
 
     painter.text(
-        pos2(bar.right() - 10.0, bar.center().y),
+        pos2(bar.right() - 10.0, bar_cy),
         Align2::RIGHT_CENTER,
         hint,
         hint_font,
@@ -2064,7 +2070,10 @@ fn draw_info_dark(
     }
     // 内部十字线与外框（上边框就是标题卡与曝光格的分界）。
     clip.line_segment(
-        [pos2(grid.left(), grid.top()), pos2(grid.right(), grid.top())],
+        [
+            pos2(grid.left(), grid.top()),
+            pos2(grid.right(), grid.top()),
+        ],
         Stroke::new(1.0, theme.separator),
     );
     clip.line_segment(
@@ -2122,10 +2131,7 @@ fn draw_info_dark(
     let label_w = 48.0;
     for (label, value) in rows.iter() {
         clip.line_segment(
-            [
-                pos2(left - 12.0, y),
-                pos2(right + 12.0, y),
-            ],
+            [pos2(left - 12.0, y), pos2(right + 12.0, y)],
             Stroke::new(1.0, theme.separator),
         );
         clip.text(
@@ -2348,16 +2354,18 @@ fn slim_button(
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
     let icon_rect = match label {
-        Some(_) => Rect::from_center_size(
-            pos2(rect.left() + 12.0, rect.center().y),
-            vec2(13.0, 13.0),
-        ),
+        Some(_) => {
+            Rect::from_center_size(pos2(rect.left() + 12.0, rect.center().y), vec2(13.0, 13.0))
+        }
         None => Rect::from_center_size(rect.center(), vec2(15.0, 15.0)),
     };
     icons::draw(painter, icon, icon_rect, fg, icon_stroke);
     if let Some(label) = label {
         painter.text(
-            pos2(rect.left() + 22.0, rect.center().y),
+            pos2(
+                rect.left() + 22.0,
+                rect.center().y - crate::theme::optical_shift(11.5),
+            ),
             Align2::LEFT_CENTER,
             label,
             FontId::new(11.5, egui::FontFamily::Proportional),
@@ -2424,7 +2432,11 @@ fn text_button(
     }
     let color = if active { theme.ring_outer } else { fg };
     painter.text(
-        rect.center(),
+        // 字形在行框内偏下，补偿后与按钮中心齐平（实测 22.2 → 20）。
+        pos2(
+            rect.center().x,
+            rect.center().y - crate::theme::optical_shift(11.5),
+        ),
         Align2::CENTER_CENTER,
         label,
         FontId::new(11.5, egui::FontFamily::Proportional),
@@ -2536,8 +2548,7 @@ pub(crate) fn paint_rounded_image(
     }
     // 圆角不能超过短边的一半，否则 tessellator 会退化成一坨。
     let r = radius.max(0.0).min(rect.width().min(rect.height()) * 0.5);
-    let shape = egui::epaint::RectShape::filled(rect, r, Color32::WHITE)
-        .with_texture(tex, uv);
+    let shape = egui::epaint::RectShape::filled(rect, r, Color32::WHITE).with_texture(tex, uv);
     painter.add(egui::Shape::Rect(shape));
 }
 
@@ -3207,7 +3218,11 @@ mod tests {
         assert!(track.contains_rect(readout), "读数应在轨道内");
         assert!(minus.right() <= readout.left() + 0.01, "读数在 − 之后");
         assert!(readout.right() <= plus.left() + 0.01, "读数在 + 之前");
-        assert_eq!(track.right(), plus.right() + TB_TRACK_PAD, "轨道右端与 + 对齐");
+        assert_eq!(
+            track.right(),
+            plus.right() + TB_TRACK_PAD,
+            "轨道右端与 + 对齐"
+        );
 
         // 适合态写「适合」，放大态写百分比。
         let rows = photos(2);
@@ -3227,7 +3242,10 @@ mod tests {
     fn reveal_button_is_icon_only_and_compact() {
         let lay = layout(stage_rect(), true, false, false);
         let heart = Rect::from_min_size(
-            pos2(lay.top.left() + TB_PAD + TB_BACK_W + TB_BACK_GAP, lay.top.top() + 10.0),
+            pos2(
+                lay.top.left() + TB_PAD + TB_BACK_W + TB_BACK_GAP,
+                lay.top.top() + 10.0,
+            ),
             vec2(TB_HEART_W, 24.0),
         );
         let reveal_w = TB_REVEAL_W;

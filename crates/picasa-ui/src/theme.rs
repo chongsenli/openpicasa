@@ -844,7 +844,7 @@ fn install_fonts(ctx: &egui::Context, appearance: Appearance) {
 ///
 /// 关键点：这个系数必须**同时**作用在拉丁字体与 CJK 回退字体上。只挪 CJK
 /// 会让同一行的汉字与数字错开基线（M32 的 0.30 与后来的 0.55 都栽在这里）。
-pub const TEXT_VISUAL_TWEAK: f32 = 0.55;
+pub const TEXT_VISUAL_TWEAK: f32 = 0.26;
 
 /// 手绘 galley 时的光学补偿量：字形在行框内已被 `TEXT_VISUAL_TWEAK` 下移，
 /// 凡是按「galley 顶部」定位的调用点都要把这个量减回去，否则整行会压到容器下沿。
@@ -1262,8 +1262,8 @@ mod m5_type_tests {
     #[test]
     fn optical_tweak_applies_to_latin_and_cjk_alike() {
         assert!(
-            (0.3..0.7).contains(&TEXT_VISUAL_TWEAK),
-            "视觉校准系数应是 0.3~0.7 之间的量级，实测 13px 下每 0.1 约移动 1.3px"
+            (0.1..0.6).contains(&TEXT_VISUAL_TWEAK),
+            "视觉校准系数应是 0.1~0.6 之间的量级，实测 13px 下每 0.1 约移动 1.3px"
         );
         let src = include_str!("theme.rs");
         assert!(
