@@ -1305,9 +1305,7 @@ pub fn show(
             //     `ScrollAnimation::none()` = 瞬时滚动，避免 offset_target 动画在松手后
             //     残留继续滚；松开帧（`released`）不再滚。非主轴分量清零，防止
             //     egui 0.37 `end()` 只 take 启用轴的 scroll_delta 导致泄漏到别处。
-            if !released
-                && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
-            {
+            if !released && let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
                 let mut delta = marquee_edge_delta(pos, clip, MARQUEE_EDGE_PX, MARQUEE_MAX_STEP);
                 if horizontal {
                     delta.y = 0.0;
@@ -1324,9 +1322,14 @@ pub fn show(
         if layout.has_headers {
             for gi in layout.groups_in_range(first, last) {
                 let g = &layout.groups[gi];
+                // 横向必须钳在卡片内：`clip` 含左右内边距，直接用会让日期栏
+                // 伸出白卡（原型 `.ghead` 只占内容宽 991，不含 20px 内边距）。
                 let bar = Rect::from_min_max(
-                    pos2(clip.left(), origin.y + g.y),
-                    pos2(clip.right(), origin.y + g.y + Metrics::GROUP_HEADER_H),
+                    pos2(clip.left().max(card.left()), origin.y + g.y),
+                    pos2(
+                        clip.right().min(card.right()),
+                        origin.y + g.y + Metrics::GROUP_HEADER_H,
+                    ),
                 );
                 if bar.bottom() <= clip.top() + 1.0 {
                     continue; // 已经滚出视口顶部，交给吸顶头
@@ -1334,7 +1337,14 @@ pub fn show(
                 if bar.top() >= clip.bottom() {
                     break;
                 }
-                draw_group_header(&painter, bar, &g.title, g.count, theme);
+                draw_group_header(
+                    &painter,
+                    bar,
+                    &g.title,
+                    g.count,
+                    theme,
+                    egui::CornerRadius::ZERO,
+                );
             }
         }
 
@@ -1398,8 +1408,8 @@ pub fn show(
             // 只有真到「库里也没 BLOB」时，`tex_state` 才会是 `CloudOnly`，
             // 那时才走下面的占位分支。
             let cloud_only = row.thumb_state == ThumbState::CloudOnly as i64;
-            let placeholder = failed
-                || (row.thumb_state == 0 && indexing_folders.contains(&row.folder_id));
+            let placeholder =
+                failed || (row.thumb_state == 0 && indexing_folders.contains(&row.folder_id));
             // 描边目标：方格 = 实际贴图区（Ready 时是 contain 后的 fitted），
             // masonry = 去掉文件名带的图区。默认 img_rect，Ready 分支里覆写。
             let mut frame = img_rect;
@@ -1634,11 +1644,33 @@ pub fn show(
         // ---- 吸顶分组头：**必须最后画**（否则被单元格盖住，02 §8.2.3）----
         if let Some(gi) = layout.sticky_group(viewport.min.y) {
             let g = &layout.groups[gi];
+            // 吸顶头贴**卡片顶**（而不是 `clip.top()`）：卡片有 26px 圆角，
+            // 贴 clip 会让直角切进左上/右上两段圆弧；顶端对齐卡片、圆角取
+            // `radius_card` 后，两者弧线重合，滚动时圆角始终完整。
+            let r = theme.radius_card.round() as u8;
             let bar = Rect::from_min_max(
-                pos2(clip.left(), clip.top()),
-                pos2(clip.right(), clip.top() + Metrics::GROUP_HEADER_H),
+                pos2(
+                    clip.left().max(card.left()),
+                    card.top().max(clip.top().min(card.top())),
+                ),
+                pos2(
+                    clip.right().min(card.right()),
+                    card.top().max(clip.top().min(card.top())) + Metrics::GROUP_HEADER_H,
+                ),
             );
-            draw_group_header(&painter, bar, &g.title, g.count, theme);
+            draw_group_header(
+                &painter,
+                bar,
+                &g.title,
+                g.count,
+                theme,
+                egui::CornerRadius {
+                    nw: r,
+                    ne: r,
+                    sw: 0,
+                    se: 0,
+                },
+            );
         }
 
         // ---- M4.1 `M41-UI-10`：框选矩形（拖动帧）+ 松开时算命中集 ----
@@ -1698,7 +1730,8 @@ pub fn show(
         let last_id = ui.scope_id().with("grid-bar-last-off");
         let last_off: Option<f32> = ui.ctx().memory(|m| m.data.get_temp(last_id));
         let scrolling_now = last_off.is_some_and(|v| (v - out.scroll_y).abs() > 0.5);
-        ui.ctx().memory_mut(|m| m.data.insert_temp(last_id, out.scroll_y));
+        ui.ctx()
+            .memory_mut(|m| m.data.insert_temp(last_id, out.scroll_y));
         let overlay_visible =
             scrolling_now || bar_drag_off.is_some() || ui.rect_contains_pointer(full);
         if overlay_visible
@@ -1805,9 +1838,19 @@ pub fn show(
 ///
 /// H6：日期旁边显示该组**真实张数**「N 张」。张数来自 `Group::count`（= 该日期分组
 /// 的照片数），与虚拟滚动无关——只画当前可见的分组头，不遍历全库。
-fn draw_group_header(painter: &egui::Painter, bar: Rect, title: &str, count: usize, theme: &Theme) {
-    // M5：内容井里的日期分组头 = 与井同色的透明底 + 一行文字，不再画灰条。
-    painter.rect_filled(bar, 0.0, theme.header_bg);
+fn draw_group_header(
+    painter: &egui::Painter,
+    bar: Rect,
+    title: &str,
+    count: usize,
+    theme: &Theme,
+    radius: egui::CornerRadius,
+) {
+    // M5：日期分组头 = 一层极浅的底色 + 一行文字。
+    // 底色存在的唯一理由是**吸顶时遮住下面的照片**；纯白会让它和卡片分不出层次，
+    // 故取比卡片略灰一档（见 `Theme::header_bg`）。圆角由调用方给：贴卡片顶的
+    // 吸顶头必须与卡片圆角重合，否则直角会切掉左上/右上圆弧。
+    painter.rect_filled(bar, radius, theme.header_bg);
     let font = FontId::new(
         if theme.dark { 11.0 } else { 13.0 },
         egui::FontFamily::Proportional,
@@ -2352,6 +2395,47 @@ pub fn draw_icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32
 
 #[cfg(test)]
 mod prototype_spec_tests {
+    /// 日期分组头必须**留在白卡内**：横向钳到 `card`，吸顶头贴卡片顶并取卡片圆角。
+    ///
+    /// 曾经的 bug：bar 直接用 `clip.left()..clip.right()`（clip 含左右内边距），
+    /// 于是灰色日期栏伸出白卡左右各十几像素，滚动时直角还会切掉卡片左上/右上
+    /// 两段 26px 圆弧——用户看到的「日期栏超过背景」「左上角圆弧被遮挡」。
+    #[test]
+    fn header_band_stays_inside_the_card_and_keeps_the_corner_arc() {
+        let src = include_str!("grid.rs");
+        // 两处 bar（普通分组头 + 吸顶头）都必须把 x 钳进卡片
+        assert!(
+            src.matches("clip.left().max(card.left())").count() >= 2,
+            "普通头与吸顶头都要钳左边界"
+        );
+        assert!(
+            src.matches("clip.right().min(card.right())").count() >= 2,
+            "普通头与吸顶头都要钳右边界"
+        );
+        // 吸顶头贴卡片顶、圆角取 radius_card（否则直角切弧）
+        assert!(src.contains("card.top().max(clip.top().min(card.top()))"));
+        assert!(src.contains("nw: r,") && src.contains("ne: r,") && src.contains("sw: 0,"));
+        assert!(src.contains("let r = theme.radius_card.round() as u8;"));
+        // 普通分组头不带圆角（在卡内水平位置，不需要）
+        assert!(src.contains("theme, egui::CornerRadius::ZERO);"));
+    }
+
+    /// 日期栏底色要比卡片低一档（不是纯白），否则吸顶时看不出是浮层。
+    ///
+    /// 只约束亮色：暗色卡片内井本身就是 `#151515`，日期栏与之同色是原型的做法。
+    #[test]
+    fn header_band_has_a_faint_tint_instead_of_pure_white() {
+        let light = crate::theme::Theme::for_appearance(picasa_core::Appearance::Light);
+        let bg = light.header_bg.r();
+        assert!(bg < 255, "亮色日期栏不能是纯白（否则与卡片同色）");
+        assert!(
+            (245..=252).contains(&bg),
+            "亮色日期栏应是极浅灰（实测 #{bg:02x}），太深会抢照片"
+        );
+        let dark = crate::theme::Theme::for_appearance(picasa_core::Appearance::Dark);
+        assert_eq!(dark.header_bg.r(), 21, "暗色日期栏与内井同色 #151515");
+    }
+
     use super::*;
 
     /// 原型（`css/app.css`）：`.content{padding:10px 20px 16px}` + `.grid{padding:4px;gap:12px}`。
@@ -2635,7 +2719,7 @@ mod tests {
         };
         let out = ctx.run_ui(input, |ui| {
             let bar = Rect::from_min_size(ui.max_rect().min, vec2(600.0, Metrics::GROUP_HEADER_H));
-            draw_group_header(ui.painter(), bar, "2020年9月14日", 37, &theme);
+            draw_group_header(ui.painter(), bar, "2020年9月14日", 37, &theme, egui::CornerRadius::ZERO);
         });
         let mut texts: Vec<(String, egui::Pos2)> = Vec::new();
         fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Pos2)>) {

@@ -365,7 +365,14 @@ impl Theme {
             grid_bg: rgb(s.well),
             menu_bg: rgb(s.card),
             sidebar_bg: rgb(s.win),
-            header_bg: rgb(s.well),
+            // 日期分组头底色：亮色不能直接用 `well`（= 纯白），那样吸顶头和
+            // 卡片完全同色，滚动时照片从下面滑过看不出是「浮层」；取比卡片
+            // 低 5 灰阶的一档（原型 `.ghead` 本无底色，这是为吸顶遮挡补的）。
+            header_bg: if dark {
+                rgb(s.well)
+            } else {
+                Color32::from_rgb(0xFA, 0xFA, 0xFA)
+            },
             separator,
             hairline,
             cell_border: if dark {
