@@ -2295,9 +2295,13 @@ pub fn scroll_thumb_rect(track: Rect, offset: f32, content_h: f32, view_h: f32) 
 pub fn corner_notch_points(center: egui::Pos2, radius: f32, sx: f32, sy: f32) -> Vec<egui::Pos2> {
     let r = radius.max(0.0);
     let corner = pos2(center.x + sx * r, center.y + sy * r);
-    let mut pts = Vec::with_capacity(11);
+    // 段数决定弧的精度：8 段时弦最多侵入圆内 r*(1-cos(π/16)) ≈ 0.5px，
+    // 26px 圆角上看起来是「圆角被切掉一小块」的台阶感，实测多涂到弧内 1.5px。
+    // 24 段把这个误差压到 0.05px 量级，肉眼与真圆弧无异。
+    const STEPS: usize = 24;
+    let mut pts = Vec::with_capacity(STEPS + 2);
     pts.push(corner);
-    let steps = 8;
+    let steps = STEPS;
     for i in 0..=steps {
         let t = std::f32::consts::FRAC_PI_2 * (i as f32 / steps as f32);
         pts.push(pos2(
@@ -2560,11 +2564,11 @@ mod tests {
         let r = 26.0;
         let center = pos2(r, r);
         let pts = corner_notch_points(center, r, -1.0, -1.0);
-        assert_eq!(pts.len(), 10, "角点 + 8 段圆弧 + 收尾共 10 点");
+        assert_eq!(pts.len(), 26, "角点 + 24 段圆弧 + 收尾共 26 点");
         assert!((pts[0].x - 0.0).abs() < 0.01 && (pts[0].y - 0.0).abs() < 0.01);
         for p in &pts[1..] {
             let d = (*p - center).length();
-            assert!((d - r).abs() < 0.5, "圆弧点必须落在半径 {r} 上，实测 {d}");
+            assert!((d - r).abs() < 0.1, "圆弧点必须落在半径 {r} 上，实测 {d}");
         }
         // 弧外的角：在缺口里（距圆心比半径远）；卡片内部：不在缺口里。
         let notch_pt = pos2(2.0, 2.0);
