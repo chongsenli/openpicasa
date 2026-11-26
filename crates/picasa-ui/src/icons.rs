@@ -11,7 +11,7 @@
 //! `resvg`/`usvg` 是 MPL-2.0，且 M1 的图标数量只有十来个、形状都极其简单。
 //! 用 `Painter` 直接画线省掉一个依赖，也省掉一次启动时的光栅化。
 
-use eframe::egui::{Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, pos2};
+use eframe::egui::{Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -157,14 +157,22 @@ pub fn paths(icon: Icon) -> &'static [crate::icons_lucide::SubPath] {
 
 /// 在 `rect` 内绘制图标。`stroke` 是**屏幕像素**宽度；`stroke <= 0` 表示实心填充
 /// （选中态的心形/星形走这条）。
+/// 图标绘制框：取矩形中心的最大内接正方形。
+///
+/// Lucide 的图形定义在 24×24 的正方形网格里，归一化后必须**等比**映射。
+/// 原型暗色工具条按钮是 32×28（`.ib` 非正方形），若按宽高分别映射，
+/// 图形会被横向拉宽 14% —— 视觉上就是「图标被压扁」。
+pub fn icon_box(rect: Rect) -> Rect {
+    let side = rect.width().min(rect.height()).max(0.0);
+    Rect::from_center_size(rect.center(), vec2(side, side))
+}
+
 pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f32) {
     let paths = paths(icon);
-    let map = |x: f32, y: f32| -> Pos2 {
-        pos2(
-            rect.left() + x * rect.width(),
-            rect.top() + y * rect.height(),
-        )
-    };
+    let box_rect = icon_box(rect);
+    let side = box_rect.width();
+    let map =
+        |x: f32, y: f32| -> Pos2 { pos2(box_rect.left() + x * side, box_rect.top() + y * side) };
     if stroke <= 0.0 {
         for sp in paths {
             let pts: Vec<Pos2> = sp.pts.iter().map(|&(x, y)| map(x, y)).collect();
@@ -379,6 +387,23 @@ mod tests {
     }
 
     /// 五角星几何（`draw_star` 仍被网格/查看器的星标角标使用）。
+    #[test]
+    fn icons_stay_square_inside_a_non_square_button() {
+        // 原型暗色 `.ib` 是 32×28：按宽高分别映射会把 24×24 的图形横向拉宽 14%，
+        // 视觉上就是「图标被压扁」。绘制框必须取中心内接正方形。
+        let btn = Rect::from_min_size(pos2(100.0, 50.0), vec2(32.0, 28.0));
+        let box_r = icon_box(btn);
+        assert_eq!(box_r.width(), 28.0, "边长取短边");
+        assert_eq!(box_r.height(), 28.0);
+        assert_eq!(box_r.center(), btn.center(), "居中，不偏左右");
+        // 亮色 30×30 这种正方形不受影响
+        let sq = Rect::from_min_size(pos2(0.0, 0.0), vec2(30.0, 30.0));
+        assert_eq!(icon_box(sq), sq);
+        // 退化输入不 panic、不产生负尺寸
+        let thin = Rect::from_min_size(pos2(0.0, 0.0), vec2(20.0, 0.0));
+        assert_eq!(icon_box(thin).width(), 0.0);
+    }
+
     #[test]
     fn star_points_alternate_outer_and_inner_radius() {
         let c = pos2(100.0, 100.0);

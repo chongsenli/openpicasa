@@ -678,7 +678,10 @@ fn icon_btn_ex(
     } else {
         theme.text_disabled
     };
-    let inner = rect.shrink(rect.width() * 0.28);
+    // 先取中心内接正方形再内缩：暗色按钮是 32×28，直接按宽度缩会让图标框变成
+    // 14.1×10.1 —— Lucide 的 24×24 图形必然被压扁。
+    let square = icons::icon_box(rect);
+    let inner = square.shrink(square.width() * 0.28);
     // 收藏心形：选中（全部已收藏）时是实心（stroke 0），否则 1.4 描边 ——
     // 原型 `icon("heart", 15, allStarred ? 0 : 1.75, allStarred ? "currentColor" : "none")`。
     let icon_stroke = if selected && icon == Icon::Heart {

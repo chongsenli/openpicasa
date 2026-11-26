@@ -2203,7 +2203,7 @@ fn draw_info_thumb(painter: &egui::Painter, viewer: &Viewer, rect: Rect, theme: 
         icons::draw(
             painter,
             Icon::Image,
-            rect.shrink(rect.width() * 0.3),
+            icons::icon_box(rect).shrink(icons::icon_box(rect).width() * 0.3),
             theme.text_disabled,
             1.2,
         );
