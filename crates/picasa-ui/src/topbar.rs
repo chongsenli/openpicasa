@@ -673,11 +673,7 @@ fn icon_btn_ex(
     if enabled && resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let color = if enabled {
-        theme.toolbar_icon
-    } else {
-        theme.text_disabled
-    };
+    let color = theme.topbar_icon_color(enabled, selected);
     // 先取中心内接正方形再内缩：暗色按钮是 32×28，直接按宽度缩会让图标框变成
     // 14.1×10.1 —— Lucide 的 24×24 图形必然被压扁。
     let square = icons::icon_box(rect);

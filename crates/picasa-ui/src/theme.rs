@@ -469,13 +469,31 @@ impl Theme {
     ///
     /// M5 §5.3：不能再是「一排白圆钮」。默认 = 透明（线性图标直接落在顶栏上），
     /// 悬停 = hover 底，选中 = 强调柔底。函数化便于单测锁定这条禁止项。
+    /// 顶栏图标按钮的底色。
+    ///
+    /// 原型 `.ib.on` 用 `--hover`（亮 `#ebebec` / 暗 `#232323`）而不是强调色填充：
+    /// 暗房里一块 8% 青几乎看不出选中，实心青又太扎眼。选定方案 D —— 底色走
+    /// 中性的 hover 灰，选中感由**图标变品牌青**承担（见 `topbar_icon_color`）。
     pub fn topbar_icon_fill(&self, hovered: bool, selected: bool) -> Color32 {
-        if selected {
-            self.accent_soft
-        } else if hovered {
+        if selected || hovered {
             self.sidebar_hover
         } else {
             Color32::TRANSPARENT
+        }
+    }
+
+    /// 顶栏图标按钮的前景色：选中态取品牌强调色（方案 D），禁用态取 disabled。
+    pub fn topbar_icon_color(&self, enabled: bool, selected: bool) -> Color32 {
+        if !enabled {
+            self.text_disabled
+        } else if selected {
+            if self.dark {
+                self.selected
+            } else {
+                self.text_primary
+            }
+        } else {
+            self.toolbar_icon
         }
     }
 
@@ -1250,6 +1268,27 @@ mod m5_type_tests {
 #[cfg(test)]
 mod m5_theme_metrics_tests {
     use super::*;
+
+    #[test]
+    fn topbar_selected_icon_uses_neutral_fill_and_brand_color() {
+        // 方案 D：底色永远走中性 hover 灰（原型 `.ib.on` 的 `--hover`），
+        // 选中感由图标变品牌青承担；暗色绝不用强调色铺底。
+        let light = Theme::for_appearance(Appearance::Light);
+        let dark = Theme::for_appearance(Appearance::Dark);
+        assert_eq!(light.topbar_icon_fill(false, false), Color32::TRANSPARENT);
+        assert_eq!(light.topbar_icon_fill(true, false), light.sidebar_hover);
+        assert_eq!(light.topbar_icon_fill(false, true), light.sidebar_hover);
+        assert_eq!(dark.topbar_icon_fill(false, true), dark.sidebar_hover);
+        assert_ne!(
+            dark.topbar_icon_fill(false, true),
+            dark.selected,
+            "选中底不能是强调色本身"
+        );
+        assert_eq!(dark.topbar_icon_color(true, true), dark.selected);
+        assert_eq!(light.topbar_icon_color(true, true), light.text_primary);
+        assert_ne!(dark.topbar_icon_color(true, false), dark.selected);
+        assert_eq!(dark.topbar_icon_color(false, true), dark.text_disabled);
+    }
 
     #[test]
     fn dark_theme_uses_its_own_size_table() {
