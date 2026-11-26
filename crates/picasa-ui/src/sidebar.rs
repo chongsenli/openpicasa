@@ -224,12 +224,20 @@ pub fn show(
             ui.painter()
                 .rect_filled(ui.max_rect(), 0.0, theme.sidebar_bg);
 
+            // 原型侧栏：`div.side-scroll` 从 body 顶（84）再下移 6 起画；行与行、组与组
+            // 之间**没有** egui 的默认 item 间距（`a.row` 高 30 紧贴，组间只隔 8）。
+            // 不归零的话每一行会多吃 5px，六行之后整栏就“散架”了。
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(6.0);
+
             // M5-IA-01 / M5-SB-01：固定顺序
             //   图库 → 标签 → 相册 → 文件夹 → 导入的索引（仅有来源时，紧挨文件夹后）→ 托盘
             // 托盘已先占底部；「设置」组及其「索引管理」子项**整组不存在**（不是隐藏）。
             for group in SIDEBAR_GROUPS {
                 if group != SIDEBAR_GROUPS[0] {
-                    ui.add_space(6.0);
+                    // 原型：上一个组最后一行底 = 下一个组头行框顶；组头自身高 27.2，
+                    // 组与组之间的可见空隙是 35.2 − 27.2 = 8。
+                    ui.add_space(8.0);
                 }
                 match group {
                     "图库" => {
@@ -268,7 +276,7 @@ pub fn show(
 
             // ---- IDX-21 / M5-IA-01：导入的索引（仅当有来源时，紧挨「文件夹」之后）----
             if !ctx.import_groups.is_empty() {
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 section_title(
                     ui,
                     ctx.theme,
@@ -1397,6 +1405,29 @@ mod m5_font_tests {
 
 #[cfg(test)]
 mod prototype_spec_tests {
+    /// 用户 2026-11-26（1:1 还原）：原型侧栏是**紧贴**的 —— `a.row` 高 30、行与行之间
+    /// 没有间距（第一行 y 121.2、第二行 151.2），组与组之间只隔 8（上一个组最后一行底
+    /// 301.2 = 下一个组头 301.2 − 8 的空档）。
+    ///
+    /// egui 默认 `item_spacing.y = 4~5`，不清零每一行会多吃 5px：六行之后整栏错位 30。
+    #[test]
+    fn sidebar_rows_are_packed_without_item_spacing() {
+        let src = include_str!("sidebar.rs");
+        assert!(
+            src.contains("ui.spacing_mut().item_spacing.y = 0.0;"),
+            "侧栏行必须紧贴，不能吃 egui 的默认 item 间距"
+        );
+        assert!(
+            src.contains("ui.add_space(8.0);"),
+            "组与组之间隔 8（原型 35.2 − 27.2）"
+        );
+        assert_eq!(
+            crate::theme::Metrics::SIDEBAR_ROW_H,
+            30.0,
+            "原型 a.row 高 30"
+        );
+    }
+
     use super::*;
 
     /// 原型（`docs/m5/prototype/v1.4`，1280×820 实测）：
