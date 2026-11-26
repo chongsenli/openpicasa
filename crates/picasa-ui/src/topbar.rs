@@ -510,6 +510,8 @@ fn draw_breadcrumb(
     let meta_font = FontId::new(11.5, egui::FontFamily::Proportional);
     let mut x = area.left();
     let cy = area.center().y;
+    // 面包屑主标题行的底边，供副标题对齐（见下方副标题绘制）。
+    let mut baseline = cy + 6.5;
     let n = breadcrumb.len();
     for (i, (name, folder_id)) in breadcrumb.iter().enumerate() {
         let current = i + 1 == n;
@@ -524,8 +526,13 @@ fn draw_breadcrumb(
         };
         let text = fit_text(painter, name, &font, remaining);
         let galley = painter.layout_no_wrap(text, font.clone(), color);
-        let seg_rect = Rect::from_min_size(pos2(x, cy - 10.0), galley.size());
-        painter.galley(pos2(x, cy - 10.0), galley, color);
+        // 垂直居中按 galley 实际高度算，不再用 `cy - 10.0` 这种硬编码：
+        // 汉字回退字形在 galley 里偏上，固定半高会让整段文字浮起来约 5px。
+        let seg_top = cy - galley.size().y / 2.0;
+        let seg_rect = Rect::from_min_size(pos2(x, seg_top), galley.size());
+        // 主标题这一行的底边：后面的「· 40 张 · 拍摄时间」要贴同一条基线。
+        baseline = seg_rect.bottom();
+        painter.galley(pos2(x, seg_top), galley, color);
 
         // 祖先段（非当前、有 id）：整段可点
         if let Some(id) = folder_id
@@ -538,7 +545,11 @@ fn draw_breadcrumb(
                 painter.rect_filled(hot, 6.0, theme.sidebar_hover);
                 let hover_galley =
                     painter.layout_no_wrap(name.clone(), font.clone(), theme.selected);
-                painter.galley(pos2(x, cy - 10.0), hover_galley, theme.selected);
+                painter.galley(
+                    pos2(x, cy - hover_galley.size().y / 2.0),
+                    hover_galley,
+                    theme.selected,
+                );
             }
             if resp.clicked() {
                 out.actions.push(TopbarAction::PickFolder(*id));
@@ -584,9 +595,11 @@ fn draw_breadcrumb(
         theme.text_disabled,
     );
     let text = fit_text(painter, meta, &meta_font, area.right() - x - sep_w);
+    // 副标题与主标题**同基线**：两者字号不同（12.5 / 11.5），各自按中心对齐
+    // 会让小字整体高出一截（实测差 2px 左右）。这里贴着主标题那一行的底边画。
     painter.text(
-        pos2(x + sep_w, cy),
-        Align2::LEFT_CENTER,
+        pos2(x + sep_w, baseline),
+        Align2::LEFT_BOTTOM,
         text,
         meta_font,
         theme.text_secondary,
