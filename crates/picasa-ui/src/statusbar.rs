@@ -76,6 +76,11 @@ pub fn show(
     elapsed_secs: Option<u64>,
     // M4.3 IDX-18：导入 / 导出进度（只读短句）
     io: &IoUi,
+    // 底栏底色。原型 `div.status` 在卡片**内部**，底色是卡片色（`well_bg`），
+    // 不是窗体色；底栏单独占一条（不在卡片里）时才用 `chrome_bg`。
+    bg: egui::Color32,
+    // 底栏与卡片同为一体时，底部两角要跟着卡片的圆角切出来；0 = 不切角。
+    bottom_radius: f32,
 ) -> StatusbarOut {
     let mut out = StatusbarOut::default();
     let rect = Rect::from_min_size(
@@ -84,12 +89,24 @@ pub fn show(
     );
     let _ = ui.allocate_space(rect.size());
     let painter = ui.painter_at(rect);
-    // M5 §5.4：底栏 = 窗口色 + 顶缘发丝线；padding ≈ 0 12px 0 14px。
-    painter.rect_filled(rect, 0.0, theme.chrome_bg);
-    painter.line_segment(
-        [rect.left_top(), rect.right_top()],
-        egui::Stroke::new(1.0, theme.separator),
-    );
+    // M5 §5.4：底栏 = 底色 + 顶缘发丝线；padding ≈ 0 12px 0 14px。
+    // 底栏在卡片内部时（`bottom_radius > 0`）只有底部两角随卡片收圆，顶边是直的。
+    let radius = bottom_radius.max(0.0);
+    let corners = egui::CornerRadius {
+        nw: 0,
+        ne: 0,
+        sw: radius.round() as u8,
+        se: radius.round() as u8,
+    };
+    painter.rect_filled(rect, corners, bg);
+    // 原型 `div.status` 在卡片内部：底色透明、**没有**顶缘发丝线
+    // （`border-top: none`，computed style 实测）。只有底栏单独占一条时才画分隔线。
+    if bottom_radius <= 0.0 {
+        painter.line_segment(
+            [rect.left_top(), rect.right_top()],
+            egui::Stroke::new(1.0, theme.separator),
+        );
+    }
 
     let font = FontId::new(11.0, egui::FontFamily::Proportional);
 

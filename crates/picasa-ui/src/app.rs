@@ -3014,65 +3014,6 @@ impl OpenPicasaApp {
                 }
             });
 
-        // ⑤ 底部状态栏（**在左栏之前**，否则侧栏会盖住它）
-        egui::Panel::bottom("statusbar-panel")
-            .exact_size(Metrics::STATUS_H)
-            .frame(egui::Frame::new().fill(theme.chrome_bg))
-            .show(ui, |ui| {
-                // M5-IA-02：「已用 mm:ss」以**连续运行**计时，而不是批次时刻。
-                // 批次在 watcher 每次外部变化时都会重开，用批次时刻会让读数反复归零。
-                let running_now = snap.running();
-                let elapsed_secs = match self.index_run_started {
-                    Some(t) if running_now => {
-                        self.index_run_stopped_at = None;
-                        Some(t.elapsed().as_secs())
-                    }
-                    Some(t) => {
-                        // 批次之间的空档：短暂停顿不算「停了」，计时继续；
-                        // 超过 INDEX_RUN_GAP 才认为这一轮真的结束，下次重新计时。
-                        let since = *self
-                            .index_run_stopped_at
-                            .get_or_insert_with(std::time::Instant::now);
-                        if since.elapsed() >= INDEX_RUN_GAP {
-                            self.index_run_started = None;
-                            self.index_run_stopped_at = None;
-                            None
-                        } else {
-                            Some(t.elapsed().as_secs())
-                        }
-                    }
-                    None if running_now => {
-                        self.index_run_started = Some(std::time::Instant::now());
-                        self.index_run_stopped_at = None;
-                        Some(0)
-                    }
-                    None => None,
-                };
-                let out = statusbar::show(
-                    ui,
-                    &self.lib,
-                    &theme,
-                    &self.verify_text,
-                    self.zoom.cell_px(),
-                    &snap,
-                    elapsed_secs,
-                    &self.index_mgr.io,
-                );
-                // M5-TB-10：底栏最右是线性滑块（22–512，step=1）。
-                // `input` 即刻改网格边长；松手才写进 `settings.grid_cell_px`。
-                //
-                // ⚠️ 底栏**没有**可点索引入口 / IO 入口：`StatusbarOut` 里已经没有
-                // 这两个字段（M5-IA-02 已确认，不再作为待定）。索引管理改由
-                // 更多「设置…」→「打开索引管理」与更多「索引管理…」到达。
-                if let Some(px) = out.zoom_px {
-                    self.zoom.set_cell_px(px, std::time::Instant::now());
-                    ctx.request_repaint();
-                }
-                if out.zoom_released {
-                    self.persist_zoom();
-                }
-            });
-
         // ② 左栏（含底部托盘）。M3.1：顶栏侧栏开关可整体收起
         //（`show_collapsible` 会留抓握条，这里直接不建面板更干净）。
         let sidebar_resp = self.sidebar_visible.then(|| {
@@ -3167,6 +3108,9 @@ impl OpenPicasaApp {
                 let db_arc = self.lib.db.clone();
                 let db = db_arc.lock().expect("db 锁");
                 let anchor = self.pending_anchor.take();
+                // 卡片矩形：CentralPanel 的内边距已把它从窗口边拉开，
+                // 底栏（status）画在这块矩形的底部 32px 内。
+                let card_rect = ui.available_rect_before_wrap();
                 let out = grid::show(
                     ui,
                     &self.lib.photos,
@@ -3186,8 +3130,89 @@ impl OpenPicasaApp {
                     self.zoom.cell_px(),
                     self.grid_show_filename,
                     grid::empty_reason(&self.lib.search, self.lib.filter.as_ref()),
+                    Metrics::STATUS_H,
                 );
                 drop(db);
+
+                // ---- 底栏画在**卡片内部**（原型 `div.status`：宽 = 卡片宽、高 32、
+                // 位于卡片底边，卡片底两角圆角包住它）。此前是全窗宽的独立
+                // `Panel::bottom`，与原型不符。
+                let status_rect = egui::Rect::from_min_max(
+                    egui::pos2(card_rect.left(), card_rect.bottom() - Metrics::STATUS_H),
+                    card_rect.max,
+                );
+                // 栅格的可滚视口仍到卡片底，照片会画到状态栏底下；原型里
+                // `div.content` 止于 776、`div.status` 独占 776..808。这里先用卡片色
+                // 把状态栏那一条盖住（底部两角跟卡片同半径），再画状态栏内容。
+                let r = theme.radius_card.round() as u8;
+                ui.painter().rect_filled(
+                    status_rect,
+                    egui::CornerRadius {
+                        nw: 0,
+                        ne: 0,
+                        sw: r,
+                        se: r,
+                    },
+                    theme.well_bg,
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(status_rect), |ui| {
+                    // M5-IA-02：「已用 mm:ss」以**连续运行**计时，而不是批次时刻。
+                    // 批次在 watcher 每次外部变化时都会重开，用批次时刻会让读数反复归零。
+                    let running_now = snap.running();
+                    let elapsed_secs = match self.index_run_started {
+                        Some(t) if running_now => {
+                            self.index_run_stopped_at = None;
+                            Some(t.elapsed().as_secs())
+                        }
+                        Some(t) => {
+                            // 批次之间的空档：短暂停顿不算「停了」，计时继续；
+                            // 超过 INDEX_RUN_GAP 才认为这一轮真的结束，下次重新计时。
+                            let since = *self
+                                .index_run_stopped_at
+                                .get_or_insert_with(std::time::Instant::now);
+                            if since.elapsed() >= INDEX_RUN_GAP {
+                                self.index_run_started = None;
+                                self.index_run_stopped_at = None;
+                                None
+                            } else {
+                                Some(t.elapsed().as_secs())
+                            }
+                        }
+                        None if running_now => {
+                            self.index_run_started = Some(std::time::Instant::now());
+                            self.index_run_stopped_at = None;
+                            Some(0)
+                        }
+                        None => None,
+                    };
+                    let out = statusbar::show(
+                        ui,
+                        &self.lib,
+                        &theme,
+                        &self.verify_text,
+                        self.zoom.cell_px(),
+                        &snap,
+                        elapsed_secs,
+                        &self.index_mgr.io,
+                        // 底栏在卡片内部：底色透明（卡片白已由栅格画好），
+                        // 底部两角由卡片自身收圆 —— 这里只传圆角值表示「内嵌」。
+                        egui::Color32::TRANSPARENT,
+                        theme.radius_card,
+                    );
+                    if let Some(px) = out.zoom_px {
+                        self.zoom.set_cell_px(px, std::time::Instant::now());
+                        ctx.request_repaint();
+                    }
+                    if out.zoom_released {
+                        self.persist_zoom();
+                    }
+                    // M5-TB-10：底栏最右是线性滑块（22–512，step=1）。
+                    // `input` 即刻改网格边长；松手才写进 `settings.grid_cell_px`。
+                    //
+                    // ⚠️ 底栏**没有**可点索引入口 / IO 入口：`StatusbarOut` 里已经没有
+                    // 这两个字段（M5-IA-02 已确认，不再作为待定）。索引管理改由
+                    // 更多「设置…」→「打开索引管理」与更多「索引管理…」到达。
+                });
 
                 // ---- M3 PERF-08：纹理预算的每帧两步
                 //
@@ -5557,6 +5582,34 @@ mod m5_date_span_tests {
 
 #[cfg(test)]
 mod m5_chrome_tests {
+    /// 用户 2026-11-26（1:1 还原）：原型 `div.status` 在**卡片内部** —— 宽 = 卡片宽、
+    /// 高 32、底边就是卡片底边（y 776..808），底色透明、没有顶缘分隔线。
+    ///
+    /// 此前底栏是全窗宽的独立 `Panel::bottom`，两侧漏到窗体灰上，与原型差一整条。
+    /// 这三条都只能用源码锁钉（布局位置测不出来）。
+    #[test]
+    fn statusbar_sits_inside_the_card_like_the_prototype() {
+        let app = include_str!("app.rs");
+        // 拼串是为了不让断言自己的字面量被数进去。
+        let old_panel = ["status", "bar-panel"].concat();
+        assert!(!app.contains(&old_panel), "底栏不再是独立的 bottom panel");
+        assert!(
+            app.contains("card.bottom() - Metrics::STATUS_H"),
+            "底栏贴在卡片底边上沿"
+        );
+        assert!(
+            app.contains("egui::CornerRadius { nw: 0, ne: 0, sw: r, se: r }"),
+            "底栏那一条要跟着卡片底部收圆"
+        );
+
+        let sb = include_str!("statusbar.rs");
+        assert!(
+            sb.contains("if bottom_radius <= 0.0"),
+            "内嵌在卡片里时不画顶缘发丝线（原型 border-top: none）"
+        );
+        assert!(app.contains("theme.well_bg"), "盖住溢出照片用的是卡片色");
+    }
+
     /// 用户 2026-11-25：顶栏 / 侧栏不要灰色边框，白色内容井的四角要完整露出。
     ///
     /// 这四条都是「一次调用 / 一个数字」，行为测不出来（分隔线由 egui 的

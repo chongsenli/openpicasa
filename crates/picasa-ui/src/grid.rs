@@ -1031,6 +1031,9 @@ pub fn show(
     show_filename: bool,
     // 空列表时怎么写：图库是空的，还是搜索/筛选没有命中
     empty: EmptyReason,
+    // 卡片底部留给状态栏的高度（原型 `div.status` 在卡片**内部**）。
+    // 0 = 状态栏不在卡片里（旧行为）。
+    status_inset: f32,
 ) -> GridOutput {
     let mut out = GridOutput {
         clicked: None,
@@ -1048,12 +1051,21 @@ pub fn show(
         uploads_this_frame: 0,
     };
 
-    let full = ui.available_rect_before_wrap();
+    // 原型：`div.card` 里是 `div.content`（滚动区）+ `div.status`（底栏 32）。
+    // 卡片矩形 `card` 覆盖两者，滚动视口 `full` 只到状态栏上沿。
+    let card = ui.available_rect_before_wrap();
+    let full = Rect::from_min_max(
+        card.min,
+        pos2(
+            card.right(),
+            (card.bottom() - status_inset.max(0.0)).max(card.top() + 1.0),
+        ),
+    );
     // M5：主内容井 = 主题卡片（亮：浅灰窗体上的白井；暗：`#1c1c1c` 卡片里的暗房）。
     // 外圈卡片与内井同色时（亮色）只看到一道发丝边；暗色两层色阶分明。
     ui.painter()
-        .rect_filled(full, theme.radius_card, theme.well_bg);
-    let inner = full.shrink(if theme.dark { 6.0 } else { 0.0 });
+        .rect_filled(card, theme.radius_card, theme.well_bg);
+    let inner = card.shrink(if theme.dark { 6.0 } else { 0.0 });
     if inner.width() > 8.0 && inner.height() > 8.0 {
         ui.painter().rect_filled(
             inner,
@@ -1721,7 +1733,7 @@ pub fn show(
     // 并且横跨整个视口高度，所以它一定会盖住卡片右上/右下那两段圆弧。这里在滚动区
     // 结束之后把四个「圆角缺口」（弧线之外、卡片矩形之内的一小块）用窗体底色补回去：
     // 滚动条与照片都会被这道遮罩按弧线裁掉，圆角就完整露出来了。
-    paint_corner_notches(ui.painter(), full, theme.radius_card, theme.chrome_bg);
+    paint_corner_notches(ui.painter(), card, theme.radius_card, theme.chrome_bg);
 
     // M4.2 `M42-PERF-00`：本帧贴图上传数 = 预算初值 − 剩余预算。图集档走
     // `tick_atlas` 单独上传（不消耗这里的每帧 3 张预算），故图集档记为 0，
