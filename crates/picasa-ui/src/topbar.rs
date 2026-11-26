@@ -23,7 +23,9 @@
 //!
 //! 排序 / 筛选 / 「…」保留为右侧图标组：它们是既有功能，不能在版式重排里丢。
 
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Ui, pos2, vec2};
+use eframe::egui::{
+    self, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Ui, Vec2, pos2, vec2,
+};
 use picasa_core::ViewMode;
 use picasa_db::SortKey;
 
@@ -161,14 +163,14 @@ pub struct ObjectActionState {
 /// 放在「编辑」右侧，组间留白 12px、组内 6px，按钮尺寸恒为 `d`（不缩小）。
 /// 窗口最窄 900 时由 `show` 把**中段右移**让位（左段优先），而不是压缩按钮。
 /// 纯函数，便于单测。
-fn object_button_rects(edit_right: f32, center_y: f32, d: f32) -> [Rect; 4] {
+fn object_button_rects(edit_right: f32, center_y: f32, size: Vec2) -> [Rect; 4] {
     const GROUP_GAP: f32 = 12.0;
     const INNER_GAP: f32 = 6.0;
-    let first_center = edit_right + GROUP_GAP + d / 2.0;
+    let first_center = edit_right + GROUP_GAP + size.x / 2.0;
     std::array::from_fn(|i| {
         Rect::from_center_size(
-            pos2(first_center + i as f32 * (d + INNER_GAP), center_y),
-            vec2(d, d),
+            pos2(first_center + i as f32 * (size.x + INNER_GAP), center_y),
+            size,
         )
     })
 }
@@ -177,11 +179,11 @@ fn object_button_rects(edit_right: f32, center_y: f32, d: f32) -> [Rect; 4] {
 ///
 /// 胶囊紧贴搜索框左侧、整簇靠右（v1.4 定稿）；搜索框常驻可见（H2），
 /// 宽度随窗口收窄，但不会低于 170 px。
-fn topbar_right_rects(rect: Rect, d: f32, dark: bool) -> (Rect, Rect, Rect, Rect, Rect) {
+fn topbar_right_rects(rect: Rect, size: Vec2, dark: bool) -> (Rect, Rect, Rect, Rect, Rect) {
     let cy = toolbar_center_y(rect, dark);
     let margin = 14.0;
     let circle_at =
-        |right_x: f32| -> Rect { Rect::from_center_size(pos2(right_x - d / 2.0, cy), vec2(d, d)) };
+        |right_x: f32| -> Rect { Rect::from_center_size(pos2(right_x - size.x / 2.0, cy), size) };
     let more = circle_at(rect.right() - margin);
     let filter = circle_at(more.left() - 4.0);
     let sort = circle_at(filter.left() - 4.0);
@@ -256,13 +258,13 @@ pub fn show(
     #[cfg(not(target_os = "macos"))]
     let traffic_w = 0.0;
 
-    let d = Metrics::TOPBAR_ICON_D;
+    let size = Metrics::topbar_icon_size(theme.dark);
     let margin = 14.0;
     let cy = toolbar_center_y(rect, theme.dark);
 
     // ---- 右簇（从右往左）：… 筛选 排序 搜索 排布 ----
     let (layout_rect, search_rect, sort_r, filter_r, more_r) =
-        topbar_right_rects(rect, d, theme.dark);
+        topbar_right_rects(rect, size, theme.dark);
     out.more_button = Some(more_r);
     out.filter_button = Some(filter_r);
     out.sort_button = Some(sort_r);
@@ -275,15 +277,15 @@ pub fn show(
     //   即与文件夹树的最右侧**始终保持对齐**——按钮组骑在侧栏边界右侧，
     //   侧栏拖宽时同步移动；侧栏隐藏时退回默认宽度。
     let left_x = rect.left() + traffic_w + margin;
-    let side_r = Rect::from_center_size(pos2(left_x + d / 2.0, cy), vec2(d, d));
-    let import_r = Rect::from_center_size(pos2(side_r.right() + 6.0 + d / 2.0, cy), vec2(d, d));
+    let side_r = Rect::from_center_size(pos2(left_x + size.x / 2.0, cy), size);
+    let import_r = Rect::from_center_size(pos2(side_r.right() + 6.0 + size.x / 2.0, cy), size);
     // 幻灯片左沿 = 侧栏右缘（Clamp 防窄侧栏时与导入重叠）
     let seg_left = (rect.left() + sidebar_w).max(import_r.right() + 6.0);
-    let slide_r = Rect::from_center_size(pos2(seg_left + d / 2.0, cy), vec2(d, d));
-    let edit_r = Rect::from_center_size(pos2(slide_r.right() + 6.0 + d / 2.0, cy), vec2(d, d));
+    let slide_r = Rect::from_center_size(pos2(seg_left + size.x / 2.0, cy), size);
+    let edit_r = Rect::from_center_size(pos2(slide_r.right() + 6.0 + size.x / 2.0, cy), size);
     // M4.1 `M41-UI-01`（用户 #4 定稿）：四枚对象操作钮放在「编辑」之后。
     // 纯函数算 rect，便于单测「不与右簇重叠」（窗口最窄 900 时也要守住）。
-    let obj_rects = object_button_rects(edit_r.right(), cy, d);
+    let obj_rects = object_button_rects(edit_r.right(), cy, size);
     let [fav_r, cap_r, tag_r, tray_r] = obj_rects;
 
     // ---- ① 侧栏开关 ----
@@ -459,7 +461,7 @@ pub fn show(
         // 激活态：白圆上压一圈选中色描边（橙色留给排布选中片，不混用）
         painter.rect_stroke(
             filter_r,
-            d / 2.0,
+            theme.radius_btn,
             egui::Stroke::new(1.5, theme.selected),
             egui::StrokeKind::Inside,
         );
@@ -1111,12 +1113,12 @@ mod m41_tests {
     /// `M41-UI-01`：四枚按钮都在「编辑」右侧、互不重叠、尺寸恒为 d。
     #[test]
     fn object_buttons_sit_after_edit_with_stable_size() {
-        let d = Metrics::TOPBAR_ICON_D;
-        let rects = object_button_rects(300.0, 60.0, d);
+        let size = Metrics::topbar_icon_size(false);
+        let rects = object_button_rects(300.0, 60.0, size);
         assert_eq!(rects.len(), 4);
         for (i, r) in rects.iter().enumerate() {
             assert!(r.left() >= 300.0, "第 {i} 枚跑到编辑左侧了");
-            assert_eq!(r.width(), d, "第 {i} 枚尺寸被压缩了");
+            assert_eq!(r.width(), size.x, "第 {i} 枚尺寸被压缩了");
             if i > 0 {
                 assert!(r.left() >= rects[i - 1].right(), "第 {i} 枚与前一枚重叠");
             }
@@ -1127,13 +1129,13 @@ mod m41_tests {
     /// `show` 里 `mid_left = centered.max(after_objects)` 这条让位逻辑。
     #[test]
     fn middle_group_yields_to_object_buttons_on_narrow_window() {
-        let d = Metrics::TOPBAR_ICON_D;
-        let rects = object_button_rects(300.0, 60.0, d);
+        let size = Metrics::topbar_icon_size(false);
+        let rects = object_button_rects(300.0, 60.0, size);
         let after_objects = rects[3].right() + 18.0;
         for width in [1280.0_f32, 900.0_f32] {
             let mid_w = 3.0 * 34.0;
             let centered = (width - mid_w) / 2.0;
-            let search_left = width - 14.0 - 4.0 * d - 2.0 * 4.0 - 14.0; // 右段近似左缘
+            let search_left = width - 14.0 - 4.0 * size.x - 2.0 * 4.0 - 14.0; // 右段近似左缘
             let mid_left = centered
                 .max(after_objects)
                 .min(search_left - mid_w - 12.0)
@@ -1564,7 +1566,7 @@ mod m41_tests {
 
         // 右簇（排布胶囊 / 搜索 / 排序 / 筛选 / 更多）也都落在工具条中心
         let (_layout, search, sort, filter, more) =
-            topbar_right_rects(rect, Metrics::TOPBAR_ICON_D, false);
+            topbar_right_rects(rect, Metrics::topbar_icon_size(false), false);
         for r in [search, sort, filter, more] {
             assert!(
                 (r.center().y - cy).abs() < 0.01,

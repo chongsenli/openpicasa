@@ -281,6 +281,26 @@ fn rgb(hex: u32) -> Color32 {
 }
 
 impl Theme {
+    /// 卡片外框描边。
+    ///
+    /// 原型：亮 `html[data-theme="light"] .card{box-shadow:…,0 0 0 1px rgba(0,0,0,.035)}`
+    /// （1px 极淡黑边），暗 `html[data-theme="dark"] .card{border:1px solid #ffffff0d}`。
+    pub fn card_border(&self) -> Color32 {
+        if self.dark {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 0x0d)
+        } else {
+            Color32::from_rgba_unmultiplied(0, 0, 0, 0x09)
+        }
+    }
+
+    /// 卡片内层描边：原型暗色 `.inner{border:1px solid #ffffff0a}`；亮色没有内层。
+    pub fn card_inner_border(&self) -> Color32 {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 0x0a)
+    }
+
+    /// 卡片内层圆角：原型暗色 `.inner{border-radius:16px}`。
+    pub const CARD_INNER_RADIUS: f32 = 16.0;
+
     /// 卡片内层底色：暗色 `css/app.css:159 .inner{background:#151515}`（比外卡 #1c1c1c 暗一档），
     /// 亮色没有这层，卡片本身就是白色。底栏内嵌在卡片里，也要用这个色，
     /// 否则暗色底栏会露出外卡的 #1c1c1c，跟原型差一档（实测差 7 个灰阶）。
@@ -553,6 +573,16 @@ impl Metrics {
     /// 顶栏总高：亮 84 / 暗 76 + 1px 底边线 = 77（原型暗色 `.body` 从 y=77 起）。
     pub fn topbar_h(dark: bool) -> f32 {
         Self::topbar_title_h(dark) + Self::topbar_tool_h(dark) + if dark { 1.0 } else { 0.0 }
+    }
+
+    /// 顶栏图标按钮尺寸：亮 `.ib` **30×30**、暗 **32×28**（`css/app.css:66,68`）。
+    /// 暗色不是正方形（原型 `.ib{width:32px;height:28px}`），所以用 Vec2 传。
+    pub fn topbar_icon_size(dark: bool) -> egui::Vec2 {
+        if dark {
+            egui::vec2(32.0, 28.0)
+        } else {
+            egui::vec2(30.0, 30.0)
+        }
     }
 
     /// 侧栏行高：亮 30 / 暗 28。
@@ -1233,6 +1263,54 @@ mod m5_theme_metrics_tests {
             Metrics::sidebar_section_h(false) < Metrics::sidebar_row_h(false),
             "亮色组头应比行矮（原型 27 < 30）"
         );
+    }
+
+    /// 顶栏图标按钮尺寸：亮 30×30（正方形）、暗 32×28（**不是正方形**）。
+    #[test]
+    fn topbar_icon_buttons_follow_the_prototype_sizes() {
+        let light = Metrics::topbar_icon_size(false);
+        let dark = Metrics::topbar_icon_size(true);
+        assert_eq!((light.x, light.y), (30.0, 30.0));
+        assert_eq!((dark.x, dark.y), (32.0, 28.0));
+        assert_ne!(dark.x, dark.y, "暗色 .ib 是 32×28，不是正方形");
+
+        // 源码锁：不能再有「按直径画圆」的 d/2.0 残留
+        let bar = include_str!("topbar.rs");
+        let body = bar.split("#[cfg(test)]").next().unwrap_or(bar);
+        assert!(
+            body.contains("Metrics::topbar_icon_size(theme.dark)"),
+            "顶栏按钮尺寸按主题取"
+        );
+        let dead = ["TOPBAR", "_ICON_D"].concat();
+        assert!(!body.contains(&dead), "渲染路径不应再用单一常量");
+    }
+
+    /// 卡片描边：亮色极淡黑边（`rgba(0,0,0,.035)`），暗色 `#ffffff0d`；
+    /// 内层描边 `#ffffff0a`、圆角 16。都不能退回主题的 hairline（那档是 190 灰，
+    /// 压在白色内容井上会让四个圆角显脏——2026-11-25 用户反馈过）。
+    #[test]
+    fn card_borders_follow_the_prototype_alphas() {
+        let light = Theme::for_appearance(Appearance::Light);
+        let dark = Theme::for_appearance(Appearance::Dark);
+        assert_eq!(light.card_border().a(), 0x09, "亮色 0.035 alpha ≈ 9");
+        assert_eq!(dark.card_border().a(), 0x0d, "暗色 #ffffff0d");
+        assert_eq!(dark.card_inner_border().a(), 0x0a, "暗色 .inner #ffffff0a");
+        assert_eq!(Theme::CARD_INNER_RADIUS, 16.0, "原型 .inner 圆角 16");
+        assert_ne!(
+            light.card_border(),
+            light.hairline,
+            "卡片描边不能复用 hairline"
+        );
+
+        let src = include_str!("grid.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(body.contains("theme.card_border()"), "卡片外框走主题描边");
+        assert!(
+            body.contains("theme.card_inner_border()"),
+            "暗色内层描边走主题 token"
+        );
+        let dead = ["theme", ".hairline"].concat();
+        assert!(!body.contains(&dead), "内容井不再用 hairline 描边");
     }
 
     /// 源码锁：渲染路径必须走主题函数，不能退回单一 const

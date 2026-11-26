@@ -1065,25 +1065,34 @@ pub fn show(
     // 外圈卡片与内井同色时（亮色）只看到一道发丝边；暗色两层色阶分明。
     ui.painter()
         .rect_filled(card, theme.radius_card, theme.well_bg);
+    // 暗色卡片里还有一层 `.inner`（原型 `css/app.css:159`）：底色 #151515、
+    // 圆角 16、1px `#ffffff0a` 描边、四周内缩 6。亮色没有这层。
     let inner = card.shrink(if theme.dark { 6.0 } else { 0.0 });
     if inner.width() > 8.0 && inner.height() > 8.0 {
-        ui.painter().rect_filled(
-            inner,
-            (theme.radius_card - 4.0).max(2.0),
-            theme.grid_bg,
-        );
+        let inner_radius = if theme.dark {
+            Theme::CARD_INNER_RADIUS
+        } else {
+            (theme.radius_card - 4.0).max(2.0)
+        };
+        ui.painter()
+            .rect_filled(inner, inner_radius, theme.grid_bg);
+        if theme.dark {
+            ui.painter().rect_stroke(
+                inner,
+                inner_radius,
+                Stroke::new(1.0, theme.card_inner_border()),
+                StrokeKind::Inside,
+            );
+        }
     }
-    // 用户 2026-11-25：亮色取消内容井外圈的发丝描边——白井落在 245 灰窗体上，
-    // 再压一圈 190 灰的线反而让四个圆角看起来「脏、被切过」；暗色仍保留，
-    // 因为那里 `#1c1c1c` 卡片与 `#151515` 窗体只差一档，需要一条边定位。
-    if theme.dark {
-        ui.painter().rect_stroke(
-            full,
-            theme.radius_card,
-            Stroke::new(1.0, theme.hairline),
-            StrokeKind::Inside,
-        );
-    }
+    // 卡片外框描边：亮色是 `0 0 0 1px rgba(0,0,0,.035)` 的极淡黑边（不是 190 灰的
+    // hairline——那会让四个圆角看起来「脏、被切过」）；暗色是 `#ffffff0d`。
+    ui.painter().rect_stroke(
+        card,
+        theme.radius_card,
+        Stroke::new(1.0, theme.card_border()),
+        StrokeKind::Inside,
+    );
 
     // ---- M4.1 `M41-UI-09/10`：框选拖拽状态（egui IdTypeMap 跨帧）----
     // 起手在照片上或留白均可；移动 < DRAG_THRESHOLD 仍按普通单击处理。
