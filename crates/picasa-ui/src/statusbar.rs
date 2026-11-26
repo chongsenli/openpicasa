@@ -50,12 +50,18 @@ pub struct StatusbarOut {
     pub zoom_released: bool,
 }
 
-/// 滑块两侧的像素文案宽度（「512 px」），定值让滑块不会随数字长度抖动。
-const PX_LABEL_W: f32 = 48.0;
+/// 像素文案宽度（「512 px」）。原型 `span.tnum` 实测 46（x1210..1256），定值让滑块不随数字长度抖动。
+const PX_LABEL_W: f32 = 46.0;
+/// 像素文案与滑块之间的间距：原型 `input` 右缘 1202、`span.tnum` 左缘 1210。
+const PX_LABEL_GAP: f32 = 8.0;
+/// 状态栏右内边距：原型 `.status{padding:0 12px 0 14px}`，`span.tnum` 右缘 = 卡片右 − 12。
+const STATUS_RIGHT_PAD: f32 = 12.0;
 /// 「缩略图」标题宽度。
 const SLIDER_TITLE_W: f32 = 42.0;
-/// 滑块本体宽度（成组贴右，v1.4 量感 ≈ 96）。
+/// 滑块本体宽度（成组贴右；原型 `input.thumb-range{width:96px}`）。
 const SLIDER_W: f32 = 96.0;
+/// 滑块把手直径：原型 `::-webkit-slider-thumb{width:12px;height:12px}`。
+const HANDLE_D: f32 = 12.0;
 
 #[allow(clippy::too_many_arguments)]
 pub fn show(
@@ -99,14 +105,13 @@ pub fn show(
         se: radius.round() as u8,
     };
     painter.rect_filled(rect, corners, bg);
-    // 原型 `div.status` 在卡片内部：底色透明、**没有**顶缘发丝线
-    // （`border-top: none`，computed style 实测）。只有底栏单独占一条时才画分隔线。
-    if bottom_radius <= 0.0 {
-        painter.line_segment(
-            [rect.left_top(), rect.right_top()],
-            egui::Stroke::new(1.0, theme.separator),
-        );
-    }
+    // 底栏上缘的 1px 淡线：原型 computed style 的 `border-top` 是 `none`，但逐像素
+    // 比对发现 `div.status` 顶边整行都是 240（255 白底上 → `rgba(0,0,0,.06)`），
+    // 比 `theme.separator`（190 灰）淡得多。按实测画，两种情形都画。
+    painter.line_segment(
+        [rect.left_top(), rect.right_top()],
+        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 15)),
+    );
 
     let font = FontId::new(11.0, egui::FontFamily::Proportional);
 
@@ -232,11 +237,11 @@ fn draw_zoom_slider(
 ) -> Rect {
     let cy = bar.center().y;
     let px_label = Rect::from_center_size(
-        pos2(bar.right() - 8.0 - PX_LABEL_W / 2.0, cy),
+        pos2(bar.right() - STATUS_RIGHT_PAD - PX_LABEL_W / 2.0, cy),
         vec2(PX_LABEL_W, Metrics::STATUS_H),
     );
     let slider_rect = Rect::from_center_size(
-        pos2(px_label.left() - SLIDER_W / 2.0, cy),
+        pos2(px_label.left() - PX_LABEL_GAP - SLIDER_W / 2.0, cy),
         vec2(SLIDER_W, Metrics::STATUS_H),
     );
     let title_rect = Rect::from_center_size(
@@ -265,47 +270,38 @@ fn draw_zoom_slider(
         theme.status_text,
     );
 
-    // 滑块本体：在 `slider_rect` 里嵌一个子 Ui，避免影响状态栏的整行分配。
-    let mut value = zoom_px.clamp(picasa_core::CELL_MIN_PX, picasa_core::CELL_MAX_PX) as i32;
-    // 滑块轨道 / 把手颜色来自主题：亮色轨道 #ebebec、把手强调蓝；暗色轨道 #1c1c1c、
-    // 把手强调青。egui 的 slider 从 `widgets.inactive.bg_fill`（轨道）与
-    // `widgets.inactive.bg_fill`（把手）取色，这里在局部样式里覆盖，不改全局。
-    let mut slider_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .id_salt("statusbar-zoom-slider")
-            .max_rect(slider_rect),
-    );
-    slider_ui.style_mut().spacing.slider_width = SLIDER_W - 8.0;
-    {
-        let v = &mut slider_ui.style_mut().visuals.widgets;
-        v.inactive.bg_fill = theme.track_bg;
-        v.inactive.corner_radius = egui::CornerRadius::same(255);
-        v.hovered.bg_fill = theme.track_bg;
-        v.hovered.corner_radius = egui::CornerRadius::same(255);
-        v.active.bg_fill = theme.track_bg;
-        v.active.corner_radius = egui::CornerRadius::same(255);
+    // ---- 滑块本体：自绘（原型 `input.thumb-range`）----
+    // 原型规范（app.css:208-215）：轨道 96×4、圆角 999、色 `--track`（亮 #ebebec）；
+    // 把手 12×12 圆、色 `--accent`，外加 `box-shadow:0 0 0 2px var(--card)` 的白圈。
+    // egui 的 `Slider` 轨道与把手都取 `widgets.*.bg_fill`，无法分别指定，自绘更短也
+    // 更容易与原型逐像素对上。
+    let rail = Rect::from_center_size(pos2(slider_rect.center().x, cy), vec2(SLIDER_W, 4.0));
+    let min = picasa_core::CELL_MIN_PX;
+    let span = picasa_core::CELL_MAX_PX - min;
+    let mut value = zoom_px.clamp(min, picasa_core::CELL_MAX_PX);
+    let slider_id = ui.scope_id().with("statusbar-zoom-slider");
+    let resp = ui.interact(slider_rect, slider_id, egui::Sense::click_and_drag());
+    if let Some(p) = resp.interact_pointer_pos() {
+        let travel = (SLIDER_W - HANDLE_D).max(1.0);
+        let t = ((p.x - (slider_rect.left() + HANDLE_D / 2.0)) / travel).clamp(0.0, 1.0);
+        value = (min + t * span).round();
+        if resp.dragged() || resp.clicked() {
+            out.zoom_px = Some(value);
+        }
     }
-    slider_ui.style_mut().visuals.selection.bg_fill = theme.selected;
-    slider_ui.style_mut().visuals.handle_shape = egui::style::HandleShape::Circle;
-    let resp = slider_ui.add(
-        egui::Slider::new(
-            &mut value,
-            picasa_core::CELL_MIN_PX as i32..=picasa_core::CELL_MAX_PX as i32,
-        )
-        .integer()
-        .show_value(false),
-    );
-    if resp.changed() {
-        out.zoom_px = Some(value as f32);
-    }
-    if resp.drag_stopped() {
+    if resp.drag_stopped() || resp.clicked() {
+        out.zoom_px = Some(value);
         out.zoom_released = true;
     }
-    // 点击轨道（不是拖动）也会改值，且没有 drag_stopped：用 clicked 补一次落库。
-    if resp.clicked() {
-        out.zoom_px = Some(value as f32);
-        out.zoom_released = true;
-    }
+    // 轨道
+    painter.rect_filled(rail, egui::CornerRadius::same(255), theme.track_bg);
+    // 把手：12 直径 + 2px 白圈（暗色下白圈是 `--card` 的 #1c1c1c，等比换成卡片色）
+    let t = ((value - min) / span).clamp(0.0, 1.0);
+    let hx = rail.left() + HANDLE_D / 2.0 + t * (rail.width() - HANDLE_D);
+    let hc = pos2(hx, cy);
+    painter.circle_filled(hc, HANDLE_D / 2.0 + 2.0, theme.card_inner_bg());
+    painter.circle_filled(hc, HANDLE_D / 2.0, theme.selected);
+
     title_rect.union(px_label)
 }
 

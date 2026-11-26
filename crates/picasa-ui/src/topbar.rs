@@ -269,6 +269,23 @@ pub fn show(
     out.filter_button = Some(filter_r);
     out.sort_button = Some(sort_r);
 
+    // 原型 `.toolbar{border-bottom:1px solid var(--line)}`：**整宽** 1px、`rgba(0,0,0,.06)`
+    // （在 245 窗体上得 230，实测原型 y=83 整行 230，连侧栏上方那一段也有）。
+    // 第十三轮曾把这条线整条删掉——那是因为当时画的是 190 灰的 `toolbar_border`，
+    // 与原型这条极淡的界不是一回事；这里按原型的淡线还原。
+    let line_color = if theme.dark {
+        Color32::BLACK
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 15)
+    };
+    painter.line_segment(
+        [
+            pos2(rect.left(), rect.bottom() - 0.5),
+            pos2(rect.right(), rect.bottom() - 0.5),
+        ],
+        egui::Stroke::new(1.0, line_color),
+    );
+
     // ---- 左段（从左往右）：侧栏开关 导入 …… 幻灯片 编辑 ----
     // M32-UI-01/02 v1.4：
     // * 侧栏开关、导入贴窗口最左（红绿灯在上方的标题带，单行顶栏不必让位；

@@ -189,7 +189,15 @@ impl GridLayout {
             };
 
         let mut layout = if mode == ViewMode::Grid {
-            Self::build_grid(photos, viewport_w, cell, img_h, cell_h, has_headers, show_filename)
+            Self::build_grid(
+                photos,
+                viewport_w,
+                cell,
+                img_h,
+                cell_h,
+                has_headers,
+                show_filename,
+            )
         } else {
             Self::build_masonry(photos, viewport_w, viewport_h, cell, mode)
         };
@@ -1074,8 +1082,7 @@ pub fn show(
         } else {
             (theme.radius_card - 4.0).max(2.0)
         };
-        ui.painter()
-            .rect_filled(inner, inner_radius, theme.grid_bg);
+        ui.painter().rect_filled(inner, inner_radius, theme.grid_bg);
         if theme.dark {
             ui.painter().rect_stroke(
                 inner,
@@ -1091,7 +1098,7 @@ pub fn show(
         card,
         theme.radius_card,
         Stroke::new(1.0, theme.card_border()),
-        StrokeKind::Inside,
+        StrokeKind::Outside,
     );
 
     // ---- M4.1 `M41-UI-09/10`：框选拖拽状态（egui IdTypeMap 跨帧）----
@@ -1685,7 +1692,18 @@ pub fn show(
         let track = scroll_bar_track_rect(full, theme.radius_card);
         let view_h = area_out.inner_rect.height();
         let content_h = area_out.content_size.y;
-        if let Some(thumb) = scroll_thumb_rect(track, out.scroll_y, content_h, view_h) {
+        // 原型用浏览器 **overlay** 滚动条：不滚动、不悬停时完全不可见
+        // （`proto_shot` 截出的原型图右侧没有条）。此前我们常显，占了卡片
+        // 右内侧 6px，与原型逐像素比对时是 card_right 分区的最大误差源。
+        let last_id = ui.scope_id().with("grid-bar-last-off");
+        let last_off: Option<f32> = ui.ctx().memory(|m| m.data.get_temp(last_id));
+        let scrolling_now = last_off.is_some_and(|v| (v - out.scroll_y).abs() > 0.5);
+        ui.ctx().memory_mut(|m| m.data.insert_temp(last_id, out.scroll_y));
+        let overlay_visible =
+            scrolling_now || bar_drag_off.is_some() || ui.rect_contains_pointer(full);
+        if overlay_visible
+            && let Some(thumb) = scroll_thumb_rect(track, out.scroll_y, content_h, view_h)
+        {
             let bar_id = ui.scope_id().with("grid-scrollbar");
             let grab_id = ui.scope_id().with("grid-bar-grab");
             let resp = ui.interact(
@@ -2350,6 +2368,27 @@ mod prototype_spec_tests {
 
 #[cfg(test)]
 mod tests {
+    /// 原型用浏览器 **overlay** 滚动条：不滚动、不悬停时完全不可见
+    /// （`proto_shot` 截出的原型右侧没有条）。常显会让卡片右内侧多出 6px 的条，
+    /// 是逐像素比对时 card_right 分区的最大误差源。
+    #[test]
+    fn scrollbar_is_overlay_and_hidden_until_hover_or_scroll() {
+        let src = include_str!("grid.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            body.contains("overlay_visible"),
+            "滚动条要按 overlay 语义决定是否绘制"
+        );
+        assert!(
+            body.contains("scrolling_now") && body.contains("rect_contains_pointer(full)"),
+            "可见性 = 正在滚动 / 拖拽中 / 指针在卡片内"
+        );
+        assert!(
+            body.contains("AlwaysHidden"),
+            "egui 自带条必须一直隐藏，否则又会出现第二条"
+        );
+    }
+
     use super::*;
     use picasa_db::PhotoRow;
 

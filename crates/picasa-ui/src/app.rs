@@ -5608,8 +5608,8 @@ mod m5_chrome_tests {
 
         let sb = include_str!("statusbar.rs");
         assert!(
-            sb.contains("if bottom_radius <= 0.0"),
-            "内嵌在卡片里时不画顶缘发丝线（原型 border-top: none）"
+            sb.contains("from_rgba_unmultiplied(0, 0, 0, 15)"),
+            "底栏上缘是 1px `rgba(0,0,0,.06)` 淡线：原型 computed style 写着 `border-top: none`，\n             但逐像素实测整行是 240（255 白底上减 15），比 190 灰的发丝线淡得多"
         );
         assert!(
             app.contains("theme.card_inner_bg()"),
