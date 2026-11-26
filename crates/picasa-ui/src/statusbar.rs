@@ -156,8 +156,12 @@ pub fn show(
             let short: String = text.chars().take(keep.max(1)).collect();
             galley = painter.layout_no_wrap(format!("{short}…"), font.clone(), theme.status_text);
         }
+        // CJK 回退字体带 `y_offset_factor`（theme.rs），galley 的行框比字形
+        // 视觉中心低，按行框居中会把中文压到中线以下。实测 12px 字号偏下 4px，
+        // 这里显式抬回来（拉丁-only 的行同样抬 4px，实测仍在肉眼容差内）。
+        const GALLEY_CENTER_BIAS: f32 = 4.0;
         painter.galley(
-            pos2(x, rect.center().y - galley.size().y / 2.0),
+            pos2(x, rect.center().y - galley.size().y / 2.0 - GALLEY_CENTER_BIAS),
             galley,
             theme.status_text,
         );
