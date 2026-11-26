@@ -11,7 +11,7 @@
 //! `resvg`/`usvg` 是 MPL-2.0，且 M1 的图标数量只有十来个、形状都极其简单。
 //! 用 `Painter` 直接画线省掉一个依赖，也省掉一次启动时的光栅化。
 
-use eframe::egui::{Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2};
+use eframe::egui::{Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, pos2};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -103,636 +103,94 @@ pub enum Icon {
     Camera,
 }
 
-/// 在 `rect` 内绘制图标。线条宽度按 `stroke` 缩放（Retina 下自动变细）。
+/// 图标路径表：全部来自 Lucide（ISC 许可），见 [`crate::icons_lucide`]。
+///
+/// 为什么改成查表：手绘的那套为了塞进 `match` 里逐条 `line_segment`，每个图形只能
+/// 用最少的直线段逼近，结果有两类硬伤——**形状错**（心形退化成胶囊、`Slideshow`
+/// 画成显示器）和**比例错**（同一套里线条粗细/留白不一致）。Lucide 的 24×24 网格
+/// 是同一套画出来的，换掉后整套图标的视觉重量自动统一。
+pub fn paths(icon: Icon) -> &'static [crate::icons_lucide::SubPath] {
+    match icon {
+        Icon::Back => crate::icons_lucide::BACK,
+        Icon::AddFolder => crate::icons_lucide::ADD_FOLDER,
+        Icon::Reveal => crate::icons_lucide::REVEAL,
+        Icon::Sort => crate::icons_lucide::SORT,
+        Icon::GridSize => crate::icons_lucide::GRID_SIZE,
+        Icon::Fullscreen => crate::icons_lucide::FULLSCREEN,
+        Icon::Search => crate::icons_lucide::SEARCH,
+        Icon::ChevronRight => crate::icons_lucide::CHEVRON_RIGHT,
+        Icon::ChevronDown => crate::icons_lucide::CHEVRON_DOWN,
+        Icon::Tray => crate::icons_lucide::TRAY,
+        Icon::Trash => crate::icons_lucide::TRASH,
+        Icon::Info => crate::icons_lucide::INFO,
+        Icon::Index => crate::icons_lucide::INDEX,
+        Icon::Close => crate::icons_lucide::CLOSE,
+        Icon::Folder => crate::icons_lucide::FOLDER,
+        Icon::Plus => crate::icons_lucide::PLUS,
+        Icon::Minus => crate::icons_lucide::MINUS,
+        Icon::SidebarToggle => crate::icons_lucide::SIDEBAR_TOGGLE,
+        Icon::SortArrows => crate::icons_lucide::SORT_ARROWS,
+        Icon::ListLines => crate::icons_lucide::LIST_LINES,
+        Icon::Ellipsis => crate::icons_lucide::ELLIPSIS,
+        Icon::Share => crate::icons_lucide::SHARE,
+        Icon::Heart => crate::icons_lucide::HEART,
+        Icon::Star => crate::icons_lucide::STAR,
+        Icon::Album => crate::icons_lucide::ALBUM,
+        Icon::PhotoStack => crate::icons_lucide::PHOTO_STACK,
+        Icon::Map => crate::icons_lucide::MAP,
+        Icon::Video => crate::icons_lucide::VIDEO,
+        Icon::Person => crate::icons_lucide::PERSON,
+        Icon::Import => crate::icons_lucide::IMPORT,
+        Icon::Slideshow => crate::icons_lucide::SLIDESHOW,
+        Icon::Edit => crate::icons_lucide::EDIT,
+        Icon::LayoutGrid => crate::icons_lucide::LAYOUT_GRID,
+        Icon::LayoutMasonryV => crate::icons_lucide::LAYOUT_MASONRY_V,
+        Icon::LayoutMasonryH => crate::icons_lucide::LAYOUT_MASONRY_H,
+        Icon::Tag => crate::icons_lucide::TAG,
+        Icon::Caption => crate::icons_lucide::CAPTION,
+        Icon::Calendar => crate::icons_lucide::CALENDAR,
+        Icon::File => crate::icons_lucide::FILE,
+        Icon::Image => crate::icons_lucide::IMAGE,
+        Icon::Camera => crate::icons_lucide::CAMERA,
+    }
+}
+
+/// 在 `rect` 内绘制图标。`stroke` 是**屏幕像素**宽度；`stroke <= 0` 表示实心填充
+/// （选中态的心形/星形走这条）。
 pub fn draw(painter: &Painter, icon: Icon, rect: Rect, color: Color32, stroke: f32) {
-    let s = Stroke::new(stroke, color);
-    // 归一化坐标 → 屏幕坐标
-    let p = |x: f32, y: f32| -> Pos2 {
+    let paths = paths(icon);
+    let map = |x: f32, y: f32| -> Pos2 {
         pos2(
             rect.left() + x * rect.width(),
             rect.top() + y * rect.height(),
         )
     };
-    let inset = rect.shrink(rect.width() * 0.16);
-    let ip = |x: f32, y: f32| -> Pos2 {
-        pos2(
-            inset.left() + x * inset.width(),
-            inset.top() + y * inset.height(),
-        )
-    };
-
-    match icon {
-        Icon::Back => {
-            painter.line_segment([p(0.18, 0.5), p(0.84, 0.5)], s);
-            painter.line_segment([p(0.18, 0.5), p(0.44, 0.24)], s);
-            painter.line_segment([p(0.18, 0.5), p(0.44, 0.76)], s);
-        }
-        Icon::AddFolder => {
-            // 文件夹主体
-            let body = Rect::from_min_max(ip(0.0, 0.22), ip(1.0, 0.9));
-            painter.rect_stroke(body, 1.0, s, StrokeKind::Inside);
-            painter.line_segment([ip(0.0, 0.22), ip(0.0, 0.1)], s);
-            painter.line_segment([ip(0.0, 0.1), ip(0.42, 0.1)], s);
-            painter.line_segment([ip(0.42, 0.1), ip(0.52, 0.22)], s);
-            // 加号（在主体右下角外侧，视觉上更清楚）
-            let c = p(0.72, 0.7);
-            painter.line_segment([pos2(c.x - 4.0, c.y), pos2(c.x + 4.0, c.y)], s);
-            painter.line_segment([pos2(c.x, c.y - 4.0), pos2(c.x, c.y + 4.0)], s);
-        }
-        // 显示位置：原型 `locate` 是水滴形图钉（<circle cx=12 cy=11 r=3> + 水滴轮廓），
-        // 不是放大镜。这里画水滴轮廓 + 中心圆孔。
-        Icon::Reveal => {
-            painter.add(Shape::closed_line(
-                locate_points(rect),
-                egui::epaint::PathStroke::new(stroke, color),
-            ));
-            painter.circle_stroke(ip(0.5, 0.44), rect.width() * 0.13, s);
-        }
-        Icon::Sort => {
-            painter.line_segment([ip(0.05, 0.25), ip(0.95, 0.25)], s);
-            painter.line_segment([ip(0.05, 0.5), ip(0.7, 0.5)], s);
-            painter.line_segment([ip(0.05, 0.75), ip(0.45, 0.75)], s);
-        }
-        Icon::GridSize => {
-            let w = rect.width() * 0.3;
-            let gap = rect.width() * 0.1;
-            let left = rect.center().x - w - gap / 2.0;
-            let top = rect.center().y - w - gap / 2.0;
-            for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
-                let r = Rect::from_min_size(
-                    pos2(left + dx * (w + gap), top + dy * (w + gap)),
-                    vec2(w, w),
-                );
-                painter.rect_filled(r, 1.0, color);
+    if stroke <= 0.0 {
+        for sp in paths {
+            let pts: Vec<Pos2> = sp.pts.iter().map(|&(x, y)| map(x, y)).collect();
+            if pts.len() < 3 {
+                continue;
             }
+            // 实心：交给 egui 的路径填充（支持凹多边形，心形/星形都不会被当成凸包）。
+            painter.add(Shape::Path(egui::epaint::PathShape {
+                points: pts,
+                closed: true,
+                fill: color,
+                stroke: egui::epaint::PathStroke::NONE,
+            }));
         }
-        Icon::Fullscreen => {
-            let l = 0.22;
-            // 四个角
-            painter.line_segment([ip(0.0, l), ip(0.0, 0.0)], s);
-            painter.line_segment([ip(0.0, 0.0), ip(l, 0.0)], s);
-            painter.line_segment([ip(1.0 - l, 0.0), ip(1.0, 0.0)], s);
-            painter.line_segment([ip(1.0, 0.0), ip(1.0, l)], s);
-            painter.line_segment([ip(1.0, 1.0 - l), ip(1.0, 1.0)], s);
-            painter.line_segment([ip(1.0, 1.0), ip(1.0 - l, 1.0)], s);
-            painter.line_segment([ip(l, 1.0), ip(0.0, 1.0)], s);
-            painter.line_segment([ip(0.0, 1.0), ip(0.0, 1.0 - l)], s);
-        }
-        Icon::Search => {
-            let c = ip(0.4, 0.4);
-            painter.circle_stroke(c, rect.width() * 0.26, s);
-            painter.line_segment([pos2(c.x + 7.0, c.y + 7.0), ip(0.98, 0.98)], s);
-        }
-        Icon::ChevronRight => {
-            painter.line_segment([ip(0.32, 0.12), ip(0.72, 0.5)], s);
-            painter.line_segment([ip(0.72, 0.5), ip(0.32, 0.88)], s);
-        }
-        Icon::ChevronDown => {
-            painter.line_segment([ip(0.12, 0.32), ip(0.5, 0.72)], s);
-            painter.line_segment([ip(0.5, 0.72), ip(0.88, 0.32)], s);
-        }
-        // 五角星：侧栏「星标」行。原型这里用的是 `star` 而不是心形
-        // （心形只出现在收藏按钮上：顶栏批量收藏、查看器单张收藏）。
-        Icon::Star => {
-            let c = rect.center();
-            let outer = rect.width().min(rect.height()) * 0.5;
-            if stroke <= 0.0 {
-                draw_star(painter, c, outer, color);
-            } else {
-                let pts = star_points(c, outer, outer * 0.45).to_vec();
-                painter.add(Shape::closed_line(
-                    pts,
-                    egui::epaint::PathStroke::new(stroke, color),
-                ));
-            }
-        }
-        Icon::Tray => {
-            let body = Rect::from_min_max(ip(0.05, 0.42), ip(0.95, 0.95));
-            painter.rect_stroke(body, 1.0, s, StrokeKind::Inside);
-            painter.line_segment([ip(0.05, 0.42), ip(0.3, 0.12)], s);
-            painter.line_segment([ip(0.3, 0.12), ip(0.7, 0.12)], s);
-            painter.line_segment([ip(0.7, 0.12), ip(0.95, 0.42)], s);
-        }
-        Icon::Trash => {
-            painter.line_segment([ip(0.1, 0.22), ip(0.9, 0.22)], s);
-            painter.line_segment([ip(0.38, 0.22), ip(0.38, 0.08)], s);
-            painter.line_segment([ip(0.38, 0.08), ip(0.62, 0.08)], s);
-            painter.line_segment([ip(0.62, 0.08), ip(0.62, 0.22)], s);
-            let body = Rect::from_min_max(ip(0.18, 0.22), ip(0.82, 0.95));
-            painter.line_segment([body.left_top(), body.left_bottom()], s);
-            painter.line_segment([body.right_top(), body.right_bottom()], s);
-            painter.line_segment([body.left_bottom(), body.right_bottom()], s);
-        }
-        Icon::Info => {
-            painter.circle_stroke(rect.center(), rect.width() * 0.4, s);
-            painter.line_segment([ip(0.5, 0.42), ip(0.5, 0.75)], s);
-            painter.circle_filled(ip(0.5, 0.25), stroke * 0.9, color);
-        }
-        Icon::Index => {
-            // 时钟：圆环 + 时针/分针（"后台正在建索引"，不是"照片"也不是"设置"）
-            let c = rect.center();
-            painter.circle_stroke(c, rect.width() * 0.4, s);
-            painter.line_segment([c, pos2(c.x, c.y - rect.height() * 0.24)], s);
-            painter.line_segment(
-                [
-                    c,
-                    pos2(c.x + rect.width() * 0.18, c.y + rect.height() * 0.08),
-                ],
-                s,
-            );
-        }
-        Icon::Close => {
-            painter.line_segment([ip(0.15, 0.15), ip(0.85, 0.85)], s);
-            painter.line_segment([ip(0.85, 0.15), ip(0.15, 0.85)], s);
-        }
-        // 日历：圆角方框 + 顶部装订线 + 两个挂耳
-        Icon::Calendar => {
-            let body = Rect::from_min_max(ip(0.08, 0.2), ip(0.92, 0.94));
-            painter.rect_stroke(body, 2.0, s, StrokeKind::Middle);
-            painter.line_segment([ip(0.08, 0.4), ip(0.92, 0.4)], s);
-            painter.line_segment([ip(0.3, 0.1), ip(0.3, 0.28)], s);
-            painter.line_segment([ip(0.7, 0.1), ip(0.7, 0.28)], s);
-        }
-        // 文档：纸张轮廓 + 右上折角 + 两条正文线
-        Icon::File => {
-            let body = Rect::from_min_max(ip(0.2, 0.06), ip(0.8, 0.94));
-            painter.rect_stroke(body, 2.0, s, StrokeKind::Middle);
-            painter.line_segment([ip(0.58, 0.06), ip(0.8, 0.28)], s);
-            painter.line_segment([ip(0.58, 0.06), ip(0.58, 0.28)], s);
-            painter.line_segment([ip(0.58, 0.28), ip(0.8, 0.28)], s);
-            painter.line_segment([ip(0.35, 0.52), ip(0.65, 0.52)], s);
-            painter.line_segment([ip(0.35, 0.7), ip(0.65, 0.7)], s);
-        }
-        // 图片：方框 + 太阳 + 山脊
-        Icon::Image => {
-            let body = Rect::from_min_max(ip(0.06, 0.14), ip(0.94, 0.86));
-            painter.rect_stroke(body, 2.0, s, StrokeKind::Middle);
-            painter.circle_stroke(ip(0.34, 0.38), rect.width() * 0.08, s);
-            painter.line_segment([ip(0.14, 0.76), ip(0.42, 0.5)], s);
-            painter.line_segment([ip(0.42, 0.5), ip(0.62, 0.7)], s);
-            painter.line_segment([ip(0.62, 0.7), ip(0.74, 0.58)], s);
-            painter.line_segment([ip(0.74, 0.58), ip(0.9, 0.76)], s);
-        }
-        // 相机：机身 + 顶部取景凸起 + 镜头圈
-        Icon::Camera => {
-            let body = Rect::from_min_max(ip(0.04, 0.28), ip(0.96, 0.86));
-            painter.rect_stroke(body, 3.0, s, StrokeKind::Middle);
-            painter.line_segment([ip(0.3, 0.28), ip(0.36, 0.14)], s);
-            painter.line_segment([ip(0.36, 0.14), ip(0.64, 0.14)], s);
-            painter.line_segment([ip(0.64, 0.14), ip(0.7, 0.28)], s);
-            painter.circle_stroke(ip(0.5, 0.57), rect.width() * 0.17, s);
-        }
-        // 文件夹：一个梯形口袋 + 一个标签页（16 px 下仍可辨认的最小形状）
-        Icon::Folder => {
-            painter.rect_stroke(
-                Rect::from_min_max(ip(0.12, 0.30), ip(0.88, 0.82)),
-                1.5,
-                s,
-                egui::StrokeKind::Middle,
-            );
-            // 标签页：左上角那一条
-            painter.line_segment([ip(0.12, 0.30), ip(0.12, 0.20)], s);
-            painter.line_segment([ip(0.12, 0.20), ip(0.40, 0.20)], s);
-            painter.line_segment([ip(0.40, 0.20), ip(0.46, 0.30)], s);
-        }
-        // ---- M3.1 ----
-        // 加/减号：短横线（±竖线），线帽圆一点更接近 macOS 细字形
-        Icon::Plus => {
-            let y = 0.5;
-            painter.line_segment([ip(0.12, y), ip(0.88, y)], Stroke::new(stroke * 1.5, color));
-            painter.line_segment(
-                [ip(0.5, 0.12), ip(0.5, 0.88)],
-                Stroke::new(stroke * 1.5, color),
-            );
-        }
-        Icon::Minus => {
-            painter.line_segment(
-                [ip(0.12, 0.5), ip(0.88, 0.5)],
-                Stroke::new(stroke * 1.5, color),
-            );
-        }
-        // 左栏开关：圆角方框，内部左右两瓣（截图里的形状）
-        Icon::SidebarToggle => {
-            painter.rect_stroke(
-                Rect::from_min_max(ip(0.08, 0.2), ip(0.92, 0.8)),
-                3.0,
-                Stroke::new(stroke * 1.2, color),
-                StrokeKind::Middle,
-            );
-            painter.line_segment(
-                [ip(0.36, 0.2), ip(0.36, 0.8)],
-                Stroke::new(stroke * 1.2, color),
-            );
-        }
-        // 排序：上箭头 + 下箭头并列
-        Icon::SortArrows => {
-            // 上箭头（左列）
-            painter.line_segment(
-                [ip(0.32, 0.85), ip(0.32, 0.15)],
-                Stroke::new(stroke * 1.3, color),
-            );
-            painter.line_segment(
-                [ip(0.32, 0.15), ip(0.14, 0.36)],
-                Stroke::new(stroke * 1.3, color),
-            );
-            painter.line_segment(
-                [ip(0.32, 0.15), ip(0.5, 0.36)],
-                Stroke::new(stroke * 1.3, color),
-            );
-            // 下箭头（右列）
-            painter.line_segment(
-                [ip(0.68, 0.15), ip(0.68, 0.85)],
-                Stroke::new(stroke * 1.3, color),
-            );
-            painter.line_segment(
-                [ip(0.68, 0.85), ip(0.5, 0.64)],
-                Stroke::new(stroke * 1.3, color),
-            );
-            painter.line_segment(
-                [ip(0.68, 0.85), ip(0.86, 0.64)],
-                Stroke::new(stroke * 1.3, color),
-            );
-        }
-        // 列表：三横线，第二行短（截图样式）
-        Icon::ListLines => {
-            painter.line_segment(
-                [ip(0.1, 0.28), ip(0.9, 0.28)],
-                Stroke::new(stroke * 1.4, color),
-            );
-            painter.line_segment(
-                [ip(0.1, 0.5), ip(0.9, 0.5)],
-                Stroke::new(stroke * 1.4, color),
-            );
-            painter.line_segment(
-                [ip(0.1, 0.72), ip(0.62, 0.72)],
-                Stroke::new(stroke * 1.4, color),
-            );
-        }
-        // 省略号：三个点
-        Icon::Ellipsis => {
-            let r = rect.width() * 0.045;
-            for x in [0.22, 0.5, 0.78] {
-                painter.circle_filled(ip(x, 0.5), r.max(1.2), color);
-            }
-        }
-        // 分享：方框 + 从中缝向上的箭头
-        Icon::Share => {
-            painter.line_segment(
-                [ip(0.22, 0.42), ip(0.22, 0.9)],
-                Stroke::new(stroke * 1.2, color),
-            );
-            painter.line_segment(
-                [ip(0.22, 0.9), ip(0.78, 0.9)],
-                Stroke::new(stroke * 1.2, color),
-            );
-            painter.line_segment(
-                [ip(0.78, 0.9), ip(0.78, 0.42)],
-                Stroke::new(stroke * 1.2, color),
-            );
-            painter.line_segment(
-                [ip(0.5, 0.08), ip(0.5, 0.62)],
-                Stroke::new(stroke * 1.2, color),
-            );
-            painter.line_segment(
-                [ip(0.5, 0.08), ip(0.32, 0.26)],
-                Stroke::new(stroke * 1.2, color),
-            );
-            painter.line_segment(
-                [ip(0.5, 0.08), ip(0.68, 0.26)],
-                Stroke::new(stroke * 1.2, color),
-            );
-        }
-        // 心形：原型 `M19.5 12.6 12 20l-7.5-7.4A4.5 4.5 0 0 1 12 6.2a4.5 4.5 0 0 1 7.5 6.4z`
-        // 的等价折线（两段半径 4.5 的真圆弧 + 茎部直线）。**stroke <= 0 表示实心**：
-        // 收藏态是实心、未收藏是描边（原型 `icon("heart", 15, starred ? 0 : 1.75)`）。
-        Icon::Heart => {
-            let pts = heart_points(rect);
-            if stroke <= 0.0 {
-                // 凹多边形不能用 `convex_polygon`：走中心顶点扇形 Mesh（同 `draw_star`）。
-                let mut mesh = Mesh::default();
-                let n = pts.len() as f32;
-                let cx = pts.iter().map(|p| p.x).sum::<f32>() / n;
-                let cy = pts.iter().map(|p| p.y).sum::<f32>() / n;
-                mesh.colored_vertex(pos2(cx, cy), color); // #0 = 形心
-                for &p in &pts {
-                    mesh.colored_vertex(p, color);
-                }
-                for i in 0..pts.len() {
-                    mesh.add_triangle(0, 1 + i as u32, 1 + ((i + 1) % pts.len()) as u32);
-                }
-                painter.add(mesh);
-            } else {
-                painter.add(Shape::closed_line(
-                    pts,
-                    egui::epaint::PathStroke::new(stroke, color),
-                ));
-            }
-        }
-        // 相簿/书本：打开的书（两页）
-        Icon::Album => {
-            painter.line_segment(
-                [ip(0.5, 0.2), ip(0.5, 0.82)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.5, 0.24), ip(0.12, 0.18)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.12, 0.18), ip(0.12, 0.78)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.12, 0.78), ip(0.5, 0.82)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.5, 0.24), ip(0.88, 0.18)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.88, 0.18), ip(0.88, 0.78)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.88, 0.78), ip(0.5, 0.82)],
-                Stroke::new(stroke * 1.1, color),
-            );
-        }
-        // 照片堆叠：两张错开的圆角矩形
-        Icon::PhotoStack => {
-            painter.rect_stroke(
-                Rect::from_min_max(ip(0.26, 0.1), ip(0.94, 0.62)),
-                2.0,
-                Stroke::new(stroke * 1.0, color),
-                StrokeKind::Middle,
-            );
-            painter.rect_stroke(
-                Rect::from_min_max(ip(0.06, 0.34), ip(0.74, 0.9)),
-                2.0,
-                Stroke::new(stroke * 1.3, color),
-                StrokeKind::Middle,
-            );
-        }
-        // 地图：折页三折
-        Icon::Map => {
-            painter.line_segment(
-                [ip(0.08, 0.22), ip(0.36, 0.12)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.36, 0.12), ip(0.64, 0.22)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.64, 0.22), ip(0.92, 0.12)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.08, 0.22), ip(0.08, 0.86)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.08, 0.86), ip(0.36, 0.76)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.36, 0.76), ip(0.36, 0.12)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.36, 0.76), ip(0.64, 0.86)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.64, 0.86), ip(0.64, 0.22)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.64, 0.86), ip(0.92, 0.76)],
-                Stroke::new(stroke * 1.1, color),
-            );
-            painter.line_segment(
-                [ip(0.92, 0.76), ip(0.92, 0.12)],
-                Stroke::new(stroke * 1.1, color),
-            );
-        }
-        // 摄像机：圆角矩形 + 右侧三角镜头
-        Icon::Video => {
-            painter.rect_stroke(
-                Rect::from_min_max(ip(0.06, 0.28), ip(0.66, 0.78)),
-                2.5,
-                Stroke::new(stroke * 1.2, color),
-                StrokeKind::Middle,
-            );
-            painter.add(Shape::convex_polygon(
-                vec![
-                    ip(0.68, 0.42),
-                    ip(0.94, 0.26),
-                    ip(0.94, 0.78),
-                    ip(0.68, 0.6),
-                ],
-                Stroke::NONE.color,
-                Stroke::NONE,
-            ));
-            painter.add(Shape::line(
-                vec![
-                    ip(0.68, 0.42),
-                    ip(0.94, 0.26),
-                    ip(0.94, 0.78),
-                    ip(0.68, 0.6),
-                ],
-                egui::epaint::PathStroke::new(stroke * 1.1, color),
-            ));
-        }
-        // 人物：头圆 + 肩弧
-        Icon::Person => {
-            painter.circle_stroke(
-                ip(0.5, 0.32),
-                rect.width() * 0.17,
-                Stroke::new(stroke * 1.2, color),
-            );
-            painter.line_segment(
-                [ip(0.14, 0.92), ip(0.14, 0.84)],
-                Stroke::new(stroke * 1.2, color),
-            );
-            // 肩：一条弧线近似（三段折线 + 圆头）
-            painter.add(Shape::line(
-                vec![
-                    ip(0.14, 0.9),
-                    ip(0.24, 0.62),
-                    ip(0.5, 0.56),
-                    ip(0.76, 0.62),
-                    ip(0.86, 0.9),
-                ],
-                egui::epaint::PathStroke::new(stroke * 1.2, color),
-            ));
-        }
-        // ---- M3.1 §7：首页工具栏 ----
-        // 导入：托盘开口 + 向下箭头（“放进图库”）
-        Icon::Import => {
-            let s2 = Stroke::new(stroke * 1.2, color);
-            painter.line_segment([ip(0.1, 0.62), ip(0.1, 0.9)], s2);
-            painter.line_segment([ip(0.1, 0.9), ip(0.9, 0.9)], s2);
-            painter.line_segment([ip(0.9, 0.9), ip(0.9, 0.62)], s2);
-            painter.line_segment([ip(0.5, 0.08), ip(0.5, 0.66)], s2);
-            painter.line_segment([ip(0.5, 0.66), ip(0.3, 0.46)], s2);
-            painter.line_segment([ip(0.5, 0.66), ip(0.7, 0.46)], s2);
-        }
-        // 幻灯片：圆角屏幕 + 播放三角
-        Icon::Slideshow => {
-            painter.rect_stroke(
-                Rect::from_min_max(ip(0.06, 0.18), ip(0.94, 0.82)),
-                2.0,
-                Stroke::new(stroke * 1.2, color),
-                StrokeKind::Middle,
-            );
-            painter.add(Shape::convex_polygon(
-                vec![ip(0.42, 0.36), ip(0.42, 0.64), ip(0.68, 0.5)],
-                color,
-                Stroke::NONE,
-            ));
-        }
-        // 编辑：铅笔（斜杆 + 笔尖）
-        Icon::Edit => {
-            let s2 = Stroke::new(stroke * 1.2, color);
-            painter.line_segment([ip(0.18, 0.82), ip(0.72, 0.28)], s2);
-            painter.line_segment([ip(0.72, 0.28), ip(0.84, 0.4)], s2);
-            painter.line_segment([ip(0.84, 0.4), ip(0.3, 0.94)], s2);
-            painter.line_segment([ip(0.3, 0.94), ip(0.18, 0.82)], s2);
-            painter.line_segment([ip(0.18, 0.82), ip(0.3, 0.94)], s2);
-        }
-        // 排布：方格（2×2 圆角方块）
-        Icon::LayoutGrid => {
-            for (x, y) in [(0.08, 0.08), (0.55, 0.08), (0.08, 0.55), (0.55, 0.55)] {
-                painter.rect_filled(
-                    Rect::from_min_max(ip(x, y), ip(x + 0.37, y + 0.37)),
-                    1.5,
-                    color,
-                );
-            }
-        }
-        // 排布：纵向瀑布流（三列高低错落）
-        Icon::LayoutMasonryV => {
-            let col_w = 0.2;
-            for (x, top, bottom) in [(0.08, 0.08, 0.62), (0.40, 0.08, 0.92), (0.72, 0.08, 0.42)] {
-                painter.rect_filled(
-                    Rect::from_min_max(ip(x, top), ip(x + col_w, bottom)),
-                    1.5,
-                    color,
-                );
-            }
-        }
-        // 排布：横向瀑布流（三行宽窄错落）
-        Icon::LayoutMasonryH => {
-            let row_h = 0.2;
-            for (x, top, right) in [(0.08, 0.08, 0.62), (0.08, 0.40, 0.92), (0.08, 0.72, 0.42)] {
-                painter.rect_filled(
-                    Rect::from_min_max(ip(x, top), ip(right, top + row_h)),
-                    1.5,
-                    color,
-                );
-            }
-        }
-        // M4.1：标签（吊牌：圆角多边形轮廓 + 左上角圆孔）
-        Icon::Tag => {
-            painter.line_segment([ip(0.12, 0.16), ip(0.52, 0.16)], s);
-            painter.line_segment([ip(0.12, 0.16), ip(0.12, 0.52)], s);
-            painter.line_segment([ip(0.12, 0.52), ip(0.52, 0.88)], s);
-            painter.line_segment([ip(0.52, 0.16), ip(0.88, 0.52)], s);
-            painter.line_segment([ip(0.88, 0.52), ip(0.52, 0.88)], s);
-            painter.circle_filled(ip(0.30, 0.34), rect.width() * 0.055, color);
-        }
-        // M4.1：说明（圆角对话气泡 + 两条横线 + 尾部小尖）
-        Icon::Caption => {
-            painter.line_segment([ip(0.10, 0.20), ip(0.90, 0.20)], s);
-            painter.line_segment([ip(0.10, 0.20), ip(0.10, 0.68)], s);
-            painter.line_segment([ip(0.10, 0.68), ip(0.30, 0.68)], s);
-            painter.line_segment([ip(0.30, 0.68), ip(0.24, 0.88)], s);
-            painter.line_segment([ip(0.24, 0.88), ip(0.44, 0.68)], s);
-            painter.line_segment([ip(0.44, 0.68), ip(0.90, 0.68)], s);
-            painter.line_segment([ip(0.90, 0.20), ip(0.90, 0.68)], s);
-            painter.line_segment([ip(0.24, 0.36), ip(0.76, 0.36)], s);
-            painter.line_segment([ip(0.24, 0.52), ip(0.64, 0.52)], s);
-        }
+        return;
     }
-}
-
-/// 图钉（定位）的水滴轮廓，按原型 `locate` 的 `<path d="M12 21s7-6.2 7-11a7 7
-/// 0 1 0-14 0c0 4.8 7 11 7 11z"/>` 换算（viewBox 0 0 24 24，闭合折线，首尾不重复）。
-/// 顶部是半径 7 的圆弧、底部收成尖角，中心圆孔由调用方另画。
-pub fn locate_points(rect: Rect) -> Vec<Pos2> {
-    const NORM: [(f32, f32); 14] = [
-        (0.500, 0.875),
-        (0.275, 0.602),
-        (0.223, 0.506),
-        (0.209, 0.398),
-        (0.236, 0.292),
-        (0.300, 0.204),
-        (0.393, 0.145),
-        (0.500, 0.125),
-        (0.607, 0.145),
-        (0.700, 0.204),
-        (0.764, 0.292),
-        (0.791, 0.398),
-        (0.777, 0.506),
-        (0.725, 0.602),
-    ];
-    NORM.iter()
-        .map(|(x, y)| {
-            pos2(
-                rect.left() + x * rect.width(),
-                rect.top() + y * rect.height(),
-            )
-        })
-        .collect()
-}
-
-/// 心形的轮廓顶点（**闭合**，首尾不重复），按原型 SVG path 换算成 0–1 归一化坐标。
-///
-/// 原型：`M19.5 12.6 12 20l-7.5-7.4A4.5 4.5 0 0 1 12 6.2a4.5 4.5 0 0 1 7.5 6.4z`
-/// （viewBox 0 0 24 24）。顺序照 path 走：右肩 → 直线到心尖 (12,20) → 直线到左肩
-/// (4.5,12.6) → 左瓣半圆到凹口 (12,6.2) → 右瓣半圆回到右肩。
-///
-/// 两段 `A4.5` 声明的半径 4.5 小于弦长 9.86/2，SVG 规范要求等比放大到 4.929，
-/// 圆心分别是 (8.25,9.4) 与 (15.75,9.4)；各取半圆 10 段折线逼近。
-/// 外接框 0.139–0.861 × 0.187–0.833，视觉重心略高于中线，与原型一致。
-///
-/// 保留为**纯函数**便于测试：顶点顺序必须是连续的（相邻点距离远小于半个图形），
-/// 且相对形心同向绕行（扇形三角化不产生自交）。
-pub fn heart_points(rect: Rect) -> Vec<Pos2> {
-    const NORM: [(f32, f32); 22] = [
-        (0.8125, 0.5250),
-        (0.5000, 0.8333),
-        (0.1875, 0.5250),
-        (0.1539, 0.4702),
-        (0.1390, 0.4077),
-        (0.1440, 0.3436),
-        (0.1687, 0.2843),
-        (0.2104, 0.2354),
-        (0.2652, 0.2019),
-        (0.3277, 0.1869),
-        (0.3918, 0.1920),
-        (0.4512, 0.2166),
-        (0.5000, 0.2583),
-        (0.5488, 0.2166),
-        (0.6082, 0.1920),
-        (0.6723, 0.1869),
-        (0.7348, 0.2019),
-        (0.7896, 0.2354),
-        (0.8313, 0.2843),
-        (0.8560, 0.3436),
-        (0.8610, 0.4077),
-        (0.8461, 0.4702),
-    ];
-    NORM.iter()
-        .map(|(x, y)| {
-            pos2(
-                rect.left() + x * rect.width(),
-                rect.top() + y * rect.height(),
-            )
-        })
-        .collect()
+    for sp in paths {
+        let mut pts: Vec<Pos2> = sp.pts.iter().map(|&(x, y)| map(x, y)).collect();
+        if pts.len() < 2 {
+            continue;
+        }
+        if sp.closed {
+            pts.push(pts[0]);
+        }
+        painter.add(Shape::line(pts, Stroke::new(stroke, color)));
+    }
 }
 
 /// M4.2 M42-UI-01：五角星的 10 个顶点（5 个外尖 + 5 个内凹，交替）。
@@ -777,6 +235,150 @@ pub fn draw_star(painter: &Painter, center: Pos2, outer: f32, color: Color32) {
 mod tests {
     use super::*;
 
+    /// 全部 41 个变体：新增图标时必须同步这里，否则下面的覆盖率测试会漏。
+    const ALL: [Icon; 41] = [
+        Icon::Back,
+        Icon::AddFolder,
+        Icon::Reveal,
+        Icon::Sort,
+        Icon::GridSize,
+        Icon::Fullscreen,
+        Icon::Search,
+        Icon::ChevronRight,
+        Icon::ChevronDown,
+        Icon::Tray,
+        Icon::Trash,
+        Icon::Info,
+        Icon::Index,
+        Icon::Close,
+        Icon::Folder,
+        Icon::Plus,
+        Icon::Minus,
+        Icon::SidebarToggle,
+        Icon::SortArrows,
+        Icon::ListLines,
+        Icon::Ellipsis,
+        Icon::Share,
+        Icon::Heart,
+        Icon::Star,
+        Icon::Album,
+        Icon::PhotoStack,
+        Icon::Map,
+        Icon::Video,
+        Icon::Person,
+        Icon::Import,
+        Icon::Slideshow,
+        Icon::Edit,
+        Icon::LayoutGrid,
+        Icon::LayoutMasonryV,
+        Icon::LayoutMasonryH,
+        Icon::Tag,
+        Icon::Caption,
+        Icon::Calendar,
+        Icon::File,
+        Icon::Image,
+        Icon::Camera,
+    ];
+
+    /// 每个变体都得有路径数据，且点列至少两个点（一个点的「路径」画不出来）。
+    #[test]
+    fn every_icon_has_usable_lucide_path_data() {
+        for icon in ALL {
+            let paths = paths(icon);
+            assert!(!paths.is_empty(), "{icon:?} 没有路径数据");
+            for sp in paths {
+                assert!(
+                    sp.pts.len() >= 2,
+                    "{icon:?} 有一条子路径只有 {} 个点",
+                    sp.pts.len()
+                );
+                if sp.closed {
+                    assert!(sp.pts.len() >= 3, "{icon:?} 的闭合路径需要 ≥3 点");
+                }
+            }
+        }
+    }
+
+    /// Lucide 的 24×24 网格决定所有坐标该落在 0..1；超出说明转换器算错了
+    /// （典型是 SVG 圆弧端点参数化取错符号）。
+    #[test]
+    fn icon_points_stay_inside_the_view_box() {
+        for icon in ALL {
+            for sp in paths(icon) {
+                for &(x, y) in sp.pts {
+                    assert!(
+                        (-0.02..=1.02).contains(&x) && (-0.02..=1.02).contains(&y),
+                        "{icon:?} 有点越界：({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 心形：凹口在水平中央偏上、心尖在正下方，且**闭合**（实心填充靠它）。
+    ///
+    /// 这条替换了旧的手绘断言——手绘版曾经退化成「两圆 + 三角」的药丸，
+    /// 现在形状由 Lucide 的 path 决定，只需钉住「像心形」的几个特征。
+    #[test]
+    fn heart_is_concave_with_a_bottom_tip_and_closed() {
+        let paths = paths(Icon::Heart);
+        assert_eq!(paths.len(), 1, "Lucide heart 是单条闭合路径");
+        let sp = &paths[0];
+        assert!(sp.closed, "心形必须闭合，否则实心填充会漏");
+        let pts = sp.pts;
+        // 心尖 = y 最大的点，应在中线附近、且靠下
+        let tip = pts
+            .iter()
+            .cloned()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+        assert!((tip.0 - 0.5).abs() < 0.12, "心尖应在中线附近，实际 {tip:?}");
+        assert!(tip.1 > 0.75, "心尖应靠底部，实际 y={}", tip.1);
+        // 凹口 = y 最小的点里最靠中的那个；两肩必须比它更靠下
+        let top = pts
+            .iter()
+            .cloned()
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+        assert!(top.1 < 0.35, "凹口应在上部，实际 y={}", top.1);
+        let lowest_top = pts.iter().filter(|p| p.1 < top.1 + 0.08).count();
+        assert!(lowest_top >= 1, "顶部应有可辨识的凹口");
+    }
+
+    /// 定位图钉：底部收成尖、顶部是圆弧，不是放大镜。
+    #[test]
+    fn reveal_is_a_pin_with_a_bottom_tip() {
+        let paths = paths(Icon::Reveal);
+        assert!(!paths.is_empty());
+        let all: Vec<(f32, f32)> = paths.iter().flat_map(|sp| sp.pts.iter().cloned()).collect();
+        let tip = all
+            .iter()
+            .cloned()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+        assert!((tip.0 - 0.5).abs() < 0.15, "水滴尖应接近中线，实际 {tip:?}");
+        assert!(tip.1 > 0.85, "水滴尖应到底部，实际 y={}", tip.1);
+        // 左右对称（容差放宽到 0.06：Lucide 的 pin 带一点视觉补偿）
+        for &(x, y) in &all {
+            let mx = 1.0 - x;
+            assert!(
+                all.iter()
+                    .any(|&(qx, qy)| (qx - mx).abs() < 0.06 && (qy - y).abs() < 0.06),
+                "缺少镜像点 ({x}, {y})"
+            );
+        }
+    }
+
+    /// 选中态用 `stroke <= 0` 走实心填充：这些图标的首条路径必须闭合。
+    #[test]
+    fn fillable_icons_are_closed_paths() {
+        for icon in [Icon::Heart, Icon::Star] {
+            let sp = &paths(icon)[0];
+            assert!(sp.closed, "{icon:?} 要支持实心填充，路径必须闭合");
+        }
+    }
+
+    /// 五角星几何（`draw_star` 仍被网格/查看器的星标角标使用）。
     #[test]
     fn star_points_alternate_outer_and_inner_radius() {
         let c = pos2(100.0, 100.0);
@@ -789,110 +391,13 @@ mod tests {
                 "point {i} radius {r} != {expect}"
             );
         }
-        // 第一个点在正上方
         assert!((pts[0].x - c.x).abs() < 0.001);
         assert!(pts[0].y < c.y);
         assert_eq!(pts.len(), 10);
     }
 
-    /// 心形轮廓：顶点连续（相邻点不会跳半个图形）、同向绕形心、跨满整个 rect。
-    ///
-    /// 这条钉住的是**形状本身**：旧实现是两个圆 + 一个三角，渲染成实心药丸；
-    /// 现在的 21 点折线来自原型的两段真圆弧，凹口在正上方中央。
-    #[test]
-    fn heart_points_form_a_continuous_concave_outline() {
-        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(24.0, 24.0));
-        let pts = heart_points(rect);
-        assert_eq!(pts.len(), 22, "原型 path 换算出的顶点数");
-        // 相邻点距离不超过对角线的一半（不能跨跳）
-        let diag = rect.size().length();
-        for i in 0..pts.len() {
-            let a = pts[i];
-            let b = pts[(i + 1) % pts.len()];
-            let d = (b - a).length();
-            assert!(d > 0.0 && d < diag * 0.5, "第 {i} 段长度异常：{d}");
-        }
-        // 凹口：正上方中央应有一个点**低于**左右两肩（y 更大 = 更靠下）
-        let cx = rect.center().x;
-        let notch = pts
-            .iter()
-            .min_by(|a, b| {
-                let da = (a.x - cx).abs();
-                let db = (b.x - cx).abs();
-                da.partial_cmp(&db).unwrap()
-            })
-            .unwrap();
-        let shoulder = pts
-            .iter()
-            .filter(|p| p.y < notch.y)
-            .count();
-        assert!(shoulder >= 2, "心形上半应有比凹口更高的两肩");
-        // 凹口必须在正中偏上：x 落在 0.45–0.55，且比两肩低至少 5% 高度
-        let cx_n = (notch.x - rect.left()) / rect.width();
-        let cy_n = (notch.y - rect.top()) / rect.height();
-        assert!(
-            (0.45..=0.55).contains(&cx_n),
-            "凹口应在水平中央，实际 x={cx_n}"
-        );
-        let highest = pts
-            .iter()
-            .map(|p| (p.y - rect.top()) / rect.height())
-            .fold(f32::MAX, f32::min);
-        assert!(
-            cy_n - highest > 0.05,
-            "凹口要比两肩低出可感知的深度：凹口 y={cy_n}，最高肩 y={highest}"
-        );
-        // 心尖在正中、且是全图最低点（心形下半是两条直线收成一点）
-        let tip = pts
-            .iter()
-            .max_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
-            .unwrap();
-        assert!(((tip.x - rect.center().x).abs()) < rect.width() * 0.02, "心尖应在正中");
-        assert!(
-            (tip.y - rect.top()) / rect.height() > 0.80,
-            "心尖应落到接近底部"
-        );
-        // 外接框：跨满大半，但留出描边余量
-        let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
-        for p in &pts {
-            x0 = x0.min(p.x);
-            x1 = x1.max(p.x);
-            y0 = y0.min(p.y);
-            y1 = y1.max(p.y);
-        }
-        assert!(x1 - x0 > rect.width() * 0.6, "心形太窄");
-        assert!(y1 - y0 > rect.height() * 0.6, "心形太扁");
-        assert!(x0 > rect.left() && x1 < rect.right());
-        assert!(y0 > rect.top() && y1 < rect.bottom());
-    }
-
-    /// 定位图钉：水滴尖在正下方中央，顶部圆弧左右对称，中心留出圆孔位置。
-    #[test]
-    fn locate_points_are_a_symmetric_pin_with_a_bottom_tip() {
-        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(24.0, 24.0));
-        let pts = locate_points(rect);
-        assert_eq!(pts.len(), 14);
-        let tip = pts[0];
-        assert!(
-            (tip.x - rect.center().x).abs() < 0.01,
-            "水滴尖应在中线：{tip:?}"
-        );
-        assert!(tip.y > rect.bottom() - rect.height() * 0.2, "尖角应在底部");
-        // 左右对称：每个点都能找到镜像点
-        for p in &pts {
-            let mirror_x = 2.0 * rect.center().x - p.x;
-            assert!(
-                pts.iter()
-                    .any(|q| (q.x - mirror_x).abs() < 0.01 && (q.y - p.y).abs() < 0.01),
-                "缺少镜像点：{p:?}"
-            );
-        }
-    }
-
     #[test]
     fn draw_star_mesh_is_valid_and_single_tone() {
-        // 用离屏 Painter 不方便，这里验证几何生成的 mesh 结构：10 顶点扇形
-        // 由纯函数保证；直接构造同样的 mesh 检查索引都在范围内（is_valid 语义）。
         let c = pos2(0.0, 0.0);
         let pts = star_points(c, 7.0, 3.15);
         let mut mesh = Mesh::default();

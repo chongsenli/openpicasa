@@ -26,6 +26,7 @@ pub mod copy_text;
 pub mod diagnostics;
 pub mod grid;
 pub mod icons;
+pub mod icons_lucide;
 pub mod import_task;
 pub mod index_mgr;
 pub mod index_progress;
