@@ -510,8 +510,8 @@ fn draw_breadcrumb(
     let meta_font = FontId::new(11.5, egui::FontFamily::Proportional);
     let mut x = area.left();
     let cy = area.center().y;
-    // 面包屑主标题行的底边，供副标题对齐（见下方副标题绘制）。
-    let mut baseline = cy + 6.5;
+    // 主标题的**基线**，副标题要贴同一条线（galley 底边含 descent，不能拿来对齐）。
+    let mut baseline = cy + font.size * crate::theme::BASELINE_RATIO_ASCENT;
     let n = breadcrumb.len();
     for (i, (name, folder_id)) in breadcrumb.iter().enumerate() {
         let current = i + 1 == n;
@@ -530,8 +530,8 @@ fn draw_breadcrumb(
         // 汉字回退字形在 galley 里偏上，固定半高会让整段文字浮起来约 5px。
         let seg_top = cy - galley.size().y / 2.0;
         let seg_rect = Rect::from_min_size(pos2(x, seg_top), galley.size());
-        // 主标题这一行的底边：后面的「· 40 张 · 拍摄时间」要贴同一条基线。
-        baseline = seg_rect.bottom();
+        // 主标题的基线：后面的「· 40 张 · 拍摄时间」要贴同一条线。
+        baseline = seg_top + font.size * crate::theme::BASELINE_RATIO_ASCENT;
         painter.galley(pos2(x, seg_top), galley, color);
 
         // 祖先段（非当前、有 id）：整段可点
@@ -595,11 +595,12 @@ fn draw_breadcrumb(
         theme.text_disabled,
     );
     let text = fit_text(painter, meta, &meta_font, area.right() - x - sep_w);
-    // 副标题与主标题**同基线**：两者字号不同（12.5 / 11.5），各自按中心对齐
-    // 会让小字整体高出一截（实测差 2px 左右）。这里贴着主标题那一行的底边画。
+    // 副标题与主标题共用**基线**：两者字号不同（12.5 / 11.5），
+    // 各自按中心对齐会让小字浮起，按 galley 底对齐则因 descent 不同而错开。
+    let meta_top = baseline - meta_font.size * crate::theme::BASELINE_RATIO_ASCENT;
     painter.text(
-        pos2(x + sep_w, baseline),
-        Align2::LEFT_BOTTOM,
+        pos2(x + sep_w, meta_top),
+        Align2::LEFT_TOP,
         text,
         meta_font,
         theme.text_secondary,

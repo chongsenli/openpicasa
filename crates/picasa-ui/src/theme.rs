@@ -844,6 +844,13 @@ fn install_fonts(ctx: &egui::Context, appearance: Appearance) {
 ///
 /// 关键点：这个系数必须**同时**作用在拉丁字体与 CJK 回退字体上。只挪 CJK
 /// 会让同一行的汉字与数字错开基线（M32 的 0.30 与后来的 0.55 都栽在这里）。
+/// Inter 的 ascent 占 em 的比例（unitsPerEm 2048 / ascender 1984）。
+/// 同一行里不同字号要共用**基线**时，用它把「基线 y」换算成 galley 顶部 y：
+/// `top = baseline - size * BASELINE_RATIO_ASCENT`。
+/// 用 `Align2::*_BOTTOM` 对齐 galley 底是错的 —— galley 底含 descent，
+/// 12.5px 与 11.5px 的 descent 不同，底一平基线就错开。
+pub const BASELINE_RATIO_ASCENT: f32 = 0.969;
+
 pub const TEXT_VISUAL_TWEAK: f32 = 0.26;
 
 /// 手绘 galley 时的光学补偿量：字形在行框内已被 `TEXT_VISUAL_TWEAK` 下移，

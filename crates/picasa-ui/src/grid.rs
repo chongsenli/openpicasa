@@ -1804,8 +1804,7 @@ pub fn show(
     // M4.2 `M42-PERF-00`：本帧贴图上传数 = 预算初值 − 剩余预算。图集档走
     // `tick_atlas` 单独上传（不消耗这里的每帧 3 张预算），故图集档记为 0，
     // 诊断页的「≤3」语义针对的是正常纹理档。纯统计，不改绘制/上传调度。
-    out.uploads_this_frame =
-        (Metrics::TEX_UPLOAD_PER_FRAME - budget).min(u8::MAX as usize) as u8;
+    out.uploads_this_frame = (Metrics::TEX_UPLOAD_PER_FRAME - budget).min(u8::MAX as usize) as u8;
 
     // M42-UI-03：帧尾统一维护拖拽 temp（`MarqueeDrag` 不再是 `Copy`，帧首不再写回）。
     // 松开帧移除状态；拖拽进行中把「逐帧累积命中集」写回，供下一帧接着累积
@@ -1862,20 +1861,30 @@ fn draw_group_header(
         egui::FontFamily::Proportional,
     );
     let left = bar.left() + Metrics::GRID_PAD;
+    // 日期与人（张数）字号不同（13/11 与 12），各自按中心对齐会让较细的那段
+    // 浮起；这里让两段共用**基线**（galley 底边含 descent，不能拿来对齐）。
+    let baseline = bar.center().y + font.size * crate::theme::BASELINE_RATIO_ASCENT / 2.0;
     let date = painter.text(
-        pos2(left, bar.center().y),
-        Align2::LEFT_CENTER,
+        pos2(
+            left,
+            baseline - font.size * crate::theme::BASELINE_RATIO_ASCENT,
+        ),
+        Align2::LEFT_TOP,
         title,
         font.clone(),
         theme.header_text,
     );
     // 张数跟在日期右侧的固定小间距处，颜色弱于日期；字号是原型写死的 12px
     // （`.ghead .cnt{font-size:12px}`），与日期的 13/11 分开取。
+    let cnt_font = FontId::new(12.0, egui::FontFamily::Proportional);
     painter.text(
-        pos2(date.right() + 8.0, bar.center().y),
-        Align2::LEFT_CENTER,
+        pos2(
+            date.right() + 8.0,
+            baseline - cnt_font.size * crate::theme::BASELINE_RATIO_ASCENT,
+        ),
+        Align2::LEFT_TOP,
         format!("{count} 张"),
-        FontId::new(12.0, egui::FontFamily::Proportional),
+        cnt_font,
         theme.text_secondary,
     );
 }
