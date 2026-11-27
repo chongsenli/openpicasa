@@ -1073,7 +1073,11 @@ fn draw_topbar(
         format!("{}%", (viewer.zoom * 100.0).round() as i32)
     };
     painter.with_clip_rect(readout).text(
-        readout.center(),
+        // 与 zoom_cell 的「适合/100%」同一套光学补偿，否则两个「适合」差 1px。
+        pos2(
+            readout.center().x,
+            readout.center().y - crate::theme::optical_shift(11.5) - 1.0,
+        ),
         Align2::CENTER_CENTER,
         zoom_label,
         FontId::new(11.0, egui::FontFamily::Proportional),
@@ -1118,7 +1122,7 @@ fn draw_topbar(
         painter.with_clip_rect(name_slot).text(
             pos2(
                 name_slot.right(),
-                top.center().y - crate::theme::optical_shift(12.0),
+                top.center().y - crate::theme::optical_shift(12.0) - 1.2,
             ),
             Align2::RIGHT_CENTER,
             shown,
@@ -1219,8 +1223,14 @@ fn draw_back_pill(
     if resp.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
-    let icon_rect =
-        Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(12.0, 12.0));
+    // 箭头与同排汉字共用视觉中心（Lucide 重心偏低，实测差 2.6px）。
+    let icon_rect = Rect::from_center_size(
+        pos2(
+            rect.left() + 14.0,
+            rect.center().y - crate::theme::optical_shift(12.0),
+        ),
+        vec2(12.0, 12.0),
+    );
     icons::draw(painter, Icon::Back, icon_rect, fg, 1.5);
     painter.text(
         // 字形在行框内偏下，补偿后与胶囊中心齐平（实测 22.2 → 20）。
