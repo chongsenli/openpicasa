@@ -1107,7 +1107,10 @@ fn draw_topbar(
             fg,
         );
         painter.with_clip_rect(name_slot).text(
-            pos2(name_slot.right(), top.center().y),
+            pos2(
+                name_slot.right(),
+                top.center().y - crate::theme::optical_shift(12.0),
+            ),
             Align2::RIGHT_CENTER,
             shown,
             name_font,
@@ -2403,7 +2406,12 @@ fn zoom_cell(
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
     painter.text(
-        rect.center(),
+        // 与 text_button 同一套光学补偿，否则「适合 / 100%」会比
+        // 「返回 / 比较 / 背景」低约 4px（字形在行框内偏下）。
+        pos2(
+            rect.center().x,
+            rect.center().y - crate::theme::optical_shift(11.5),
+        ),
         Align2::CENTER_CENTER,
         label,
         FontId::new(11.5, egui::FontFamily::Proportional),

@@ -843,9 +843,20 @@ fn draw_search(
             // 字形垂直位置由字体行框决定（`vertical_align` 已废弃且无效），
             // margin 只留水平内缩；汉字对齐靠 theme::TEXT_VISUAL_TWEAK 统一校准。
             .margin(egui::Margin::symmetric(2, 4))
-            .hint_text("搜索")
             .text_color(theme.text_primary),
     );
+    // 占位文字自己画：`hint_text` 由 TextEdit 内部按 galley 顶部定位，
+    // 汉字会比左边的「文」和放大镜高出约 5px。这里按编辑区中心画，
+    // 与「文」/放大镜共用同一水平中线。
+    if search.is_empty() && !resp.has_focus() {
+        painter.text(
+            pos2(edit_rect.left() + 2.0, edit_rect.center().y),
+            Align2::LEFT_CENTER,
+            "搜索",
+            egui::FontId::new(12.0, egui::FontFamily::Proportional),
+            theme.text_disabled,
+        );
+    }
     if resp.changed() {
         *search = buf.clone();
         out.actions.push(TopbarAction::SearchChanged(buf));
