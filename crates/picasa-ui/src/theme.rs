@@ -853,6 +853,11 @@ pub const BASELINE_RATIO_ASCENT: f32 = 0.969;
 
 pub const TEXT_VISUAL_TWEAK: f32 = 0.26;
 
+/// 拉丁/数字的字面比汉字小（cap 高约 0.72em，汉字字面约 0.88em），
+/// 同一条基线下它们的**视觉中心**会偏低 —— 看图会觉得「数字太靠下」。
+/// 这里给拉丁单独用小一点的系数，让它比汉字高约 1px（13px 字号）。
+pub const TEXT_VISUAL_TWEAK_LATIN: f32 = 0.18;
+
 /// 手绘 galley 时的光学补偿量：字形在行框内已被 `TEXT_VISUAL_TWEAK` 下移，
 /// 凡是按「galley 顶部」定位的调用点都要把这个量减回去，否则整行会压到容器下沿。
 pub fn optical_shift(font_size: f32) -> f32 {
@@ -861,7 +866,7 @@ pub fn optical_shift(font_size: f32) -> f32 {
 
 /// 给字体套上统一的视觉校准，保证所有字形一起上下平移、相对基线不变。
 fn tweaked(mut data: FontData) -> FontData {
-    data.tweak.y_offset_factor = TEXT_VISUAL_TWEAK;
+    data.tweak.y_offset_factor = TEXT_VISUAL_TWEAK_LATIN;
     data
 }
 
@@ -1274,12 +1279,23 @@ mod m5_type_tests {
         );
         let src = include_str!("theme.rs");
         assert!(
-            src.contains("data.tweak.y_offset_factor = TEXT_VISUAL_TWEAK;"),
+            src.contains("data.tweak.y_offset_factor = TEXT_VISUAL_TWEAK_LATIN;"),
             "拉丁字体必须走 tweaked() 统一校准"
         );
         assert!(
             src.contains("y_offset_factor: TEXT_VISUAL_TWEAK,"),
-            "CJK 回退字体必须用同一个系数，否则汉字与数字会错基线"
+            "CJK 回退字体用自己的系数"
+        );
+        // 拉丁字面小、视觉中心偏低，必须比 CJK 少挪一点（差 0.05~0.12），
+        // 否则汉字与数字看着会一高一低。
+        let diff = TEXT_VISUAL_TWEAK - TEXT_VISUAL_TWEAK_LATIN;
+        assert!(
+            (0.05..0.12).contains(&diff),
+            "拉丁与 CJK 的系数差应在 0.05~0.12（实测差 {diff}）"
+        );
+        assert_eq!(
+            src.matches("TEXT_VISUAL_TWEAK_LATIN").count() >= 2,
+            true
         );
         assert!(
             (optical_shift(13.0) - TEXT_VISUAL_TWEAK * 13.0).abs() < f32::EPSILON,
