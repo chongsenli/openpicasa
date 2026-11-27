@@ -1827,9 +1827,9 @@ fn draw_info_light(
     ];
     let mut y = thumb.bottom() + 16.0;
     for (at, (label, icon, value, note)) in fields.iter().enumerate() {
-        // 圆要压住「主文 14px（y+1..y+15）+ 副文 11.5px（y+19.5..y+31）」这个整块，
-        // 所以中心取整块中部；取 y+15 时实测图标比文字块中心高 2.75px。
-        let icon_c = pos2(left + 16.0, y + 17.5);
+        // 圆要压住「主文 14px（y+1..y+15）+ 副文 11.5px（y+19.5..y+31）」这个整块。
+        // 取 15 时实测偏上 2.75px；产品看图后仍要低一点，再下移 2.5。
+        let icon_c = pos2(left + 16.0, y + 20.0);
         clip.circle_filled(icon_c, 16.0, theme.chip_bg);
         icons::draw(
             clip,
@@ -1918,7 +1918,7 @@ fn draw_info_light(
     y += 54.0 + 18.0;
 
     // 相机组（机身 + 镜头），与原型一样在曝光之后单独一组。
-    let icon_c = pos2(left + 16.0, y + 18.0);
+    let icon_c = pos2(left + 16.0, y + 20.0);
     clip.circle_filled(icon_c, 16.0, theme.chip_bg);
     icons::draw(
         clip,
