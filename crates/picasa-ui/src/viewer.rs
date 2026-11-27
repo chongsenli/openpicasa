@@ -229,6 +229,10 @@ pub fn layout(rect: Rect, info_open: bool, compare: bool, dark: bool) -> StageLa
 // 左端留白给 macOS 红绿灯：原型（`js/app.js` / `css/app.css`，1280 逻辑宽）
 // `.traffic` 占 x=16..68，返回按钮从 x=94 起，水平上不与红绿灯重叠。
 // 旧值 10 让返回胶囊从 x=10 起，正好压在红绿灯上（用户实测反馈）。
+/// 顶栏纯图标（收藏心、定位图钉）相对按钮中心的**上移量**：
+/// Lucide 路径的视觉重心比汉字字面低，实测差 2.5px。
+const TOPBAR_ICON_LIFT: f32 = 2.5;
+
 const TB_PAD: f32 = 94.0;
 const TB_BACK_W: f32 = 72.0;
 const TB_BACK_GAP: f32 = 14.0;
@@ -938,10 +942,15 @@ fn draw_topbar(
         pos2(x + TB_HEART_W / 2.0, top.center().y),
         vec2(TB_HEART_W, 24.0),
     );
+    // 图标的视觉中心与同排汉字齐（实测汉字 18.8~19.2、图标 21.8 → 减 2.5）。
+    let fav_icon = Rect::from_center_size(
+        pos2(fav.center().x, fav.center().y - TOPBAR_ICON_LIFT),
+        vec2(15.0, 15.0),
+    );
     icons::draw(
         painter,
         Icon::Heart,
-        fav.shrink(7.0),
+        fav_icon,
         if row.starred { theme.star } else { fg },
         // 原型：已收藏是实心（stroke 0），未收藏是 1.75 描边。
         if row.starred { 0.0 } else { 1.5 },
@@ -957,7 +966,7 @@ fn draw_topbar(
     // 显示位置：原型是**纯图标按钮**（`<button class="ib" title="显示位置">` +
     // locate 图钉），不写文字 —— 文字版留给索引管理菜单（那里的菜单项必须可读）。
     let reveal = Rect::from_center_size(
-        pos2(x + TB_REVEAL_W / 2.0, top.center().y),
+        pos2(x + TB_REVEAL_W / 2.0, top.center().y - TOPBAR_ICON_LIFT),
         vec2(TB_REVEAL_W, 24.0),
     );
     let reveal_resp = slim_button(
