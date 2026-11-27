@@ -1827,7 +1827,9 @@ fn draw_info_light(
     ];
     let mut y = thumb.bottom() + 16.0;
     for (at, (label, icon, value, note)) in fields.iter().enumerate() {
-        let icon_c = pos2(left + 16.0, y + 15.0);
+        // 圆要压住「主文 14px（y+1..y+15）+ 副文 11.5px（y+19.5..y+31）」这个整块，
+        // 所以中心取整块中部；取 y+15 时实测图标比文字块中心高 2.75px。
+        let icon_c = pos2(left + 16.0, y + 17.5);
         clip.circle_filled(icon_c, 16.0, theme.chip_bg);
         icons::draw(
             clip,
