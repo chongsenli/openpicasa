@@ -229,9 +229,14 @@ pub fn layout(rect: Rect, info_open: bool, compare: bool, dark: bool) -> StageLa
 // 左端留白给 macOS 红绿灯：原型（`js/app.js` / `css/app.css`，1280 逻辑宽）
 // `.traffic` 占 x=16..68，返回按钮从 x=94 起，水平上不与红绿灯重叠。
 // 旧值 10 让返回胶囊从 x=10 起，正好压在红绿灯上（用户实测反馈）。
-/// 顶栏纯图标（收藏心、定位图钉）相对按钮中心的**上移量**：
-/// Lucide 路径的视觉重心比汉字字面低，实测差 2.5px。
-const TOPBAR_ICON_LIFT: f32 = 2.5;
+/// 查看器顶栏整排内容（图标 / 汉字 / 数字 / 英文）的**统一纵向偏移**。
+/// 用户按截图要求「都往下挪动半格」，即再下移 2.5px。
+const TOPBAR_TEXT_DY: f32 = 2.5;
+
+/// 顶栏纯图标（收藏心、定位图钉）相对按钮中心的上移量。
+/// Lucide 路径的视觉重心比汉字字面低（实测差 2.5px），
+/// 但整排已由 [`TOPBAR_TEXT_DY`] 统一上移，这里归零。
+const TOPBAR_ICON_LIFT: f32 = 0.0;
 
 const TB_PAD: f32 = 94.0;
 const TB_BACK_W: f32 = 72.0;
@@ -1076,7 +1081,7 @@ fn draw_topbar(
         // 与 zoom_cell 的「适合/100%」同一套光学补偿，否则两个「适合」差 1px。
         pos2(
             readout.center().x,
-            readout.center().y - crate::theme::optical_shift(11.5) - 1.0,
+            readout.center().y + TOPBAR_TEXT_DY - crate::theme::optical_shift(11.5) - 1.0,
         ),
         Align2::CENTER_CENTER,
         zoom_label,
@@ -1122,7 +1127,7 @@ fn draw_topbar(
         painter.with_clip_rect(name_slot).text(
             pos2(
                 name_slot.right(),
-                top.center().y - crate::theme::optical_shift(12.0) - 1.2,
+                top.center().y + TOPBAR_TEXT_DY - crate::theme::optical_shift(12.0) - 1.2,
             ),
             Align2::RIGHT_CENTER,
             shown,
@@ -1227,7 +1232,7 @@ fn draw_back_pill(
     let icon_rect = Rect::from_center_size(
         pos2(
             rect.left() + 14.0,
-            rect.center().y - crate::theme::optical_shift(12.0),
+            rect.center().y + TOPBAR_TEXT_DY - crate::theme::optical_shift(12.0),
         ),
         vec2(12.0, 12.0),
     );
@@ -1236,7 +1241,7 @@ fn draw_back_pill(
         // 字形在行框内偏下，补偿后与胶囊中心齐平（实测 22.2 → 20）。
         pos2(
             rect.left() + 24.0,
-            rect.center().y - crate::theme::optical_shift(11.5),
+            rect.center().y + TOPBAR_TEXT_DY - crate::theme::optical_shift(11.5),
         ),
         Align2::LEFT_CENTER,
         "返回",
@@ -2429,7 +2434,7 @@ fn zoom_cell(
         // 「返回 / 比较 / 背景」低约 4px（字形在行框内偏下）。
         pos2(
             rect.center().x,
-            rect.center().y - crate::theme::optical_shift(11.5),
+            rect.center().y + TOPBAR_TEXT_DY - crate::theme::optical_shift(11.5),
         ),
         Align2::CENTER_CENTER,
         label,
@@ -2464,7 +2469,7 @@ fn text_button(
         // 字形在行框内偏下，补偿后与按钮中心齐平（实测 22.2 → 20）。
         pos2(
             rect.center().x,
-            rect.center().y - crate::theme::optical_shift(11.5),
+            rect.center().y + TOPBAR_TEXT_DY - crate::theme::optical_shift(11.5),
         ),
         Align2::CENTER_CENTER,
         label,
