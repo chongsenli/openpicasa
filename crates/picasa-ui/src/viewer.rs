@@ -1260,6 +1260,9 @@ fn reveal_label() -> &'static str {
     }
 }
 
+/// 说明条（照片正下方）的左右内缩：内容不再贴着窗口边缘。
+const CAPTION_PAD_X: f32 = 20.0;
+
 fn draw_caption(
     painter: &egui::Painter,
     lay: &StageLayout,
@@ -1286,7 +1289,7 @@ fn draw_caption(
     // V3：标题 + 日期 + 收藏/标签行，紧贴照片正下方。
     let title = display_title(row);
     painter.text(
-        pos2(caption.left() + 2.0, caption.top() + 8.0),
+        pos2(caption.left() + CAPTION_PAD_X, caption.top() + 8.0),
         Align2::LEFT_TOP,
         title,
         FontId::new(16.0, egui::FontFamily::Proportional),
@@ -1304,7 +1307,7 @@ fn draw_caption(
     }
     if !line2.is_empty() {
         painter.text(
-            pos2(caption.left() + 2.0, caption.top() + 30.0),
+            pos2(caption.left() + CAPTION_PAD_X, caption.top() + 30.0),
             Align2::LEFT_TOP,
             line2,
             FontId::new(11.5, egui::FontFamily::Proportional),
@@ -1316,7 +1319,7 @@ fn draw_caption(
     carve_star_and_tags(
         painter,
         Rect::from_min_max(
-            pos2(caption.left() + 2.0, caption.top() + 48.0),
+            pos2(caption.left() + CAPTION_PAD_X, caption.top() + 48.0),
             pos2(
                 caption.left() + caption.width() * 0.5,
                 caption.bottom() - 4.0,
@@ -1336,7 +1339,7 @@ fn draw_caption(
             pos2(caption.right(), caption.top() + 34.0),
         );
         painter.with_clip_rect(clip).text(
-            pos2(caption.right() - 2.0, caption.top() + 14.0),
+            pos2(caption.right() - CAPTION_PAD_X, caption.top() + 14.0),
             Align2::RIGHT_TOP,
             summary,
             FontId::new(11.0, egui::FontFamily::Proportional),
