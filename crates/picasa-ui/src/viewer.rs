@@ -47,9 +47,25 @@ use crate::icons::{self, Icon};
 use crate::theme::Theme;
 
 /// 顶栏高度（逻辑像素）。顶栏只有左端一枚「返回」胶囊（V1.4 单返回）。
-pub const TOP_H: f32 = 44.0;
-/// 底栏高度。
-pub const STATUS_H: f32 = 27.0;
+///
+/// 用户 2026-11-28：「上下都有一个面板，挡住了照片。把这两个面板的高度减到最小」
+/// → 44 → 32。顶栏里的按钮/图标**不是**再写死 `+10` 的，统一走
+/// [`topbar_ctrl_top`] 求竖直居中，改这个常量就整排跟着走。
+pub const TOP_H: f32 = 32.0;
+/// 底栏高度。同上，27 → 20（底栏只有一行 12px 文字，20 高仍留 4px 上下气口）。
+pub const STATUS_H: f32 = 20.0;
+
+/// 顶栏里一个 `h` 高的控件（返回胶囊 / 汉字按钮 / 图标钮 / 信息胶囊）的顶边。
+///
+/// 用「顶栏高度减去控件高度再除以 2」来居中，而不是写死 `+10.0`：
+/// 写死的下半格在 `TOP_H` 变化时会立刻变成贴顶或压底（用户 2026-11-28 压顶栏时
+/// 就踩过这个形状）。控件比顶栏还高时退化为贴顶（`max(0.0)`），不画到栏外。
+pub fn topbar_ctrl_top(top: Rect, h: f32) -> f32 {
+    top.top() + ((top.height() - h) / 2.0).max(0.0)
+}
+
+/// 顶栏标准控件高度（返回胶囊、汉字按钮、图标钮、信息胶囊共用）。
+const TB_CTRL_H: f32 = 24.0;
 /// 主图下方说明条高度（只读，不是编辑台）。V3：标题 + 日期 + 收藏/标签行。
 pub const CAPTION_H: f32 = 78.0;
 /// 胶片条高度。
@@ -279,7 +295,7 @@ pub fn zoom_track_rect(top: Rect) -> Rect {
         + TB_BG_W
         + TB_BG_GAP;
     Rect::from_min_size(
-        pos2(x, top.top() + 8.0),
+        pos2(x, topbar_ctrl_top(top, TB_TRACK_H)),
         vec2(
             TB_TRACK_PAD * 2.0
                 + TB_FIT_W
@@ -342,7 +358,7 @@ fn top_tail(top: Rect) -> (f32, f32, f32) {
 /// 顶栏「照片信息」开关的矩形：右对齐到顶栏最右侧（内缩 8px）。
 pub fn info_toggle_rect(top: Rect) -> Rect {
     let (_, _, chip_left) = top_tail(top);
-    Rect::from_min_size(pos2(chip_left, top.top() + 10.0), vec2(TB_CHIP_W, 24.0))
+    Rect::from_min_size(pos2(chip_left, topbar_ctrl_top(top, TB_CTRL_H)), vec2(TB_CHIP_W, TB_CTRL_H))
 }
 
 /// 顶栏文件名槽位（在缩放簇之后，最多 `TB_NAME_W` 宽；信息胶囊已右对齐到
@@ -921,7 +937,8 @@ fn draw_topbar(
 
     // V1.4：**单**返回胶囊，只有左端一枚；右侧不再重复。
     let mut x = top.left() + TB_PAD;
-    let left_back = Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(TB_BACK_W, 24.0));
+    let ctrl_y = topbar_ctrl_top(top, TB_CTRL_H);
+    let left_back = Rect::from_min_size(pos2(x, ctrl_y), vec2(TB_BACK_W, TB_CTRL_H));
     draw_back_pill(
         painter,
         ui,
@@ -995,7 +1012,7 @@ fn draw_topbar(
         painter,
         ui,
         ui.scope_id().with("viewer-compare"),
-        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(TB_COMPARE_W, 24.0)),
+        Rect::from_min_size(pos2(x, ctrl_y), vec2(TB_COMPARE_W, TB_CTRL_H)),
         "比较",
         viewer.compare,
         fg,
@@ -1010,7 +1027,7 @@ fn draw_topbar(
         painter,
         ui,
         ui.scope_id().with("viewer-bg"),
-        Rect::from_min_size(pos2(x, top.top() + 10.0), vec2(TB_BG_W, 24.0)),
+        Rect::from_min_size(pos2(x, ctrl_y), vec2(TB_BG_W, TB_CTRL_H)),
         "背景",
         false,
         fg,
@@ -2964,6 +2981,43 @@ mod tests {
         );
     }
 
+    /// 用户 2026-11-28：「把这两个面板的高度减到最小」——顶栏 44→32、底栏 27→20。
+    ///
+    /// 同时钉住「控件不越界」：顶栏整排按钮必须落在顶栏矩形内。之前每个控件都写死
+    /// `top.top() + 10.0`，压高度后会直接画到栏外（测试抓的就是这个形状）。
+    #[test]
+    fn viewer_chrome_bars_are_compressed_and_controls_stay_inside() {
+        assert_eq!(TOP_H, 32.0, "顶栏高度应为压过的最小值");
+        assert_eq!(STATUS_H, 20.0, "底栏高度应为压过的最小值");
+
+        // 顶栏比底栏高（上面有 24px 的按钮），但仍明显低于原来的 44。
+        assert!(TOP_H < 44.0 && STATUS_H < 27.0, "两条都比原来薄");
+
+        let lay = layout(stage_rect(), true, false, false);
+        assert_eq!(lay.top.height(), TOP_H);
+        assert_eq!(lay.status.height(), STATUS_H);
+        // 底栏只有一行 12px 文字，20 高仍留有上下气口。
+        assert!(STATUS_H >= STATUS_FONT_SIZE + 6.0, "底栏别压到文字贴边");
+
+        // 顶栏里所有可点控件的竖直范围都在栏内。
+        let back = Rect::from_min_size(
+            pos2(lay.top.left() + TB_PAD, topbar_ctrl_top(lay.top, TB_CTRL_H)),
+            vec2(TB_BACK_W, TB_CTRL_H),
+        );
+        let track = zoom_track_rect(lay.top);
+        let chip = info_toggle_rect(lay.top);
+        for (what, r) in [("返回", back), ("缩放簇", track), ("信息胶囊", chip)] {
+            assert!(
+                lay.top.contains_rect(r),
+                "{what} 越出顶栏：{r:?} 不在 {:?} 内",
+                lay.top
+            );
+        }
+        // 纵向居中而不是贴顶/压底。
+        let cy = topbar_ctrl_top(lay.top, TB_CTRL_H) + TB_CTRL_H / 2.0;
+        assert!((cy - lay.top.center().y).abs() < 0.01, "控件应竖直居中");
+    }
+
     /// 展厅底色必须是整块铺满的：信息栏不铺底板后，靠的就是 `show()` 那一层 `bg`。
     #[test]
     fn stage_background_covers_the_info_column() {
@@ -3337,9 +3391,9 @@ mod tests {
         let heart = Rect::from_min_size(
             pos2(
                 lay.top.left() + TB_PAD + TB_BACK_W + TB_BACK_GAP,
-                lay.top.top() + 10.0,
+                topbar_ctrl_top(lay.top, TB_CTRL_H),
             ),
-            vec2(TB_HEART_W, 24.0),
+            vec2(TB_HEART_W, TB_CTRL_H),
         );
         let reveal_w = TB_REVEAL_W;
         assert!(
@@ -4194,8 +4248,8 @@ mod tests {
         assert_eq!(backs, 1, "顶栏应只有一枚「返回」：{texts:?}");
         // 唯一那枚在左端；信息胶囊与缩放按钮都在它右侧，且互不重叠。
         let back = Rect::from_min_size(
-            pos2(lay.top.left() + TB_PAD, lay.top.top() + 10.0),
-            vec2(TB_BACK_W, 24.0),
+            pos2(lay.top.left() + TB_PAD, topbar_ctrl_top(lay.top, TB_CTRL_H)),
+            vec2(TB_BACK_W, TB_CTRL_H),
         );
         assert!(lay.top.contains_rect(back));
         assert!(back.left() < lay.top.center().x, "返回应在左端");
@@ -4219,8 +4273,8 @@ mod tests {
         const TRAFFIC_RIGHT: f32 = 70.0;
         let lay = layout(stage_rect(), true, false, false);
         let back = Rect::from_min_size(
-            pos2(lay.top.left() + TB_PAD, lay.top.top() + 10.0),
-            vec2(TB_BACK_W, 24.0),
+            pos2(lay.top.left() + TB_PAD, topbar_ctrl_top(lay.top, TB_CTRL_H)),
+            vec2(TB_BACK_W, TB_CTRL_H),
         );
         assert!(
             back.left() >= TRAFFIC_RIGHT,
