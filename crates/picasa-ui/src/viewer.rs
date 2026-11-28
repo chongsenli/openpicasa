@@ -1305,17 +1305,24 @@ fn reveal_label() -> &'static str {
 /// 说明条（照片正下方）的左右内缩：内容不再贴着窗口边缘。
 const CAPTION_PAD_X: f32 = 20.0;
 
+/// 说明条内容的顶部内缩。
+///
+/// 用户 2026-11-28：「压缩图片和图片名字之间的距离，压缩到十分之一」——原来标题
+/// 从 `caption.top() + 8` 起画，加上说明条上方的留白，照片到标题足有 30 多像素。
+/// 收到 1：字形的上升部自然占掉那一点点，照片下沿几乎贴住标题。
+const CAPTION_PAD_Y: f32 = 1.0;
+
 /// 照片下沿与说明条之间的窄缝。
 ///
-/// 用户 2026-11-28：「去掉照片与照片名字之间的这个距离」——原来是
-/// `CANVAS_BOTTOM_GAP + 2 × CANVAS_BOTTOM_STEP + 落影预留 = 2 + 4 + 16`，
-/// 照片下沿离标题文字有 52 逻辑像素。收到 1 之后整条落差约 6（含落影预留 4）。
-const CANVAS_BOTTOM_GAP: f32 = 1.0;
+/// 用户 2026-11-28：「去掉照片与照片名字之间的这个距离」→「压缩到十分之一」。
+/// 一路从 `2 + 2×8 + 18 + 16（落影）= 52` 收到 0：照片下沿与说明条严格贴合，
+/// 中间只剩落影自身那几像素（见 [`FIT_BOTTOM_ROOM`]）与标题行首的行高。
+const CANVAS_BOTTOM_GAP: f32 = 0.0;
 
 /// `canvas_outer → card → canvas` 每一层在底部再收的像素。
 ///
-/// 顶部是 0（照片直接顶着顶栏），底部只留落影需要的几像素，不再一层层叠 8/18。
-const CANVAS_BOTTOM_STEP: f32 = 1.0;
+/// 顶部与底部都是 0：照片一条边顶栏、一条边贴说明条，不再层层叠留白。
+const CANVAS_BOTTOM_STEP: f32 = 0.0;
 
 fn draw_caption(
     painter: &egui::Painter,
@@ -1343,7 +1350,7 @@ fn draw_caption(
     // V3：标题 + 日期 + 收藏/标签行，紧贴照片正下方。
     let title = display_title(row);
     painter.text(
-        pos2(caption.left() + CAPTION_PAD_X, caption.top() + 8.0),
+        pos2(caption.left() + CAPTION_PAD_X, caption.top() + CAPTION_PAD_Y),
         Align2::LEFT_TOP,
         title,
         FontId::new(16.0, egui::FontFamily::Proportional),
@@ -1361,7 +1368,10 @@ fn draw_caption(
     }
     if !line2.is_empty() {
         painter.text(
-            pos2(caption.left() + CAPTION_PAD_X, caption.top() + 30.0),
+            pos2(
+                caption.left() + CAPTION_PAD_X,
+                caption.top() + CAPTION_PAD_Y + 22.0,
+            ),
             Align2::LEFT_TOP,
             line2,
             FontId::new(11.5, egui::FontFamily::Proportional),
@@ -1373,7 +1383,10 @@ fn draw_caption(
     carve_star_and_tags(
         painter,
         Rect::from_min_max(
-            pos2(caption.left() + CAPTION_PAD_X, caption.top() + 48.0),
+            pos2(
+                caption.left() + CAPTION_PAD_X,
+                caption.top() + CAPTION_PAD_Y + 40.0,
+            ),
             pos2(
                 caption.left() + caption.width() * 0.5,
                 caption.bottom() - 4.0,
@@ -1393,7 +1406,10 @@ fn draw_caption(
             pos2(caption.right(), caption.top() + 34.0),
         );
         painter.with_clip_rect(clip).text(
-            pos2(caption.right() - CAPTION_PAD_X, caption.top() + 14.0),
+            pos2(
+                caption.right() - CAPTION_PAD_X,
+                caption.top() + CAPTION_PAD_Y + 6.0,
+            ),
             Align2::RIGHT_TOP,
             summary,
             FontId::new(11.0, egui::FontFamily::Proportional),
@@ -2597,8 +2613,12 @@ pub fn fit_pane(pane: Rect, theme: &Theme) -> Rect {
     )
 }
 
-/// 「适合」时照片下沿与可用区底边之间的距离（落影向下投，不需要整份 `shadow_room`）。
-pub const FIT_BOTTOM_ROOM: f32 = 4.0;
+/// 「适合」时照片下沿与可用区底边之间的距离。
+///
+/// 落影向下投，但主图是按 `pane` 裁切绘制的，影子本来也画不到说明条里去；这里
+/// 只需要 1 像素当做抗锯齿缝，照片下沿就贴着标题行。用户要的是「压到十分之一」，
+/// 任何超过两三像素的预留都会在灰底上重新变成一条空带。
+pub const FIT_BOTTOM_ROOM: f32 = 1.0;
 
 /// 「适合」的实际缩放：先把窗格按 [`fit_pane`] 收一圈，再等比放入照片。
 ///
@@ -3103,8 +3123,8 @@ mod tests {
                 "右侧留白同样保留"
             );
             assert!(
-                lay.canvas.bottom() < lay.caption.top(),
-                "底部仍要给落影/说明条留出空隙"
+                lay.canvas.bottom() <= lay.caption.top() + 0.01,
+                "照片下沿要贴住说明条（不能再留空带）"
             );
         }
     }
@@ -3142,6 +3162,15 @@ mod tests {
         );
         // 纵向顺序（§4.5）：canvas → caption → filmstrip → status
         assert!(lay.canvas.bottom() <= lay.caption.top() + 0.5);
+        assert!(
+            lay.caption.top() - lay.canvas.bottom() < 1.0,
+            "照片下沿到说明条之间不再留空带：{}",
+            lay.caption.top() - lay.canvas.bottom()
+        );
+        assert!(
+            CAPTION_PAD_Y <= 1.0 && FIT_BOTTOM_ROOM <= 1.0,
+            "照片到标题的纵向预留合计要压到 2 像素以内"
+        );
         assert!(lay.caption.bottom() <= lay.filmstrip.top() + 0.5);
         assert!(lay.filmstrip.bottom() <= lay.status.top() + 0.5);
         // 关闭信息栏时没有右栏
