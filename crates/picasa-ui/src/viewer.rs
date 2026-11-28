@@ -1644,23 +1644,23 @@ fn draw_info_panel(
     row: &PhotoRow,
     id: egui::Id,
 ) -> bool {
-    // 面板底：卡片浮在展厅底色上，四周留白（原型里圆角卡片不贴边）。
-    let page = if theme.dark {
-        theme.viewer_bg
-    } else {
-        theme.viewer_chrome_bg
-    };
-    painter.rect_filled(panel, 0.0, page);
-    painter.line_segment(
-        [panel.left_top(), panel.left_bottom()],
-        Stroke::new(1.0, theme.separator),
-    );
+    // 面板**不再铺自己的底板**：旧实现在整条信息栏上填了一层 `viewer_chrome_bg`
+    // （亮色 #F7F7F8），再在上面放白色卡片，实机上就是「白卡片 / 浅灰底板 / 更深的
+    // 展厅底色」三层，信息栏那一条从展厅里凸出来，和照片的呈现方式不一致
+    // （用户 2026-11-28：「去掉这个面板后面的面板，和照片的面板保持一致」）。
+    //
+    // 照片是直接落在展厅底色上 + 一层柔和落影、没有外框底板；信息栏现在照此办理：
+    // 不画 page 底、不画左侧分隔线，卡片直接吃展厅底色（`show()` 已经把整块
+    // `full` 铺成 `bg`，这里留空即透出同一块底色），并把照片那套落影给卡片。
 
     // 卡片与面板边缘的距离：亮色原型 `aside.info-panel` 328 宽、`.pc` 从 +8 起；
     // 暗色面板 316 宽、`.pc` 从 +6 起。
     let inset = if theme.dark { 6.0 } else { 8.0 };
     let card = panel.shrink2(vec2(inset, inset));
     let radius = info_card_radius(theme);
+    // 与照片同一套落影：偏移向下、柔和模糊，因此卡片像照片一样「浮」在展厅上，
+    // 而不是压在另一块面板上。
+    painter.add(photo_shadow(theme).as_shape(card, radius));
     painter.rect_filled(card, radius, theme.viewer_card);
     painter.rect_stroke(
         card,
@@ -2919,6 +2919,62 @@ mod tests {
             "直方图不该再画 1px 描边（灰框的边）"
         );
         assert!(body.contains("Mesh"), "彩色柱还得画");
+    }
+
+    /// 用户 2026-11-28：「去掉这个面板后面的面板，和照片的面板保持一致吧」。
+    ///
+    /// 信息栏原来整条铺一层 `viewer_chrome_bg`（亮色 #F7F7F8）当底板，白色卡片再浮在
+    /// 上面，于是信息栏那一条比展厅底色更浅、边缘还有一条 separator 竖线，看起来像
+    /// 「卡片底下还有一块面板」。照片是直接落在展厅底色 + 柔和落影上的，信息栏要与之一致：
+    /// **不铺底板、不画分隔线，卡片自己带落影**。
+    #[test]
+    fn info_panel_has_no_backdrop_of_its_own() {
+        let src = include_str!("viewer.rs");
+        let start = src.find("fn draw_info_panel(").expect("信息栏绘制函数");
+        let end = src[start..].find("fn exposure_cell_rects(").expect("下一个函数") + start;
+        // 注释里会引用旧实现用的颜色名作为历史说明，只检查代码行。
+        let code: String = src[start..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = &code;
+        // 不许再把整条 panel 填成 chrome 底色（那就是「后面的面板」）。
+        assert!(
+            !body.contains("rect_filled(panel"),
+            "信息栏不该再铺自己的底板：{body}"
+        );
+        assert!(
+            !body.contains("viewer_chrome_bg"),
+            "信息栏底色要与展厅一致，不能另取 chrome 底"
+        );
+        // 也不该再画左边缘那条分隔线。
+        assert!(
+            !body.contains("panel.left_top()"),
+            "信息栏不该再画自己的左分隔线"
+        );
+        // 卡片要像照片一样带落影。
+        assert!(
+            body.contains("photo_shadow(theme)"),
+            "卡片应与照片共用同一套落影"
+        );
+        assert!(
+            body.contains("rect_filled(card, radius, theme.viewer_card)"),
+            "白色卡片本身还要画"
+        );
+    }
+
+    /// 展厅底色必须是整块铺满的：信息栏不铺底板后，靠的就是 `show()` 那一层 `bg`。
+    #[test]
+    fn stage_background_covers_the_info_column() {
+        let src = include_str!("viewer.rs");
+        let start = src.find("pub fn show(").expect("show");
+        let end = src[start..].find("let Some(row)").expect("取行") + start;
+        let body = &src[start..end];
+        assert!(
+            body.contains("painter.rect_filled(rect, 0.0, bg)"),
+            "整块展厅（含信息栏那一列）要先铺满底色，信息栏才敢不铺底板"
+        );
     }
 
     #[test]
