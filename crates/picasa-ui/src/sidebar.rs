@@ -914,6 +914,12 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
         View::Folder(id) => Some(id),
         _ => None,
     };
+    let t_dark = ctx.theme.dark;
+    let row_h = Metrics::sidebar_row_h(t_dark);
+    // M5.1：文件夹是最后一组，把「画完它之后还剩多少」全给它（`TREE_MIN_ROWS` 保底），
+    // 只是要给「导入的索引」留出它必须占的高度。折叠掉上面三组 → 整栏都归文件夹树。
+    let reserved_below = imported_reserved_below(ui.available_height(), lib, ctx, row_h);
+    let budget = folder_tree_budget(ui.available_height(), reserved_below, row_h);
     render_tree_rows(
         ui,
         rows,
@@ -921,7 +927,10 @@ fn folder_tree(ui: &mut Ui, lib: &Library, ctx: &SidebarCtx<'_>, actions: &mut V
         &MarkSet::default(),
         ctx,
         actions,
-        "folder-tree",
+        TreeSlot {
+            salt: "folder-tree",
+            max_h: budget,
+        },
     );
 }
 
@@ -1021,17 +1030,98 @@ fn imported_index(
             local_dupes: &g.local_dupes,
         };
         if !rows.is_empty() {
-            render_tree_rows(ui, rows, active, &marks, ctx, actions, "imported-tree");
+            // 「导入的索引」在自己的组内滚动：给它的预算同样按当前剩余高度算，
+            // 但不抢「文件夹」树——它是最后一组，能吃完剩下的全部高度。
+            let budget = folder_tree_budget(ui.available_height(), 0.0, row_h);
+            render_tree_rows(
+                ui,
+                rows,
+                active,
+                &marks,
+                ctx,
+                actions,
+                TreeSlot {
+                    salt: "imported-tree",
+                    max_h: budget,
+                },
+            );
         }
     }
 }
 
-/// 树区最大高度：**必须给上界**，否则 `ScrollArea::auto_shrink([false, false])`
-/// 会吃掉侧栏剩余高度，把它之后的「导入的索引 / 标签 / 相册」整组挤到面板外
-/// （`IDX-22` ① 要求左栏顺序「图库→文件夹→导入的索引→标签→相册」，四组都得看得见）。
+/// 树区的最小高度（3 行）：再挤也要让人看出「这里是一棵树」。
 ///
-/// 260 px ≈ 10 行目录；再多的目录在框内滚动，其余分组始终留在视野里。
-const TREE_MAX_H: f32 = 260.0;
+/// 为什么不再有固定的 `TREE_MAX_H = 260`：那是 M5 固定顺序（图库→文件夹→导入的索引
+/// →标签→相册）时代的上界，目的是不让树把后面的组挤出面板。M5.1 的顺序已固定为
+/// 图库→标签→相册→文件夹（+ 导入的索引），文件夹是**最后一组**，再写死 260 的后果是
+/// 上面三组折叠后腾出的高度没人接管，文件夹列表只画到 260px、下面留一大片空白
+/// （用户 2026-11-28 反馈：「折叠后文件夹列表只显示一部分，没有一直显示到整个 sidebar」）。
+///
+/// 现在的口径是**动态预算**：树高 = 侧栏当前剩余高度 − 之后分组（导入的索引）
+/// 必须保留的高度，见 [`folder_tree_budget`]。
+const TREE_MIN_ROWS: f32 = 3.0;
+
+/// 分给文件夹树的高度预算。
+///
+/// `available`：此刻侧栏还剩多少高度（底部托盘已先占位，图库/标签/相册已画完）。
+/// `reserved_below`：「文件夹」之后的分组（「导入的索引」）至少要保留的高度。
+/// `row_h`：当前主题的行高。
+///
+/// 语义是「把剩下来的高度全给树」——这正是用户要的「一直显示到整个 sidebar」；
+/// 同时**保底** 3 行，窄窗/多分组叠加时也不会退回成一条缝或负数。
+fn folder_tree_budget(available: f32, reserved_below: f32, row_h: f32) -> f32 {
+    let floor = row_h * TREE_MIN_ROWS;
+    if !available.is_finite() {
+        return floor;
+    }
+    let rest = available - if reserved_below.is_finite() {
+        reserved_below.max(0.0)
+    } else {
+        0.0
+    };
+    rest.max(floor)
+}
+
+/// 「导入的索引」分组要预留的高度（`文件夹` 树据此让位）。
+///
+/// * 没有导入来源 → 0（文件夹树直接吃满剩余高度）。
+/// * 该组折叠 → 只有组头的 8px 间隔 + 组高。
+/// * 展开 → 组头 + 该组树的一份**公平份额**：最多拿可用高度的 45%，
+///   并且不超过它自己的内容高度。不让它按内容全量预留，否则来源一多，
+///   文件夹树又会被挤成 3 行——那正是这次要修的病症换了个方向。
+fn imported_reserved_below(
+    available: f32,
+    lib: &Library,
+    ctx: &SidebarCtx<'_>,
+    row_h: f32,
+) -> f32 {
+    if ctx.import_groups.is_empty() {
+        return 0.0;
+    }
+    let t = *ctx.theme;
+    let head = 8.0 + Metrics::sidebar_section_h(t.dark);
+    if ctx.imported_collapsed {
+        return head;
+    }
+    let mut need = 0.0_f32;
+    for g in ctx.import_groups {
+        need += row_h; // 来源节点那一行
+        if let Some(rows) = lib.imported_visible_folders.get(&g.source_id) {
+            need += rows.len() as f32 * row_h;
+        }
+    }
+    let share_cap = (available * 0.45).max(row_h * TREE_MIN_ROWS);
+    head + need.min(share_cap)
+}
+
+/// 一棵树的绘制位：滚动区的盐 + 高度预算。
+///
+/// 合成一个参数而不是两个散参：`render_tree_rows` 已经 6 个参数，再散加就破
+/// `clippy::too_many_arguments` 的 7 个上限了。
+struct TreeSlot<'a> {
+    salt: &'a str,
+    max_h: f32,
+}
 
 /// 一组文件夹行（本机树 / 导入来源树共用同一套绘制与交互，IDX-21 ②）。
 ///
@@ -1044,18 +1134,18 @@ fn render_tree_rows(
     marks: &MarkSet<'_>,
     ctx: &SidebarCtx<'_>,
     actions: &mut Vec<SidebarAction>,
-    salt: &str,
+    slot: TreeSlot<'_>,
 ) {
     let t = *ctx.theme;
     let row_h = Metrics::sidebar_row_h(t.dark);
     let total = rows.len();
 
     // 目录多时虚拟化（1 万目录也不卡）。
-    // 高度封顶：`auto_shrink([false, false])` 会撑满可用高度，把它之后的
-    // 「导入的索引 / 标签 / 相册」挤出面板（见 `TREE_MAX_H` 注释）。
+    // 高度 = 调用方按「剩余高度」算好的预算（M5.1：文件夹是最后一组，吃满整栏），
+    // 超出预算的目录在框内滚动。
     egui::ScrollArea::vertical()
-        .id_salt(salt)
-        .max_height(TREE_MAX_H)
+        .id_salt(slot.salt)
+        .max_height(slot.max_h)
         .auto_shrink([false, false])
         .show_rows(ui, row_h, total, |ui, range| {
             for i in range {
@@ -1677,5 +1767,101 @@ mod imported_index_tests {
         // 名字与时间都要能参与 `format!` 渲染，不能是占位 None。
         assert_eq!(g.name, "");
         assert_eq!(g.when, "");
+    }
+}
+
+#[cfg(test)]
+mod m51_folder_tree_height_tests {
+    use super::*;
+
+    /// M5.1 用户反馈：「图库/标签/相册折叠后，文件夹列表只显示一部分，
+    /// 没有一直显示到整个 sidebar」。
+    ///
+    /// 旧实现是 `max_height(260.0)`，折叠后腾出的高度没人接管。现在的口径是
+    /// 「剩余高度全给文件夹树」——`folder_tree_budget` 必须随可用高度**线性增长**，
+    /// 且不再有 260 这个天花板。
+    #[test]
+    fn folder_tree_uses_the_whole_remaining_height() {
+        let row_h = Metrics::sidebar_row_h(false); // 30
+        // 上面三组折叠、又没有导入来源：整栏都归文件夹树。
+        for avail in [200.0_f32, 400.0, 600.0, 900.0] {
+            let h = folder_tree_budget(avail, 0.0, row_h);
+            assert!(
+                (h - avail).abs() < 0.01,
+                "可用 {avail} 时应把剩余高度全给树，实际 {h}"
+            );
+            assert!(h > 260.0 || avail <= 260.0, "不再受 260 封顶：{avail} → {h}");
+        }
+        // 窗口够高时高度必须超过旧的 260 上限（这正是本次修复的回归点）。
+        assert!(folder_tree_budget(800.0, 0.0, row_h) > 260.0);
+    }
+
+    /// 有「导入的索引」在下面时，只让出它必须占的高度，其余仍归文件夹树。
+    #[test]
+    fn folder_tree_only_yields_what_the_imported_group_needs() {
+        let row_h = Metrics::sidebar_row_h(false);
+        let avail = 700.0_f32;
+        let reserved = 120.0_f32;
+        let h = folder_tree_budget(avail, reserved, row_h);
+        assert!((h - (avail - reserved)).abs() < 0.01, "剩余 {h}");
+        // 让出之后仍远大于旧上限，说明没有退回 260。
+        assert!(h > 260.0);
+    }
+
+    /// 极端输入不产生负数 / NaN：窄窗、超多分组叠加时会低于保底，此时给 3 行。
+    #[test]
+    fn folder_tree_budget_never_collapses_to_a_sliver() {
+        let row_h = Metrics::sidebar_row_h(true); // 28
+        let floor = row_h * TREE_MIN_ROWS;
+        assert_eq!(folder_tree_budget(10.0, 0.0, row_h), floor);
+        assert_eq!(folder_tree_budget(0.0, 0.0, row_h), floor);
+        assert_eq!(folder_tree_budget(-50.0, 0.0, row_h), floor);
+        assert_eq!(folder_tree_budget(100.0, 500.0, row_h), floor);
+        // 退化输入不得产生 NaN / 负数。
+        assert_eq!(folder_tree_budget(f32::NAN, 0.0, row_h), floor);
+        let h = folder_tree_budget(100.0, f32::NAN, row_h);
+        assert!(h.is_finite() && h >= floor, "{h}");
+        // 负的预留高度按 0 处理（调用方算错也不会把树挤没）。
+        assert!((folder_tree_budget(400.0, -100.0, row_h) - 400.0).abs() < 0.01);
+    }
+
+    /// 绘制点必须走动态预算：源码里不许再出现写死的 `TREE_MAX_H`。
+    /// 这是源码锁——纯函数测对了、绘制点却仍调 `.max_height(260.0)` 的话，
+    /// 用户看到的还是老样子。
+    #[test]
+    fn render_path_passes_the_computed_budget_not_a_constant() {
+        let src = include_str!("sidebar.rs");
+        let prod = match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        };
+        // 注释里会提到「不再有固定的 260 上限」这个历史结论，那不算绘制点；
+        // 只检查真正的代码行。
+        let code: String = prod
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("TREE_MAX_H"),
+            "写死的高度上限已删除，绘制点改用 `folder_tree_budget`"
+        );
+        // 两处绘制点（本机树 / 导入来源树）都必须传预算参数。
+        assert!(
+            code.matches("folder_tree_budget(").count() >= 2,
+            "本机树与导入来源树都要按剩余高度算预算"
+        );
+        assert!(
+            code.contains("folder_tree_budget(ui.available_height()"),
+            "文件夹树按 `ui.available_height()` 现算高度"
+        );
+        // ScrollArea 的高度来自入参，不再来自常量。
+        assert!(
+            code.contains(".max_height(slot.max_h)"),
+            "`render_tree_rows` 的高度必须由调用方传入"
+        );
     }
 }
