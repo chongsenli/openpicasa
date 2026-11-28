@@ -203,12 +203,34 @@ pub fn layout(rect: Rect, info_open: bool, compare: bool, dark: bool) -> StageLa
         vec2(stage.width(), caption_h),
     );
     // V1：照片放在圆角卡片上，卡片四周留白（亮色展厅不能把图贴到浅灰底上）。
+    //
+    // 用户 2026-11-28：「去掉照片和 topbar 之间的这个面板」——原来顶部纵向留白是
+    // `6（canvas_outer）+ 8（card）+ 18（canvas）= 32` 逻辑像素，照片上沿被一条固定
+    // 宽度的展厅底色横带推开，在灰色背景上就是一块「面板」。顶部改为 0：照片上沿直接
+    // 对着顶栏。左右留白保持不变，照片不贴边、圆角与落影才有地方落脚。
+    //
+    // 同一句里还有「去掉照片与照片名字之间的这个距离」：底部原来是
+    // `2（canvas_outer）+ 8（card）+ 18（canvas）= 28`，再加上 `fit_pane` 在底部给
+    // 落影预留的 16，照片下沿离标题文字足足 52 逻辑像素，看着像多了一整条空白。
+    // 落影是 `offset: [0, 4]` 加 `blur: 6`，向下 10 就够，不需要 44。
     let canvas_outer = Rect::from_min_max(
-        pos2(stage.left() + 8.0, stage.top() + 6.0),
-        pos2(stage.right() - 8.0, caption.top() - 2.0),
+        pos2(stage.left() + 8.0, stage.top()),
+        pos2(stage.right() - 8.0, caption.top() - CANVAS_BOTTOM_GAP),
     );
-    let card = canvas_outer.shrink2(vec2(10.0, 8.0));
-    let canvas = card.shrink(18.0);
+    let card = Rect::from_min_max(
+        pos2(canvas_outer.left() + 10.0, canvas_outer.top()),
+        pos2(
+            canvas_outer.right() - 10.0,
+            canvas_outer.bottom() - CANVAS_BOTTOM_STEP,
+        ),
+    );
+    let canvas = Rect::from_min_max(
+        pos2(card.left() + 18.0, card.top()),
+        pos2(
+            card.right() - 18.0,
+            card.bottom() - CANVAS_BOTTOM_STEP,
+        ),
+    );
     let main_pane = if compare {
         Rect::from_min_max(canvas.min, pos2(canvas.center().x - 4.0, canvas.bottom()))
     } else {
@@ -719,14 +741,17 @@ pub fn show(
 
     let size = vec2(iw * viewer.zoom, ih * viewer.zoom);
     let pane = lay.main_pane;
-    let mut center = pane.center() + viewer.pan;
+    // 「适合」把照片放在 `fit_pane` 里（顶端不缩进），居中也要按同一个矩形算，
+    // 否则照片会在顶栏下留一条空白。
+    let fit_area = fit_pane(pane, theme);
+    let mut center = fit_area.center() + viewer.pan;
     // 图片比视口小就居中（不让人把它拖出屏幕）
-    if size.x <= pane.width() {
-        center.x = pane.center().x;
+    if size.x <= fit_area.width() {
+        center.x = fit_area.center().x;
         viewer.pan.x = 0.0;
     }
-    if size.y <= pane.height() {
-        center.y = pane.center().y;
+    if size.y <= fit_area.height() {
+        center.y = fit_area.center().y;
         viewer.pan.y = 0.0;
     }
     let img_rect = Rect::from_center_size(center, size);
@@ -1279,6 +1304,18 @@ fn reveal_label() -> &'static str {
 
 /// 说明条（照片正下方）的左右内缩：内容不再贴着窗口边缘。
 const CAPTION_PAD_X: f32 = 20.0;
+
+/// 照片下沿与说明条之间的窄缝。
+///
+/// 用户 2026-11-28：「去掉照片与照片名字之间的这个距离」——原来是
+/// `CANVAS_BOTTOM_GAP + 2 × CANVAS_BOTTOM_STEP + 落影预留 = 2 + 4 + 16`，
+/// 照片下沿离标题文字有 52 逻辑像素。收到 1 之后整条落差约 6（含落影预留 4）。
+const CANVAS_BOTTOM_GAP: f32 = 1.0;
+
+/// `canvas_outer → card → canvas` 每一层在底部再收的像素。
+///
+/// 顶部是 0（照片直接顶着顶栏），底部只留落影需要的几像素，不再一层层叠 8/18。
+const CANVAS_BOTTOM_STEP: f32 = 1.0;
 
 fn draw_caption(
     painter: &egui::Painter,
@@ -2544,11 +2581,30 @@ pub fn shadow_room(theme: &Theme) -> f32 {
     if theme.dark { 12.0 } else { 16.0 }
 }
 
-/// 「适合」的实际缩放：先把窗格按 [`shadow_room`] 收一圈，再等比放入照片。
+/// 照片真正可用的画布：**顶端不缩进**。
+///
+/// 落影是 `offset: [0, 4]` 向下投的，上方根本不会露出来，给它留空间只会把照片从顶栏
+/// 下沿往下推一段——用户 2026-11-28 报的「照片和 topbar 之间有一条面板」正是这 16 逻辑
+/// 像素。左右与下边仍按 [`shadow_room`] 收，横图贴宽时左右留白、竖图贴高时底部留白。
+pub fn fit_pane(pane: Rect, theme: &Theme) -> Rect {
+    let r = shadow_room(theme);
+    // 底部只给「向下投的落影」留一点点（offset 4 + blur 6 的一半），不再按 `r` 全留：
+    // 那会把照片从说明条上方推上去一大截（用户 2026-11-28 报的第二处空白）。
+    let bottom = FIT_BOTTOM_ROOM.min(r).max(0.0);
+    Rect::from_min_max(
+        pos2(pane.left() + r, pane.top()),
+        pos2(pane.right() - r, (pane.bottom() - bottom).max(pane.top())),
+    )
+}
+
+/// 「适合」时照片下沿与可用区底边之间的距离（落影向下投，不需要整份 `shadow_room`）。
+pub const FIT_BOTTOM_ROOM: f32 = 4.0;
+
+/// 「适合」的实际缩放：先把窗格按 [`fit_pane`] 收一圈，再等比放入照片。
 ///
 /// 代码与测试都走这一个入口，避免「提前留了落影空间」这件事在两边漂移。
 pub fn fit_zoom(pane: Rect, iw: f32, ih: f32, theme: &Theme) -> f32 {
-    fit_scale(pane.shrink(shadow_room(theme)).size(), iw, ih)
+    fit_scale(fit_pane(pane, theme).size(), iw, ih)
 }
 
 /// 信息胶囊「照片信息」的字号：原型 `.info-toggle` 12.5px（此前 11.5 偏小一圈）。
@@ -3016,6 +3072,41 @@ mod tests {
         // 纵向居中而不是贴顶/压底。
         let cy = topbar_ctrl_top(lay.top, TB_CTRL_H) + TB_CTRL_H / 2.0;
         assert!((cy - lay.top.center().y).abs() < 0.01, "控件应竖直居中");
+    }
+
+    /// 用户 2026-11-28：「去掉照片和 topbar 之间的这个面板」。
+    ///
+    /// 照片上沿与顶栏之间原来固定 32 逻辑像素（6 + 8 + 18），在灰/浅色展厅底色上就是
+    /// 一条横带。顶部内缩归零后 `canvas` 上沿应与 `stage` 上沿（= 顶栏下沿）齐平；
+    /// 左右留白**必须保留**——照片贴到窗口边缘会让圆角与落影无处落脚。
+    #[test]
+    fn canvas_has_no_gap_below_the_topbar() {
+        for info_open in [false, true] {
+            let lay = layout(stage_rect(), info_open, false, false);
+            assert!(
+                (lay.canvas.top() - lay.stage.top()).abs() < 0.01,
+                "照片检查区不该在顶栏下留横带：canvas.top={} stage.top={}",
+                lay.canvas.top(),
+                lay.stage.top()
+            );
+            assert!(
+                (lay.card.top() - lay.stage.top()).abs() < 0.01,
+                "卡片上沿也不该再缩进"
+            );
+            assert!(
+                lay.canvas.left() - lay.stage.left() >= 30.0,
+                "左右留白要保留（照片不贴边）：{}",
+                lay.canvas.left() - lay.stage.left()
+            );
+            assert!(
+                lay.stage.right() - lay.canvas.right() >= 30.0,
+                "右侧留白同样保留"
+            );
+            assert!(
+                lay.canvas.bottom() < lay.caption.top(),
+                "底部仍要给落影/说明条留出空隙"
+            );
+        }
     }
 
     /// 展厅底色必须是整块铺满的：信息栏不铺底板后，靠的就是 `show()` 那一层 `bg`。
@@ -4349,3 +4440,4 @@ mod tests {
         assert_eq!(v.index, 1);
     }
 }
+
